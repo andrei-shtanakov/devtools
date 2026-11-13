@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from governance import run_state as rs
+from lite import stop_findings as sf
 from lite.output import split_refusal
 
 RunsSnapshot = dict[str, float]
@@ -146,7 +147,8 @@ def cause_from(
     refusals: tuple[type[BaseException], ...] = (),
 ) -> str:
     """Причина: отказ → блок отказа в выводе → `stop-reason.txt` (или
-    `interview.stop_reason` в run.json) → исключение → последняя строка
+    `interview.stop_reason` в run.json, или сводка находок проверки) →
+    исключение → последняя строка
     вывода, кроме подсказок dfl.
 
     Блок отказа в выводе — для отказов, которые печатает сама подкоманда
@@ -159,7 +161,7 @@ def cause_from(
         return printed
     for run_id in run_ids:
         reason = _first_line(rs.run_dir(run_id) / "stop-reason.txt")
-        reason = reason or _interview_stop(run_id)
+        reason = reason or _interview_stop(run_id) or _findings_stop(run_id)
         if reason:
             return reason
     if exc is not None:
@@ -184,6 +186,18 @@ def _interview_stop(run_id: str) -> str:
         return ""
     lines = reason.strip().splitlines()
     return lines[0].strip() if lines else ""
+
+
+def _findings_stop(run_id: str) -> str:
+    """Сводка находок проверки, на которой прогон СЕЙЧАС стоит (стоп
+    edge-check и гейта `stop-reason.txt` не пишет, devtools#757)."""
+    try:
+        raw = json.loads((rs.run_dir(run_id) / "run.json").read_text("utf-8"))
+        status = str(raw.get("status") or "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    found = sf.lines(run_id, status)
+    return sf.summary(found, status) if found else ""
 
 
 def _printed_cause(tail: list[str]) -> str:

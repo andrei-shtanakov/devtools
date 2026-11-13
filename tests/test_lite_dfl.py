@@ -1601,6 +1601,36 @@ def test_stopped_run_prints_cause_and_log_hint(env: Env, monkeypatch, capfd) -> 
     assert (out + err).count(dfl.LOG_HINT) == 1
 
 
+def test_edge_stop_prints_findings_and_what_to_edit(
+    env: Env, monkeypatch, capfd
+) -> None:
+    """devtools#757: стоп edge-check — сводка причиной, находки и что править
+    на экране, а не «шаг завершился с кодом 1»."""
+    _bind_streams(monkeypatch)
+    finding = (
+        "error EDGE-CHECK(requirements/requirements-vs-charter): R1 major: "
+        "Цель G-03 не покрыта @ 10-requirements.md:[410, 439]"
+    )
+
+    def spec_main(argv: list[str]) -> int:
+        _run("WS-1-a", "WS-1", "customer", "stopped_review")
+        (rs.run_dir("WS-1-a") / "edge-findings.txt").write_text(
+            finding + "\n", encoding="utf-8"
+        )
+        return 1
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    assert env.run("run", "--subject", "t") == 1
+    out, _ = _read(capfd)
+    assert (
+        "прогон WS-1-a остановлен: смысловая проверка узлов нашла замечаний: 1 "
+        "(major 1)\n" in out
+    )
+    assert "  - R1 major (10-requirements.md:[410, 439]): Цель G-03" in out
+    assert "дальше: поправьте workstreams/WS-1/spec/10-requirements.md в /t" in out
+    assert "шаг завершился с кодом" not in out
+
+
 def test_stopped_run_nonzero_code_one_log_hint(env: Env, monkeypatch, capfd) -> None:
     _bind_streams(monkeypatch)
 

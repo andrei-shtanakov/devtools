@@ -38,6 +38,7 @@ from lite import failure_log as fl
 from lite import interview_chat as ic
 from lite import interview_view as iview
 from lite import runlog
+from lite import stop_findings as sf
 from lite import structure as st
 from lite.init_repo import DEVTOOLS, InitError, init_repo, real_gh
 from lite.interview_state import InterviewStateError, load_session
@@ -690,6 +691,8 @@ def _report_step(
     состояние, следующий шаг (на уровне 0, если он — действие человека)."""
     if line is not None:
         say(line)
+    for found in sf.lines(state.run_id, state.status):
+        say(f"  - {sf.readable(found)}")
     unread = state.status == WAITING and not chatting and not _say_question(state)
     stopped = state.status.startswith("stopped_")
     if (stopped or unread) and code == 0 and _LOG is not None:
@@ -710,6 +713,7 @@ def _awaits_human(state: rs.RunState) -> bool:
         _accepted_url(state) is not None
         or chain_open(state.mode, _frame(state), state.status, state.ops)
         or state.status in HUMAN_STEP_STATUSES
+        or bool(sf.lines(state.run_id, state.status))  # правка узла (#757)
     )
 
 
@@ -1010,6 +1014,9 @@ def _next_hint(state: rs.RunState, runs: list[rs.RunState]) -> str | None:
     if state.status == "waiting_human_merge":
         what = f"https://github.com/{state.repo_slug}/pull/{state.pr}"
         return f"смержите {what if state.pr else 'PR прогона'}, затем dfl run"
+    found = sf.lines(state.run_id, state.status)
+    if found:
+        return f"{sf.edit_hint(state, found)} (или {ABANDON_HINT})"
     if state.status.startswith("stopped_"):
         return f"разберите причину выше и dfl run (или {ABANDON_HINT})"
     return None
