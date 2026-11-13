@@ -114,3 +114,10 @@ def test_doc_quotes_output_levels_lines() -> None:
     assert dfl.REPORT_HINT in text
     assert "режим test: ослаблено " in text
     assert f"{len(df_config.TEST_RELAXATIONS)} проверок — список: dfl status -v" in text
+    assert "бриф ждёт вашего мержа: " in text
+    assert "после мержа снова dfl run" in text
+    assert "остановлен: " in text
+    assert "логов нет" in text
+    source = Path(dfl.__file__).read_text(encoding="utf-8")
+    for line in ("бриф ждёт вашего мержа: ", "остановлен: ", '"логов нет"'):
+        assert line in source, line
