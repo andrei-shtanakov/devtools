@@ -168,7 +168,7 @@ def main(
     _LOG_PATH = ""
     cwd = Path(args.cwd)
     if args.command == "report":  # до режима test: сломанный конфиг — тоже сбой
-        return run_report(cwd, print_only=args.print_only)
+        return run_report(cwd, print_only=args.print_only, with_log=args.with_log)
     if args.command == "log":  # как report: без режима test, лога и регистрации
         return run_log(cwd, list_only=args.list_only, nth=args.nth)
     before = fl.snapshot_runs()
@@ -443,6 +443,11 @@ def _parser() -> argparse.ArgumentParser:
         dest="print_only",
         action="store_true",
         help="только показать, не отправлять",
+    )
+    p_rep.add_argument(
+        "--with-log",
+        action="store_true",
+        help="хвост из лога вызова — с выводом git, gh и ревью",
     )
     p_log = add("log", help="лог последнего вызова dfl")
     p_log.add_argument("--list", dest="list_only", action="store_true")

@@ -862,24 +862,26 @@ def _no_tee(max_lines: int = 200):
 
 
 def test_report_routed_before_test_mode(env: Env, monkeypatch) -> None:
-    seen: list[tuple[Path, bool]] = []
+    seen: list[tuple[Path, bool, bool]] = []
 
     def refuse() -> None:
         raise AssertionError("report не должен требовать режим test")
 
-    def fake_report(cwd: Path, *, print_only: bool) -> int:
-        seen.append((cwd, print_only))
+    def fake_report(cwd: Path, *, print_only: bool, with_log: bool) -> int:
+        seen.append((cwd, print_only, with_log))
         return 2
 
     monkeypatch.setattr(dfl, "_require_test_mode", refuse)
     monkeypatch.setattr(dfl, "run_report", fake_report)
     assert env.run("report", "--print") == 2
-    assert seen == [(env.tmp / "target", True)]
+    assert env.run("report", "--with-log") == 2
+    target = env.tmp / "target"
+    assert seen == [(target, True, False), (target, False, True)]
     assert fl.load(env.tmp / "target") is None  # отказ report не пишет запись
 
 
 def test_report_failure_has_no_report_hint(env: Env, monkeypatch, capsys) -> None:
-    monkeypatch.setattr(dfl, "run_report", lambda cwd, *, print_only: 2)
+    monkeypatch.setattr(dfl, "run_report", lambda cwd, *, print_only, with_log: 2)
     assert env.run("report") == 2
     assert dfl.REPORT_HINT not in capsys.readouterr().err
 
@@ -1449,7 +1451,7 @@ def test_status_writes_no_log(env: Env, monkeypatch) -> None:
 
 
 def test_report_writes_no_log(env: Env, monkeypatch) -> None:
-    monkeypatch.setattr(dfl, "run_report", lambda cwd, *, print_only: 0)
+    monkeypatch.setattr(dfl, "run_report", lambda cwd, *, print_only, with_log: 0)
     assert env.run("report") == 0
     assert _logs(env) == []
 

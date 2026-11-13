@@ -127,14 +127,16 @@ def _at(match: re.Match[str]) -> str:
     return "@" if match.group(0).endswith("@") else ""
 
 
-def tail_lines(rec: FailureRecord) -> list[str]:
-    """Хвост вывода для отчёта: из лога вызова, иначе из записи сбоя.
+def tail_lines(rec: FailureRecord, *, with_log: bool = False) -> list[str]:
+    """Хвост вывода для отчёта: по умолчанию — из записи сбоя (вывод `dfl` и
+    раннера, без дочерних процессов); с `with_log` — из лога вызова.
 
-    Лог берётся, если он указан, читается и уровень ниже 3 (на уровне 3
-    раннер шёл на экран и в лог не попал). Строки `# …` заголовка и код
-    выхода отбрасываются. Traceback краха печатает `cli` уже после закрытия
-    лога — он добавляется из хвоста записи."""
-    if not rec.log_path or rec.verbosity >= PASSTHROUGH_LEVEL:
+    Лог берётся только по `with_log` (решение владельца: вывод потомков в
+    публичный отчёт — только явно), если он указан, читается и уровень ниже 3
+    (на уровне 3 раннер шёл на экран и в лог не попал). Строки `# …`
+    заголовка и код выхода отбрасываются. Traceback краха печатает `cli` уже
+    после закрытия лога — он добавляется из хвоста записи."""
+    if not with_log or not rec.log_path or rec.verbosity >= PASSTHROUGH_LEVEL:
         return rec.output_tail
     try:
         text = read_log(Path(rec.log_path))
@@ -171,7 +173,7 @@ def collect_facts(rec: FailureRecord) -> Facts:
     )
 
 
-def build(rec: FailureRecord, facts: Facts) -> Report:
+def build(rec: FailureRecord, facts: Facts, *, with_log: bool = False) -> Report:
     """Заголовок и Markdown-тело отчёта (очищенные), с отпечатком."""
     # Операция — только прогона, изменённого вызовом: у прогона «вызов его не
     # менял» она к сбою не относится и ломала бы склейку повторов.
@@ -182,7 +184,7 @@ def build(rec: FailureRecord, facts: Facts) -> Report:
     cause = _inert(redact(rec.cause, home))
     title = f"[dfl-report] {rec.command}: {cause[:TITLE_CAUSE]} (fp {fp})"
     # хвост очищается целиком: блок приватного ключа занимает несколько строк
-    tail = redact("\n".join(tail_lines(rec)), home).splitlines()
+    tail = redact("\n".join(tail_lines(rec, with_log=with_log)), home).splitlines()
     head = redact(_head(rec, facts), home)
     foot = redact(_foot(facts), home) + f"\n\nfp {fp}\n"
     body = _fit(head, tail, foot)
@@ -325,9 +327,17 @@ def _config_line() -> str:
 Gh = Callable[[list[str], Path | None, str | None], subprocess.CompletedProcess]
 YES = ("y", "yes", "да", "д")
 PUBLIC_WARNING = (
+    "отчёт уйдёт ПУБЛИЧНО; скрыты только известные формы секретов и домашний "
+    "каталог — перечитайте отчёт выше перед отправкой"
+)
+LOG_WARNING = (
     "отчёт уйдёт ПУБЛИЧНО; в хвосте — вывод git, gh, раннера и ревью целевого "
     "репо (код, имена файлов и PR); скрыты только известные формы секретов и "
     "домашний каталог — перечитайте отчёт выше перед отправкой"
+)
+WITH_LOG_HINT = (
+    "вывод дочерних процессов (git, gh, ревью) в отчёт не включён; "
+    "добавить: dfl report --with-log"
 )
 PRINT_HINT = "используйте dfl report --print и пришлите вывод сами"
 
@@ -361,15 +371,18 @@ def run_report(
     cwd: Path,
     *,
     print_only: bool,
+    with_log: bool = False,
     gh: Gh = real_gh,
     ask: Callable[[str], str] = input,
     is_tty: Callable[[], bool] = sys.stdin.isatty,
 ) -> int:
     """`dfl report`: показать отчёт; после «y» в терминале — issue или комментарий.
 
+    `with_log` — хвост из лога вызова, с выводом дочерних процессов.
+
     Отказ (нет терминала, ошибка `gh`) — блок `refusal` в stderr, код 2."""
     try:
-        return _report(cwd, print_only, gh, ask, is_tty)
+        return _report(cwd, print_only, with_log, gh, ask, is_tty)
     except ReportError as exc:
         print(refusal("dfl report", str(exc)), file=sys.stderr)
         return 2
@@ -378,6 +391,7 @@ def run_report(
 def _report(
     cwd: Path,
     print_only: bool,
+    with_log: bool,
     gh: Gh,
     ask: Callable[[str], str],
     is_tty: Callable[[], bool],
@@ -386,8 +400,10 @@ def _report(
     if rec is None:
         print("записанного сбоя нет — отправлять нечего")
         return 0
-    rep = build(rec, collect_facts(rec))
+    rep = build(rec, collect_facts(rec), with_log=with_log)
     print(f"{rep.title}\n\n{rep.body}")
+    if rec.log_path and not with_log:
+        print(f"\n{WITH_LOG_HINT}")
     if print_only:
         return 0
     if not is_tty():
@@ -398,7 +414,7 @@ def _report(
     repo = report_repo()
     profile = _profile()
     duplicate = _find_duplicate(rep, repo, gh, profile)
-    print(f"\n{PUBLIC_WARNING}")
+    print(f"\n{LOG_WARNING if with_log else PUBLIC_WARNING}")
     question = (
         f"Добавить комментарий к {duplicate[1]}? [y/N] "
         if duplicate
