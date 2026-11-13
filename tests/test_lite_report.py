@@ -419,8 +419,8 @@ def _log_file(tmp_path: Path, body: str) -> str:
 def test_tail_from_log_includes_child_output_redacted(tmp_path: Path) -> None:
     body = "# dfl run уровень 0\nchild-line\ntoken=ghp_abc\n# код выхода: 1\n"
     rec = _rec(log_path=_log_file(tmp_path, body), output_tail=["tail-only"])
-    assert rp.tail_lines(rec) == ["child-line", "token=ghp_abc"]
-    report = rp.build(rec, FACTS)
+    assert rp.tail_lines(rec, with_log=True) == ["child-line", "token=ghp_abc"]
+    report = rp.build(rec, FACTS, with_log=True)
     assert "child-line" in report.body
     assert "tail-only" not in report.body
     assert "ghp_abc" not in report.body
@@ -428,21 +428,21 @@ def test_tail_from_log_includes_child_output_redacted(tmp_path: Path) -> None:
 
 def test_tail_level3_uses_output_tail(tmp_path: Path) -> None:
     rec = _rec(log_path=_log_file(tmp_path, "child-line\n"), verbosity=3)
-    assert rp.tail_lines(rec) == ["строка 1", "строка 2"]
+    assert rp.tail_lines(rec, with_log=True) == ["строка 1", "строка 2"]
 
 
 def test_tail_missing_log_uses_output_tail(tmp_path: Path) -> None:
     rec = _rec(log_path=str(tmp_path / "нет.log"))
-    assert rp.tail_lines(rec) == ["строка 1", "строка 2"]
+    assert rp.tail_lines(rec, with_log=True) == ["строка 1", "строка 2"]
 
 
 def test_tail_no_log_path_uses_output_tail() -> None:
-    assert rp.tail_lines(_rec()) == ["строка 1", "строка 2"]
+    assert rp.tail_lines(_rec(), with_log=True) == ["строка 1", "строка 2"]
 
 
 def test_tail_caps_200_lines(tmp_path: Path) -> None:
     body = "".join(f"l{i}\n" for i in range(500))
-    tail = rp.tail_lines(_rec(log_path=_log_file(tmp_path, body)))
+    tail = rp.tail_lines(_rec(log_path=_log_file(tmp_path, body)), with_log=True)
     assert len(tail) == 200 and tail[-1] == "l499"
 
 
@@ -450,12 +450,12 @@ def test_tail_appends_crash_traceback_from_output_tail(tmp_path: Path) -> None:
     out = ["шум", "Traceback (most recent call last):", "  File x", "KeyError: 1"]
     rec = _rec(log_path=_log_file(tmp_path, "child\n# код выхода: 1\n"))
     rec = _rec(log_path=rec.log_path, output_tail=out)
-    assert rp.tail_lines(rec) == ["child", *out[1:]]
+    assert rp.tail_lines(rec, with_log=True) == ["child", *out[1:]]
 
 
 def test_tail_no_traceback_nothing_appended(tmp_path: Path) -> None:
     rec = _rec(log_path=_log_file(tmp_path, "child\n"), output_tail=["шум"])
-    assert rp.tail_lines(rec) == ["child"]
+    assert rp.tail_lines(rec, with_log=True) == ["child"]
 
 
 # --- правки финального ревью: новые формы секретов, пустой лог ---
@@ -486,7 +486,7 @@ PEM = [
 
 def test_build_drops_pem_block_from_tail(tmp_path: Path) -> None:
     rec = _rec(log_path=_log_file(tmp_path, "\n".join(PEM) + "\n"))
-    body = rp.build(rec, rp.Facts()).body
+    body = rp.build(rec, rp.Facts(), with_log=True).body
     assert "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ" not in body
     assert "AAAAC3NzaC1lZDI1NTE5AAAAIOg" not in body
     assert "до" in body and "после" in body
@@ -501,7 +501,7 @@ def test_redact_drops_unterminated_and_headless_pem() -> None:
 
 
 def test_public_warning_names_child_output() -> None:
-    warning = rp.PUBLIC_WARNING
+    warning = rp.LOG_WARNING
     assert "git" in warning and "gh" in warning and "ревью" in warning
     assert "перечитайте" in warning
 
@@ -509,4 +509,68 @@ def test_public_warning_names_child_output() -> None:
 def test_tail_empty_log_body_falls_back_to_output_tail(tmp_path: Path) -> None:
     body = "# dfl init-repo уровень 0\n# код выхода: 2\n"
     rec = _rec(log_path=_log_file(tmp_path, body), output_tail=["отказ"])
-    assert rp.tail_lines(rec) == ["отказ"]
+    assert rp.tail_lines(rec, with_log=True) == ["отказ"]
+
+
+# --- вывод дочерних процессов — только по --with-log (решение владельца) ---
+
+
+def test_tail_default_ignores_log(tmp_path: Path) -> None:
+    body = "# dfl run уровень 0\nchild-line\n# код выхода: 1\n"
+    rec = _rec(log_path=_log_file(tmp_path, body), output_tail=["tail-only"])
+    assert rp.tail_lines(rec) == ["tail-only"]
+    report = rp.build(rec, FACTS)
+    assert "tail-only" in report.body and "child-line" not in report.body
+
+
+def test_default_warning_names_dfl_and_runner_lines() -> None:
+    assert "строки dfl и раннера" in rp.PUBLIC_WARNING
+    assert "перечитайте" in rp.PUBLIC_WARNING
+
+
+def test_level3_record_no_with_log_hint(tmp_path: Path, monkeypatch, capsys) -> None:
+    rec = _rec(log_path=_log_file(tmp_path, "child-line\n"), verbosity=3)
+    monkeypatch.setattr(rp, "load_record", lambda cwd: rec)
+    monkeypatch.setattr(rp, "collect_facts", lambda r: FACTS)
+    assert rp.run_report(tmp_path, print_only=True) == 0
+    assert rp.WITH_LOG_HINT not in capsys.readouterr().out
+
+
+def test_warning_follows_tail_source_not_flag(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    rec = _rec(log_path=_log_file(tmp_path, "child-line\n"), verbosity=3)
+    monkeypatch.setattr(rp, "load_record", lambda cwd: rec)
+    monkeypatch.setattr(rp, "collect_facts", lambda r: FACTS)
+    monkeypatch.setattr(rp, "report_repo", lambda: "o/devtools")
+    monkeypatch.setattr(rp, "_profile", lambda: None)
+    monkeypatch.setattr(rp, "_find_duplicate", lambda *a: None)
+    rp.run_report(
+        tmp_path,
+        print_only=False,
+        with_log=True,
+        ask=lambda q: "n",
+        is_tty=lambda: True,
+    )
+    out = capsys.readouterr().out
+    assert rp.PUBLIC_WARNING in out and rp.LOG_WARNING not in out
+
+
+def test_print_without_log_flag_hints_with_log(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    rec = _rec(log_path=_log_file(tmp_path, "child-line\n"))
+    monkeypatch.setattr(rp, "load_record", lambda cwd: rec)
+    monkeypatch.setattr(rp, "collect_facts", lambda r: FACTS)
+    assert rp.run_report(tmp_path, print_only=True) == 0
+    out = capsys.readouterr().out
+    assert rp.WITH_LOG_HINT in out and "child-line" not in out
+
+
+def test_print_with_log_flag_includes_log(tmp_path: Path, monkeypatch, capsys) -> None:
+    rec = _rec(log_path=_log_file(tmp_path, "child-line\n"))
+    monkeypatch.setattr(rp, "load_record", lambda cwd: rec)
+    monkeypatch.setattr(rp, "collect_facts", lambda r: FACTS)
+    assert rp.run_report(tmp_path, print_only=True, with_log=True) == 0
+    out = capsys.readouterr().out
+    assert "child-line" in out and rp.WITH_LOG_HINT not in out
