@@ -570,7 +570,16 @@ def _chat(state: rs.RunState) -> ic.ChatResult:
         send=_sender(state),
         resend=_sender(state, supersede=True),
         load=load_session,
+        upstream=lambda: _upstream_text(state),
     )
+
+
+def _upstream_text(state: rs.RunState) -> str:
+    """customer-бриф engineer-прогона (`upstream.md`); нет — пусто."""
+    try:
+        return (rs.run_dir(state.run_id) / iv.UPSTREAM_REL).read_text("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
 
 
 def _sender(

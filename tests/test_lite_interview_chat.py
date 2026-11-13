@@ -15,6 +15,7 @@ import yaml
 
 from governance import interview as iv
 from governance import run_state as rs
+from lite import gate_repair as gr
 from lite import interview_chat as ic
 from lite.interview_state import Entry, SessionView
 from lite.structure import AgentUnavailable
@@ -813,7 +814,7 @@ def test_gate_criteria_skip_leaves_entry_and_says_what_remains(capsys) -> None:
     [(qid, _payload)] = ended.resent
     assert qid == NFR_QID
     out = capsys.readouterr().out
-    assert ic.CRITERIA_LEFT.format(n=1) in out
+    assert gr.GATE_LEFT.format(n=1) in out
 
 
 def test_gate_other_findings_not_asked() -> None:

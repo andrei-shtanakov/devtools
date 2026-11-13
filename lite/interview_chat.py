@@ -6,10 +6,9 @@
 Ответ уходит `discovery answer --question <id>` (функция `send`). Кончилось
 интервью неполным (код 10/11, обязательные темы не покрыты) — один раз
 добор: по каждой непокрытой теме вопрос человеку, раскладка и дописывание
-к ответу держателя темы (`resend` — `--supersede`); затем пункты без
-критерия проверки по находкам проверки брифа (GC-08): вопрос человеку,
-ответ дословно в `Acceptance` пункта (devtools#753). Отказ
-`discovery` — один повтор раскладки с причиной в промпте агента, затем
+к ответу держателя темы (`resend` — `--supersede`); затем — пункты, на
+которых не прошла проверка брифа (`lite.gate_repair`: GC-08, GC-13, GC-05 —
+devtools#753, #755). Отказ `discovery` — один повтор раскладки с причиной в промпте агента, затем
 человеку — простое сообщение и тот же вопрос заново. Человек не видит ни
 JSON, ни YAML, ни id пунктов.
 """
@@ -17,14 +16,11 @@ JSON, ни YAML, ни id пунктов.
 from __future__ import annotations
 
 import enum
-import re
 from collections.abc import Callable
-from typing import Any
-
-import yaml
 
 from governance import interview as iv
 from governance import run_state as rs
+from lite import gate_repair as gr
 from lite.interview_state import SessionView
 from lite.output import say
 from lite.structure import (
@@ -52,20 +48,6 @@ SKIP_WORDS = frozenset({"пропустить", "не знаю"})
 REFUSED_TEXT = "ответ не принят — ответьте на вопрос ещё раз"
 TOP_UP_HINT = "расскажите об этом своими словами («пропустить» — оставить так)"
 INCOMPLETE_CODES = (10, 11)
-# находка проверки брифа: у пункта нет критерия проверки (Acceptance/Target)
-NO_CRITERION_RE = re.compile(r"^GC-08 error \[([A-Z]+-\d+)\] нет \*\*Acceptance\*\*")
-CRITERIA_INTRO = (
-    "интервью окончено, но бриф не прошёл проверку: у пунктов ниже нет "
-    "способа проверить, что они выполнены"
-)
-CRITERIA_HINT = (
-    "что проверить или какое значение приемлемо, хоть грубо "
-    "(«пропустить» — оставить так)"
-)
-CRITERIA_LEFT = (
-    "без критерия осталось пунктов: {n} — бриф не пройдёт проверку; "
-    "dfl run спросит снова"
-)
 
 
 class ChatResult(enum.Enum):
@@ -92,12 +74,14 @@ def chat(
     send: Send,
     resend: Send,
     load: Load,
+    upstream: Callable[[], str] = lambda: "",
 ) -> ChatResult:
     """Вести интервью прогона `state`, пока у `discovery` есть вопрос.
 
     `read` — строка ввода (`None` — EOF), `status`/`load` — по `session_id`,
     `send(question_id, yaml)` — ответ на вопрос, `resend` — замена ответа
-    (`--supersede`, для добора тем). Агент недоступен — `ChatError`. Ctrl-C
+    (`--supersede`, для добора тем), `upstream` — текст customer-брифа
+    (для engineer-интервью; находки GC-05). Агент недоступен — `ChatError`. Ctrl-C
     во время работы агента или `discovery` — выход (`STOPPED`), как и на
     вопросе: отправленное уже записано."""
     session = str((state.interview or {}).get("session_id"))
@@ -114,7 +98,15 @@ def chat(
             topped_up = True
             _top_up(session, read, agent, resend, load)
             # находки — после добора: добор мог завести пункты без критерия
-            _fill_criteria(_no_criterion(status(session)), session, read, resend, load)
+            gr.repair(
+                status(session).envelope.get("findings") or [],
+                session,
+                ask=lambda header: _ask_or_skip(header, read),
+                agent=agent,
+                resend=resend,
+                load=load,
+                upstream=upstream,
+            )
     except _Stop:
         return ChatResult.STOPPED
     except KeyboardInterrupt:
@@ -161,56 +153,6 @@ def _top_up(session: str, read: Read, agent: Agent, resend: Send, load: Load) ->
         _top_up_topic(key, view, read, agent, resend)
 
 
-def _no_criterion(reply: iv.DiscoveryReply) -> list[str]:
-    """id пунктов без критерия проверки из находок проверки брифа (GC-08)."""
-    found = (
-        NO_CRITERION_RE.match(str(f)) for f in reply.envelope.get("findings") or []
-    )
-    return list(dict.fromkeys(m.group(1) for m in found if m))
-
-
-def _fill_criteria(
-    eids: list[str], session: str, read: Read, resend: Send, load: Load
-) -> None:
-    """Пункты без критерия: вопрос человеку по каждому; ответ дословно
-    становится `Acceptance` пункта, ответ держателя пересылается целиком."""
-    if not eids:
-        return
-    say(CRITERIA_INTRO)
-    left = 0
-    for eid in eids:
-        view = load(session)
-        qid = view.holders.get(eid)
-        if qid is None:
-            continue
-        record = view.entry_record(eid)
-        text = _ask_human(f"Как проверить «{record['body']}»? {CRITERIA_HINT}", read)
-        if is_skip(text) or not _sent_criterion(qid, record, text, view, resend):
-            left += 1
-    if left:
-        say(CRITERIA_LEFT.format(n=left))
-
-
-def _sent_criterion(
-    qid: str, record: dict[str, Any], text: str, view: SessionView, resend: Send
-) -> bool:
-    """Переслать ответ держателя с критерием пункта; отказ — сказать причину."""
-    payload = yaml.safe_dump(
-        {
-            "text": f"Критерий для «{record['body']}»: {text}",
-            "entries": [{**record, "Acceptance": text}],
-        },
-        allow_unicode=True,
-        sort_keys=False,
-    )
-    reply = resend(qid, _appended(view.held_answer(qid), payload))
-    if reply.code not in (1, 2):
-        return True
-    reason = reply.envelope.get("operation", {}).get("reason", "") or "отказ"
-    say(f"критерий не записан: {reason}")
-    return False
-
-
 def _top_up_topic(
     key: str, view: SessionView, read: Read, agent: Agent, resend: Send
 ) -> None:
@@ -231,7 +173,7 @@ def _top_up_topic(
         view,
         read,
         agent,
-        lambda payload: resend(qid, _appended(held, payload)),
+        lambda payload: resend(qid, gr.appended(held, payload)),
     )
 
 
@@ -240,21 +182,6 @@ def _holder_question(view: SessionView, key: str) -> str | None:
     answered = list(view.answers)
     of_topic = [qid for qid in answered if view.asked.get(qid) == key]
     return (of_topic or answered or [None])[-1]
-
-
-def _appended(held: dict[str, Any], payload: str) -> str:
-    """Ответ держателя + новый: текст через пустую строку, записи — прежние
-    (с заменой по id) и новые."""
-    new = yaml.safe_load(payload)
-    out = dict(held)
-    out["text"] = "\n\n".join(t for t in (held.get("text"), new["text"]) if t)
-    fresh = {e["id"]: e for e in new.get("entries") or []}
-    entries = [fresh.pop(e.get("id"), e) for e in held.get("entries") or []]
-    entries += fresh.values()
-    out.pop("entries", None)
-    if entries:
-        out["entries"] = entries
-    return yaml.safe_dump(out, allow_unicode=True, sort_keys=False)
 
 
 def _settle(
@@ -312,6 +239,12 @@ def _with_note(agent: Agent, refusal: str) -> Agent:
         "Исправь пункты с учётом этой причины."
     )
     return lambda prompt: agent(prompt + note)
+
+
+def _ask_or_skip(header: str, read: Read) -> str | None:
+    """Вопрос человеку; «пропустить»/«не знаю» — `None`."""
+    text = _ask_human(header, read)
+    return None if is_skip(text) else text
 
 
 def _ask_human(header: str, read: Read) -> str:

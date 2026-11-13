@@ -173,3 +173,33 @@ def test_old_record_without_log_fields_loads(tmp_path: Path, monkeypatch) -> Non
     rec = fl.load(tmp_path)
     assert rec is not None
     assert (rec.log_path, rec.verbosity) == ("", 0)
+
+
+def test_cause_from_interview_stop_reason_and_skips_hints(
+    runs_root: Path, tmp_path
+) -> None:
+    """Стоп интервью пишет причину в run.json, не в stop-reason.txt; хвост
+    подсказок dfl причиной не считается (devtools#755: у #753 и #755 был
+    один отпечаток по строке «подробно: dfl log»)."""
+    d = _run(runs_root, "r2", tmp_path, 1)
+    raw = json.loads((d / "run.json").read_text("utf-8"))
+    raw["interview"] = {"stop_reason": "status вернул 10: findings в /x\nдальше"}
+    raw["status"] = "stopped_interview"
+    (d / "run.json").write_text(json.dumps(raw), encoding="utf-8")
+    hints = ["шаг завершился с кодом 1", "подробно: dfl log",
+             "отчёт разработчикам: dfl report"]  # fmt: skip
+    assert fl.cause_from(None, ["r2"], hints) == "status вернул 10: findings в /x"
+    tail = ["настоящая причина", "дальше: dfl run", *hints[1:]]
+    assert fl.cause_from(None, [], tail) == "настоящая причина"
+
+
+def test_stale_interview_stop_reason_is_not_cause(runs_root: Path, tmp_path) -> None:
+    """Стоп снят (статус уже другой), поле в run.json осталось — не причина;
+    итог шага «шаг завершился…» подсказкой не считается (ревью #756)."""
+    d = _run(runs_root, "r3", tmp_path, 1)
+    raw = json.loads((d / "run.json").read_text("utf-8"))
+    raw["interview"] = {"stop_reason": "status вернул 10: давно снято"}
+    raw["status"] = "waiting_interview"
+    (d / "run.json").write_text(json.dumps(raw), encoding="utf-8")
+    tail = ["прогон r3: brief_ready", "шаг завершился с кодом 1", "дальше: x"]
+    assert fl.cause_from(None, ["r3"], tail) == "шаг завершился с кодом 1"

@@ -25,6 +25,8 @@ RunsSnapshot = dict[str, float]
 UNCHANGED_NOTE = "вызов его не менял"
 NO_CAUSE = "причина не записана"
 CAUSE_PREFIX = "  причина:"  # строка блока `lite.output.refusal`
+# хвостовые строки-подсказки dfl: причиной не бывают (devtools#755)
+HINT_PREFIXES = ("подробно:", "отчёт разработчикам:", "дальше:")
 
 
 @dataclass(frozen=True)
@@ -143,8 +145,9 @@ def cause_from(
     *,
     refusals: tuple[type[BaseException], ...] = (),
 ) -> str:
-    """Причина: отказ → блок отказа в выводе → `stop-reason.txt` → исключение
-    → последняя строка вывода.
+    """Причина: отказ → блок отказа в выводе → `stop-reason.txt` (или
+    `interview.stop_reason` в run.json) → исключение → последняя строка
+    вывода, кроме подсказок dfl.
 
     Блок отказа в выводе — для отказов, которые печатает сама подкоманда
     (`init_repo`), не поднимая исключения до `main`.
@@ -156,15 +159,31 @@ def cause_from(
         return printed
     for run_id in run_ids:
         reason = _first_line(rs.run_dir(run_id) / "stop-reason.txt")
+        reason = reason or _interview_stop(run_id)
         if reason:
             return reason
     if exc is not None:
         first = str(exc).strip().splitlines()
         return f"{type(exc).__name__}: {first[0]}" if first else type(exc).__name__
     for line in reversed(tail):
-        if line.strip():
+        if line.strip() and not line.strip().startswith(HINT_PREFIXES):
             return line.strip()
     return NO_CAUSE
+
+
+def _interview_stop(run_id: str) -> str:
+    """Первая строка `interview.stop_reason` прогона, который СЕЙЧАС стоит в
+    стопе интервью (стоп пишет причину в run.json, не в stop-reason.txt, и
+    поле после снятия стопа остаётся); иначе — пусто."""
+    try:
+        raw = json.loads((rs.run_dir(run_id) / "run.json").read_text("utf-8"))
+        if raw.get("status") != "stopped_interview":
+            return ""
+        reason = str((raw.get("interview") or {}).get("stop_reason") or "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    lines = reason.strip().splitlines()
+    return lines[0].strip() if lines else ""
 
 
 def _printed_cause(tail: list[str]) -> str:
