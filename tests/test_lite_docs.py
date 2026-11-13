@@ -37,6 +37,8 @@ def test_doc_has_commands_and_honest_sections() -> None:
         "dfl run",
         "dfl status",
         "dfl init-repo",
+        "dfl log",
+        "DFL_VERBOSITY",
         "install.sh",
         "проверок нет (test)",
         "песочниц",
@@ -102,3 +104,13 @@ def test_doc_interview_chat_final_review() -> None:
     assert flat.count(paid) == flat.count(f"как минимум {paid}"), paid
     # без claude в терминале — отказ, а не только подсказка (как без tty)
     assert "или без `harness.author = claude` разговора нет" not in flat
+
+
+def test_doc_quotes_output_levels_lines() -> None:
+    from lite import dfl
+
+    text = _doc()
+    assert dfl.LOG_HINT in text
+    assert dfl.REPORT_HINT in text
+    assert "режим test: ослаблено " in text
+    assert f"{len(df_config.TEST_RELAXATIONS)} проверок — список: dfl status -v" in text
