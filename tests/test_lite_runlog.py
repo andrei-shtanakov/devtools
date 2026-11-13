@@ -273,3 +273,17 @@ def test_captured_interrupt_in_final_flush_restores(tmp_path, monkeypatch) -> No
             pass
     assert (_ino(1), _ino(2)) == screen
     close_log(log, 0)
+
+
+def test_open_log_survives_unremovable_old_log(tmp_path, monkeypatch) -> None:
+    """Ротация не валит открытие: файл, который нельзя удалить, пропускается."""
+    for _ in range(KEEP + 1):
+        close_log(open_log(tmp_path, "run", "h", protect=None), 0)
+
+    def refuse(self: Path, missing_ok: bool = False) -> None:
+        raise PermissionError(str(self))
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    log = open_log(tmp_path, "run", "h", protect=None)
+    close_log(log, 0)
+    assert log.path.is_file()

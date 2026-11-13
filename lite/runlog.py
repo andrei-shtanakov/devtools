@@ -89,7 +89,10 @@ def prune(directory: Path, keep: int, protect: Path | None) -> None:
     for path in names[: max(0, len(names) - keep)]:
         if protect is not None and path == protect:
             continue
-        path.unlink(missing_ok=True)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            continue  # чужой или защищённый файл: ротация не валит открытие лога
 
 
 @contextmanager

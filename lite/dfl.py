@@ -154,10 +154,11 @@ def main(
     defer: list[Callable[[list[str]], None]] | None = None,
 ) -> int:
     """CLI: `--cwd <dir>` и `run` | `answer` | `interview` | `correct` | `abandon`
-    | `status` | `init-repo` | `report`.
+    | `status` | `init-repo` | `report` | `log`.
 
     Ненулевой код и исключение пишут запись сбоя (`lite.failure_log`);
-    ненулевой код печатает подсказку `dfl report` последней строкой. С
+    ненулевой код печатает `подробно: dfl log` (вызов писал лог) и подсказку
+    `dfl report` (уровень ≥ 1 или без лога). С
     `defer` запись откладывается: `cli` выполнит её с полным хвостом вывода;
     без него — пишется сразу с пустым хвостом."""
     global _LOG_PATH
@@ -224,7 +225,7 @@ def run_log(cwd: Path, *, list_only: bool, nth: int) -> int:
 def _list_line(info: runlog.LogInfo) -> str:
     stamp = datetime.strptime(info.path.name[:15], "%Y%m%dT%H%M%S").replace(tzinfo=UTC)
     code = "—" if info.code is None else info.code
-    return f"{stamp:%Y-%m-%d %H:%M:%S} {info.command} код {code}"
+    return f"{stamp.astimezone():%Y-%m-%d %H:%M:%S} {info.command} код {code}"
 
 
 def _set_level(args: argparse.Namespace) -> None:

@@ -2002,3 +2002,17 @@ def test_cli_with_real_tee_level0_hides_runner_logs_it(
     assert "runner-line" not in out + err
     [info] = _logs(env)
     assert "runner-line" in runlog.read_log(info.path)
+
+
+def test_log_list_shows_local_time(monkeypatch) -> None:
+    """`dfl log --list`: метка имени (UTC) показывается местным временем."""
+    import time
+
+    monkeypatch.setenv("TZ", "Etc/GMT-3")  # UTC+3
+    time.tzset()
+    try:
+        info = runlog.LogInfo(Path("20261113T090000000000Z-run.log"), "run", 0)
+        assert dfl._list_line(info) == "2026-11-13 12:00:00 run код 0"
+    finally:
+        monkeypatch.delenv("TZ")
+        time.tzset()

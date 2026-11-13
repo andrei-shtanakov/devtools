@@ -23,6 +23,7 @@ import yaml
 from governance import interview as iv
 from governance import run_state as rs
 from lite.interview_state import SessionView
+from lite.output import say
 from lite.structure import (
     FAILED_TEXT,
     TOPIC_LABELS,
@@ -98,7 +99,7 @@ def chat(
     except _Stop:
         return ChatResult.STOPPED
     except KeyboardInterrupt:
-        print()
+        say("")
         return ChatResult.STOPPED
 
 
@@ -204,7 +205,7 @@ def _settle(
         if isinstance(result, Failed):
             if result.message != FAILED_TEXT:
                 raise ChatError(result.message)
-            print(result.message)
+            say(result.message)
             return
         if isinstance(result, Ask):
             follow_ups += 1
@@ -218,7 +219,7 @@ def _settle(
         if reply.code not in (1, 2):
             return
         if refusal:
-            print(REFUSED_TEXT)
+            say(REFUSED_TEXT)
             return
         refusal = reply.envelope.get("operation", {}).get("reason", "") or "отказ"
 
@@ -247,7 +248,7 @@ def _with_note(agent: Agent, refusal: str) -> Agent:
 def _ask_human(header: str, read: Read) -> str:
     """Показать вопрос и читать ответ; пустой — показать снова."""
     while True:
-        print(header)
+        say(header)
         text = read_answer(read)
         if text is None:
             raise _Stop
@@ -278,5 +279,5 @@ def stdin_read(prompt: str) -> str | None:
     try:
         return input(prompt)
     except (EOFError, KeyboardInterrupt):
-        print()
+        say("")
         return None
