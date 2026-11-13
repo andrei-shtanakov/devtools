@@ -2,7 +2,28 @@
 
 from __future__ import annotations
 
-from lite.output import refusal
+import io
+from collections.abc import Iterator
+
+import pytest
+
+from lite.output import (
+    refusal,
+    say,
+    set_sink,
+    set_verbosity,
+    verbosity,
+    verbosity_from_env,
+)
+
+
+@pytest.fixture(autouse=True)
+def _restore_output_state() -> Iterator[None]:
+    """Уровень и лог — состояние модуля: возвращаем как было."""
+    before = verbosity()
+    yield
+    set_verbosity(before)
+    set_sink(None)
 
 
 def test_refusal_splits_cause_and_action() -> None:
@@ -41,3 +62,53 @@ def test_refusal_ignores_dash_inside_quoted_data() -> None:
     ]
     only_quoted = refusal("dfl abandon", "нет темы 'a — b'").splitlines()
     assert only_quoted[2:] == ["  причина:     нет темы 'a — b'"]
+
+
+def test_say_respects_level(capsys: pytest.CaptureFixture[str]) -> None:
+    set_verbosity(0)
+    set_sink(None)
+    say("итог")
+    say("подсказка", 1)
+    assert capsys.readouterr().out == "итог\n"
+
+
+def test_say_err_goes_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:
+    set_verbosity(1)
+    say("ошибка", 1, err=True)
+    captured = capsys.readouterr()
+    assert (captured.out, captured.err) == ("", "ошибка\n")
+
+
+def test_say_always_writes_sink(capsys: pytest.CaptureFixture[str]) -> None:
+    buf = io.StringIO()
+    set_verbosity(0)
+    set_sink(buf)
+    say("скрыто", 3, err=True)
+    assert capsys.readouterr().err == ""
+    assert buf.getvalue() == "скрыто\n"
+
+
+def test_set_verbosity_clamps() -> None:
+    set_verbosity(7)
+    assert verbosity() == 3
+    set_verbosity(-1)
+    assert verbosity() == 0
+
+
+@pytest.mark.parametrize(
+    ("raw", "level", "warned"),
+    [
+        ("", 0, False),
+        ("2", 2, False),
+        ("9", 3, False),
+        ("abc", 0, True),
+        ("-1", 0, True),
+    ],
+)
+def test_verbosity_from_env(raw: str, level: int, warned: bool) -> None:
+    got, warn = verbosity_from_env({"DFL_VERBOSITY": raw} if raw else {})
+    assert got == level
+    assert (warn is not None) == warned
+    if warn is not None:
+        assert "DFL_VERBOSITY" in warn
+        assert raw in warn

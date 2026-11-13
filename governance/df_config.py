@@ -160,6 +160,16 @@ def test_banner(cfg: DfConfig) -> str | None:
     return f"{TEST_BANNER_HEADER}\n{items}"
 
 
+def test_banner_line(cfg: DfConfig) -> str | None:
+    """Одна строка о режиме test (список — в `dfl status -v`); в strict — `None`."""
+    if cfg.mode == "strict":
+        return None
+    return (
+        f"режим test: ослаблено {len(TEST_RELAXATIONS)} проверок"
+        " — список: dfl status -v"
+    )
+
+
 def config_path(env: Mapping[str, str]) -> Path:
     """Путь конфига: `<config_home>/darkfactory/config.toml` (`config_home`)."""
     return config_home(env) / "darkfactory" / "config.toml"
