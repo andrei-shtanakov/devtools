@@ -196,8 +196,8 @@ def _findings_stop(run_id: str) -> str:
         status = str(raw.get("status") or "")
     except (OSError, ValueError, AttributeError):
         return ""
-    found = sf.lines(run_id, status)
-    return sf.summary(found, status) if found else ""
+    stop = sf.load(run_id, status)
+    return sf.summary(stop) if stop is not None else ""
 
 
 def _printed_cause(tail: list[str]) -> str:

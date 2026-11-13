@@ -691,8 +691,9 @@ def _report_step(
     состояние, следующий шаг (на уровне 0, если он — действие человека)."""
     if line is not None:
         say(line)
-    for found in sf.lines(state.run_id, state.status):
-        say(f"  - {sf.readable(found)}")
+    stop = sf.load(state.run_id, state.status)
+    for text, level in sf.shown(stop) if stop is not None else []:
+        say(text, level)
     unread = state.status == WAITING and not chatting and not _say_question(state)
     stopped = state.status.startswith("stopped_")
     if (stopped or unread) and code == 0 and _LOG is not None:
@@ -713,8 +714,14 @@ def _awaits_human(state: rs.RunState) -> bool:
         _accepted_url(state) is not None
         or chain_open(state.mode, _frame(state), state.status, state.ops)
         or state.status in HUMAN_STEP_STATUSES
-        or bool(sf.lines(state.run_id, state.status))  # правка узла (#757)
+        or _edit_hint(state) is not None  # правка узла по находкам (#757)
     )
+
+
+def _edit_hint(state: rs.RunState) -> str | None:
+    """Что править по находкам проверки, на которой стоит прогон."""
+    stop = sf.load(state.run_id, state.status)
+    return sf.edit_hint(state, stop) if stop is not None else None
 
 
 def _outcome(state: rs.RunState, code: int) -> str | None:
@@ -1014,9 +1021,9 @@ def _next_hint(state: rs.RunState, runs: list[rs.RunState]) -> str | None:
     if state.status == "waiting_human_merge":
         what = f"https://github.com/{state.repo_slug}/pull/{state.pr}"
         return f"смержите {what if state.pr else 'PR прогона'}, затем dfl run"
-    found = sf.lines(state.run_id, state.status)
-    if found:
-        return f"{sf.edit_hint(state, found)} (или {ABANDON_HINT})"
+    edit = _edit_hint(state)
+    if edit is not None:
+        return f"{edit} (или {ABANDON_HINT})"
     if state.status.startswith("stopped_"):
         return f"разберите причину выше и dfl run (или {ABANDON_HINT})"
     return None
