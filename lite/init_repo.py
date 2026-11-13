@@ -10,14 +10,13 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from collections.abc import Callable
 from pathlib import Path
 
 from governance import user_targets
 from governance.brief_tools import LABEL
 from lite.install import Runner
-from lite.output import refusal
+from lite.output import refusal, say
 
 INIT_BRANCH = "darkfactory/init-repo"
 COMMIT_MESSAGE = "DarkFactory: подготовка репо (dfl init-repo)"
@@ -208,7 +207,7 @@ def _default_branch(run: Runner, repo: Path) -> str:
             "ветка по умолчанию неизвестна (нет origin/HEAD даже после "
             "git remote set-head origin -a) — проверьте origin: git remote -v"
         )
-    print("origin/HEAD не было — выполнено git remote set-head origin -a")
+    say("origin/HEAD не было — выполнено git remote set-head origin -a")
     return branch
 
 
@@ -443,11 +442,11 @@ def init_repo(repo: Path, devtools: Path, gh: Gh, run: Runner = subprocess.run) 
         existing = _plan(run, repo, slug, base, gh)
         if existing is not None:
             _label_pr(slug, existing, gh)
-            print(f"PR подготовки уже открыт: {existing} — смержите его сами")
+            say(f"PR подготовки уже открыт: {existing} — смержите его сами")
             return 0
         url = _publish(repo, devtools, slug, base, gh, run)
     except InitError as exc:
-        print(refusal("dfl init-repo", str(exc)), file=sys.stderr)
+        say(refusal("dfl init-repo", str(exc)), err=True)
         return 2
-    print(f"PR подготовки открыт: {url} — смержите его сами, затем dfl run")
+    say(f"PR подготовки открыт: {url} — смержите его сами, затем dfl run")
     return 0

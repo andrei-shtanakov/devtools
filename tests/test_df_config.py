@@ -494,6 +494,18 @@ def test_banner_lists_relaxations_in_test(tmp_path: Path) -> None:
     assert lines[1:] == [f"  - {item}" for item in df_config.TEST_RELAXATIONS]
 
 
+def test_test_banner_line_counts_relaxations(tmp_path: Path) -> None:
+    cfg = _load_text(tmp_path, STRICT.replace('mode = "strict"', 'mode = "test"'))
+    assert df_config.test_banner_line(cfg) == (
+        f"режим test: ослаблено {len(df_config.TEST_RELAXATIONS)} "
+        "проверок — список: dfl status -v"
+    )
+
+
+def test_test_banner_line_strict_none(tmp_path: Path) -> None:
+    assert df_config.test_banner_line(_load_text(tmp_path, STRICT)) is None
+
+
 SKIP_CONSTANTS = (
     ("runner", "ACT_SKIP_TEST"),
     ("approve_node", "ACTOR_SKIP_TEST"),

@@ -40,6 +40,8 @@ class FailureRecord:
     runs_note: str
     cwd_repo: str
     cause: str
+    log_path: str = ""  # лог вызова (`lite.runlog`); старые записи — пусто
+    verbosity: int = 0
 
 
 def repo_key(cwd: Path) -> str:

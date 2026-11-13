@@ -681,3 +681,20 @@ def test_top_up_skips_topics_without_prefix() -> None:
     ended = Ended(view=view)
     assert _top_up(ended, _reader(), _agent()) is ic.ChatResult.FINISHED
     assert ended.resent == []
+
+
+def test_chat_lines_reach_log_sink() -> None:
+    """Реплики интервью разговором идут через `say` — и в лог вызова."""
+    import io
+
+    from lite.output import set_sink
+
+    buf = io.StringIO()
+    set_sink(buf)
+    try:
+        disc = Discovery()
+        read = _reader("Чтобы сверять платежи", "", "Выгружают операции", "")
+        _chat(disc, read, _agent(G_ITEM, J_ITEM))
+    finally:
+        set_sink(None)
+    assert "Вопрос 1 (цели): Зачем это нужно?" in buf.getvalue()

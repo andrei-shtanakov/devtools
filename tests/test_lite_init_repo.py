@@ -526,3 +526,23 @@ def test_gitignore_symlink_is_conflict(work: Path, capsys) -> None:
     assert ir.conflicts(work) == [".gitignore"]
     assert ir.init_repo(work, DEVTOOLS, FakeGh()) == 2
     assert ".gitignore" in capsys.readouterr().err
+
+
+# --- правки финального ревью: вывод init-repo попадает в лог ---
+
+
+def test_refusal_and_result_reach_log_sink(work: Path, capsys) -> None:
+    from io import StringIO
+
+    from lite.output import set_sink
+
+    sink = StringIO()
+    set_sink(sink)
+    try:
+        (work / "stray.txt").write_text("x\n")
+        assert ir.init_repo(work, DEVTOOLS, FakeGh()) == 2
+    finally:
+        set_sink(None)
+    assert "не чисто" in capsys.readouterr().err
+    assert "dfl init-repo: отказ (код 2)" in sink.getvalue()
+    assert "не чисто" in sink.getvalue()

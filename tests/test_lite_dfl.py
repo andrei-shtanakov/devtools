@@ -7,25 +7,29 @@
 from __future__ import annotations
 
 import json
+import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 
 from governance import brief_tools as bt
+from governance import df_config, spec_loop, user_targets
 from governance import interview as iv
 from governance import run_state as rs
-from governance import spec_loop, user_targets
 from governance.brief_facts import BriefPrFacts
 from governance.facts import Fact, Outcome
-from lite import dfl
+from lite import dfl, runlog
 from lite import failure_log as fl
+from lite.output import VERBOSITY_ENV, verbosity
 from tests.conftest import _STRICT_GH_DIRS
 from tests.df_config_fixture import use_test_real_home, write_config
 
 REPO = "alpha"
 SLUG = "o/alpha"
 URL = f"git@github.com:{SLUG}.git"
+BRIEF_NEXT = "dfl run — откроет PR брифа (или покажет открытый) на ваш мерж"
 
 
 @dataclass
@@ -70,6 +74,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Env:
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.delenv(VERBOSITY_ENV, raising=False)
     (tmp_path / "target").mkdir()
     for rel in dfl.INIT_FILES:
         (tmp_path / "target" / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -82,6 +87,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Env:
 
     def spec_main(argv: list[str]) -> int:
         e.spec_calls.append(list(argv))
+        print("runner-line")
         return 0
 
     def brief_main(argv: list[str]) -> int:
@@ -332,7 +338,7 @@ def test_status_lists_runs_no_effects(env: Env, monkeypatch, capsys) -> None:
     monkeypatch.setattr(dfl, "_forge", lambda: pytest.fail("форджа в status"))
     assert env.run("status") == 0
     out = capsys.readouterr().out
-    assert "WS-1-a" in out and "WS-3-a" in out and "мерж брифа, затем dfl run" in out
+    assert "WS-1-a" in out and "WS-3-a" in out and BRIEF_NEXT in out
     # в репо есть незаконченные WS-2/WS-3: новую тему не предлагаем (#739)
     assert (
         "дальше: смержите https://github.com/o/alpha/pull/9 — конвейер закончен\n"
@@ -486,7 +492,15 @@ def test_answer_runs_discovery_then_continues(env: Env, monkeypatch, capsys) -> 
     _answer_file(env)
     disc = Discovery()
     monkeypatch.setattr(dfl, "_discovery_answer", disc)
-    assert env.run("answer", "--file", "answer.yaml") == 0
+    monkeypatch.setattr(dfl, "_discovery_status", lambda s, c: _question_reply())
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        _waiting("WS-1-a", "WS-1", "customer")  # следующий вопрос
+        return 0
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    assert env.run("answer", "-v", "--file", "answer.yaml") == 0
     sid, role, file, cwd = disc.calls[0]
     assert (sid, role) == ("sess-WS-1-a", "customer")
     assert file == (env.tmp / "target" / "answer.yaml").resolve()
@@ -584,6 +598,8 @@ def test_discovery_answer_invocation(env: Env, monkeypatch) -> None:
 
 
 def test_waiting_run_prints_dfl_answer_hint(env: Env, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(dfl, "_discovery_status", lambda s, c: _question_reply())
+
     def spec_main(argv: list[str]) -> int:
         _waiting("WS-1-a", "WS-1", "customer")
         return 0
@@ -591,7 +607,7 @@ def test_waiting_run_prints_dfl_answer_hint(env: Env, monkeypatch, capsys) -> No
     monkeypatch.setattr(spec_loop, "main", spec_main)
     assert env.run("run", "--subject", "тема") == 0
     out = capsys.readouterr().out
-    assert "прогон WS-1-a ждёт ответа" in out
+    assert "Кто ваш клиент?" in out
     assert "ответьте: dfl answer --file answer.yaml" in out
 
 
@@ -733,7 +749,7 @@ def test_status_hint_for_accepted_pr_is_runnable(env: Env, monkeypatch, capsys) 
 
 
 def test_refusal_writes_failure_record_and_hint(env: Env, capsys) -> None:
-    assert env.run("run") == 2  # первый запуск без --subject
+    assert env.run("run", "-v") == 2  # первый запуск без --subject
     rec = fl.load(env.tmp / "target")
     assert rec is not None
     assert (rec.command, rec.exit_code) == ("run", 2)
@@ -750,7 +766,7 @@ def test_success_keeps_previous_record(env: Env, monkeypatch) -> None:
 
 
 def test_failure_before_registration_is_recorded(env: Env, monkeypatch) -> None:
-    def refuse() -> None:
+    def refuse(**_: object) -> None:
         raise dfl.DflError("dfl работает только в режиме test — поставьте test")
 
     monkeypatch.setattr(dfl, "_require_test_mode", refuse)
@@ -924,9 +940,10 @@ def test_dfl_run_without_tty_keeps_old_hint(env: Env, monkeypatch, capsys) -> No
     _tty(monkeypatch, False)
     _waiting_after_first_step(monkeypatch, env)
     monkeypatch.setattr(dfl, "_chat", lambda state: pytest.fail("цикл без tty"))
+    monkeypatch.setattr(dfl, "_discovery_status", lambda s, c: _question_reply())
     assert env.run("run", "--subject", "тема") == 0
     out = capsys.readouterr().out
-    assert "прогон WS-1-a ждёт ответа" in out and "dfl answer --file" in out
+    assert "Кто ваш клиент?" in out and "dfl answer --file" in out
     assert len(env.spec_calls) == 1
 
 
@@ -1326,3 +1343,676 @@ def test_dfl_run_tty_other_interview_stop_not_chatted(env: Env, monkeypatch) -> 
     )
     assert env.run("run") == 0
     assert len(env.spec_calls) == 1
+
+
+# --- уровни подробности, лог вызова и перехват (план dfl-clean-output, Task 3) ---
+
+
+def _bind_streams(monkeypatch: pytest.MonkeyPatch) -> None:
+    """capfd подменяет sys.stdout файлом мимо fd 1; привязываем потоки к fd."""
+    out = open(1, "w", closefd=False, encoding="utf-8")
+    err = open(2, "w", closefd=False, encoding="utf-8")
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+
+
+def _read(capfd) -> tuple[str, str]:
+    """Сбросить привязанные к fd потоки и прочитать захват."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    return capfd.readouterr()
+
+
+def _logs(env: Env) -> list[runlog.LogInfo]:
+    return runlog.list_logs(env.tmp / "target")
+
+
+def _recording_level(env: Env, monkeypatch) -> list[int]:
+    seen: list[int] = []
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        seen.append(verbosity())
+        return 0
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    return seen
+
+
+def test_level0_hides_runner_output_and_logs_it(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    assert env.run("run", "--subject", "t") == 0
+    out, err = _read(capfd)
+    assert "runner-line" not in out + err
+    assert "режим test: ослаблено" in out
+    assert df_config.TEST_BANNER_HEADER not in out
+    [info] = _logs(env)
+    assert (info.command, info.code) == ("run", 0)
+    text = runlog.read_log(info.path)
+    assert "runner-line" in text
+    assert text.startswith("# dfl run --subject t уровень 0\n")
+
+
+def test_vvv_shows_runner_output_and_full_banner(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    assert env.run("run", "-vvv", "--subject", "t") == 0
+    out, _ = _read(capfd)
+    assert "runner-line" in out and df_config.TEST_BANNER_HEADER in out
+    [info] = _logs(env)
+    text = runlog.read_log(info.path)
+    assert "уровень 3: вывод раннера шёл на экран" in text
+    assert "уровень 3: вывод раннера" not in out
+
+
+def test_flag_before_and_after_subcommand_add_up(env: Env, monkeypatch) -> None:
+    seen = _recording_level(env, monkeypatch)
+    assert env.run("-v", "run", "-v", "--subject", "t") == 0
+    assert seen == [2]
+
+
+def test_flags_above_three_cap_at_three(env: Env, monkeypatch) -> None:
+    seen = _recording_level(env, monkeypatch)
+    assert env.run("-vv", "run", "-vvv", "--subject", "t") == 0
+    assert seen == [3]
+
+
+def test_env_verbosity_default_and_flag_wins(env: Env, monkeypatch) -> None:
+    seen = _recording_level(env, monkeypatch)
+    monkeypatch.setenv(VERBOSITY_ENV, "2")
+    assert env.run("run", "--subject", "t") == 0
+    assert env.run("run", "-v", "--subject", "t") == 0
+    assert seen == [2, 1]
+
+
+def test_env_verbosity_garbage_warns(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    seen = _recording_level(env, monkeypatch)
+    monkeypatch.setenv(VERBOSITY_ENV, "много")
+    assert env.run("run", "--subject", "t") == 0
+    _, err = _read(capfd)
+    warned = [line for line in err.splitlines() if VERBOSITY_ENV in line]
+    assert len(warned) == 1 and "использую уровень 0" in warned[0]
+    assert seen == [0]
+
+
+def test_level_resets_between_calls(env: Env, monkeypatch) -> None:
+    seen = _recording_level(env, monkeypatch)
+    assert env.run("run", "-vv", "--subject", "t") == 0
+    assert env.run("run", "--subject", "t") == 0
+    assert seen == [2, 0]
+
+
+def test_status_writes_no_log(env: Env, monkeypatch) -> None:
+    _status_target(env, monkeypatch)
+    assert env.run("status") == 0
+    assert _logs(env) == []
+
+
+def test_report_writes_no_log(env: Env, monkeypatch) -> None:
+    monkeypatch.setattr(dfl, "run_report", lambda cwd, *, print_only: 0)
+    assert env.run("report") == 0
+    assert _logs(env) == []
+
+
+def test_refusal_before_test_mode_writes_no_log(env: Env, capsys) -> None:
+    write_config(env.tmp / "xdg", mode="strict", **_STRICT_GH_DIRS)
+    assert env.run("run", "--subject", "s") == 2
+    err = capsys.readouterr().err
+    assert _logs(env) == []
+    assert "подробно: dfl log" not in err
+    assert err.rstrip().endswith(dfl.REPORT_HINT)  # без лога — прежняя подсказка
+
+
+def test_log_dir_unwritable_runs_without_log(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    blocker = env.tmp / "state-file"
+    blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("XDG_STATE_HOME", str(blocker))
+    assert env.run("run", "--subject", "t") == 0
+    out, err = _read(capfd)
+    assert "лог не пишется:" in err
+    assert "runner-line" in out
+
+
+def test_failure_record_has_log_path_and_level(env: Env, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(spec_loop, "main", lambda argv: 3)
+    assert env.run("run", "--subject", "t") == 3
+    rec = fl.load(env.tmp / "target")
+    assert rec is not None and rec.verbosity == 0
+    assert Path(rec.log_path).is_file()
+    assert [i.path for i in _logs(env)] == [Path(rec.log_path)]
+    err = capsys.readouterr().err
+    assert "подробно: dfl log" in err and dfl.REPORT_HINT not in err
+    assert "подробно: dfl log" in runlog.read_log(Path(rec.log_path))
+    assert env.run("run", "-v", "--subject", "t") == 3
+    err = capsys.readouterr().err
+    assert "подробно: dfl log" in err and err.rstrip().endswith(dfl.REPORT_HINT)
+    rec = fl.load(env.tmp / "target")
+    assert rec is not None and rec.verbosity == 1
+
+
+def test_rotation_keeps_log_of_last_failure(env: Env, monkeypatch) -> None:
+    monkeypatch.setattr(spec_loop, "main", lambda argv: 3)
+    assert env.run("run", "--subject", "t") == 3
+    rec = fl.load(env.tmp / "target")
+    assert rec is not None
+    monkeypatch.setattr(spec_loop, "main", lambda argv: 0)
+    for _ in range(runlog.KEEP + 2):
+        assert env.run("run", "--subject", "t") == 0
+    assert Path(rec.log_path).is_file()
+
+
+def test_discovery_output_goes_to_log_only(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _waiting("WS-1-a", "WS-1", "customer")
+    _answer_file(env)
+
+    def fake_run(argv: list[str], **kw: object):
+        return dfl.subprocess.CompletedProcess(argv, 1, "disc-out", "disc-err")
+
+    monkeypatch.setattr(dfl.df_config, "workspace_dir", lambda name: env.tmp)
+    monkeypatch.setattr(dfl.subprocess, "run", fake_run)
+    assert env.run("answer", "--file", "answer.yaml") == 2  # stdout не JSON
+    out, err = _read(capfd)
+    assert "disc-out" not in out + err and "disc-err" not in out + err
+    [info] = _logs(env)
+    text = runlog.read_log(info.path)
+    assert "disc-out" in text and "disc-err" in text
+
+
+# --- итог шага, вопрос на экране, уровни (план dfl-clean-output, Task 4) ---
+
+
+def _question_reply(text: str = "Кто ваш клиент?") -> iv.DiscoveryReply:
+    action = {"session_id": "s", "question_id": "q-1", "question_text": text}
+    return iv.DiscoveryReply(20, {"next_action": action}, "")
+
+
+def _step_leaves(
+    monkeypatch, env: Env, status: str, *, code: int = 0, ops: dict | None = None
+) -> None:
+    """Шаг раннера оставляет WS-1-a в `status` (и с `ops`), код `code`."""
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        state = _waiting("WS-1-a", "WS-1", "customer")
+        state.status = status
+        state.ops.update(ops or {})
+        rs.save(state)
+        return code
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+
+
+def test_waiting_without_tty_shows_question_text(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _step_leaves(monkeypatch, env, dfl.WAITING)
+    seen: list[tuple[str, Path]] = []
+
+    def status(session_id: str, cwd: Path) -> iv.DiscoveryReply:
+        seen.append((session_id, cwd))
+        return _question_reply()
+
+    monkeypatch.setattr(dfl, "_discovery_status", status)
+    assert env.run("run", "--subject", "t") == 0
+    out, _ = _read(capfd)
+    assert "Кто ваш клиент?" in out and dfl.ANSWER_HINT in out
+    assert "вопрос выше" not in out and "text (ответ своими словами)" not in out
+    assert seen == [("sess-WS-1-a", rs.run_dir("WS-1-a"))]
+    assert env.run("run", "-v") == 0
+    out, _ = _read(capfd)
+    assert "text (ответ своими словами)" in out  # формат файла — уровень 1
+
+
+@pytest.mark.parametrize("broken", ["code", "raise"])
+def test_waiting_question_unreadable_points_to_interview(
+    env: Env, monkeypatch, capfd, broken: str
+) -> None:
+    _bind_streams(monkeypatch)
+    _step_leaves(monkeypatch, env, dfl.WAITING)
+
+    def status(session_id: str, cwd: Path) -> iv.DiscoveryReply:
+        if broken == "raise":
+            raise OSError("uv не найден")
+        return iv.DiscoveryReply(1, {"operation": {"reason": "x"}}, "")
+
+    monkeypatch.setattr(dfl, "_discovery_status", status)
+    assert env.run("run", "--subject", "t") == 0
+    out, _ = _read(capfd)
+    assert "прогон WS-1-a ждёт ответа; вопрос: dfl interview" in out
+
+
+def test_stopped_run_prints_cause_and_log_hint(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+
+    def spec_main(argv: list[str]) -> int:
+        _run("WS-1-a", "WS-1", "customer", "stopped_need")
+        (rs.run_dir("WS-1-a") / "stop-reason.txt").write_text(
+            "нет прав на репо\nподробности", encoding="utf-8"
+        )
+        return 0
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    assert env.run("run", "--subject", "t") == 0
+    out, err = _read(capfd)
+    assert "прогон WS-1-a остановлен: нет прав на репо\n" in out
+    assert (out + err).count(dfl.LOG_HINT) == 1
+
+
+def test_stopped_run_nonzero_code_one_log_hint(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+
+    def spec_main(argv: list[str]) -> int:
+        _run("WS-1-a", "WS-1", "customer", "stopped_need")
+        (rs.run_dir("WS-1-a") / "stop-reason.txt").write_text("нет прав", "utf-8")
+        return 3
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    assert env.run("run", "--subject", "t") == 3
+    out, err = _read(capfd)
+    assert "прогон WS-1-a остановлен: нет прав" in out
+    assert (out + err).count(dfl.LOG_HINT) == 1
+
+
+def test_nonzero_code_without_run_names_code(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    monkeypatch.setattr(spec_loop, "main", lambda argv: 3)
+    assert env.run("run", "--subject", "t") == 3
+    out, err = _read(capfd)
+    assert "шаг завершился с кодом 3" in out
+    assert (out + err).count(dfl.LOG_HINT) == 1
+
+
+def test_zero_code_without_run_prints_no_outcome(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    assert env.run("run", "--subject", "t") == 0
+    out, err = _read(capfd)
+    assert "шаг завершился" not in out and "прогон" not in out
+    assert dfl.LOG_HINT not in out + err
+
+
+def test_running_run_outcome_names_status(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _step_leaves(monkeypatch, env, "brief_ready")
+    assert env.run("run", "--subject", "t") == 0
+    out, _ = _read(capfd)
+    assert "прогон WS-1-a: brief_ready" in out
+
+
+def test_level2_adds_state_lines(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    ops = {"need": {"status": "completed"}}
+    _step_leaves(monkeypatch, env, "running", ops=ops)
+    assert env.run("run", "-v", "--subject", "t") == 0
+    out, _ = _read(capfd)
+    assert "шаги:" not in out and "WS-1-a · customer" not in out
+    assert env.run("run", "-vv") == 0
+    out, _ = _read(capfd)
+    assert "WS-1-a · customer · running" in out
+    assert "шаги: —" in out  # второй шаг ничего в ops не поменял
+    _step_leaves(monkeypatch, env, "running", ops={"brief": {"status": "completed"}})
+    assert env.run("run", "-vv") == 0
+    out, _ = _read(capfd)
+    assert "шаги: brief" in out
+
+
+def test_level2_state_line_names_pr_and_wave(env: Env) -> None:
+    state = _run("WS-1-eng-b", "WS-1-eng", "engineer", "running")
+    state.ops = {"a": {"status": "completed"}, "b": {"status": "running"}}
+    state.pr, state.wave = 7, 2
+    lines = dfl._state_lines({"a": "completed"}, state)
+    assert lines == ["WS-1-eng-b · engineer · running · PR #7 · волна 2", "шаги: b"]
+
+
+def test_brief_waiting_merge_visible_at_level0(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _run("WS-1-a", "WS-1", "customer", "brief_ready")
+    env.forge.branches["brief/WS-1"] = [5]
+    env.forge.states[5] = "OPEN"
+    assert env.run("run") == 0
+    out, _ = _read(capfd)
+    assert "бриф ждёт вашего мержа: https://github.com/o/alpha/pull/5" in out
+
+
+def test_chatting_waiting_prints_no_answer_hint(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch)
+    _waiting_after_first_step(monkeypatch, env)
+    monkeypatch.setattr(dfl, "_chat", Chat(results=["stopped"]))
+    monkeypatch.setattr(
+        dfl, "_discovery_status", lambda s, c: pytest.fail("вопрос — у цикла")
+    )
+    assert env.run("run", "--subject", "тема") == 0
+    out, err = _read(capfd)
+    assert dfl.ANSWER_HINT not in out + err
+    assert dfl.CHAT_STOPPED in out
+
+
+def test_status_v_lists_relaxations_and_config(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _status_target(env, monkeypatch)
+    assert env.run("status") == 0
+    out, _ = _read(capfd)
+    assert df_config.TEST_BANNER_HEADER not in out and "конфиг:" not in out
+    assert env.run("status", "-v") == 0
+    out, _ = _read(capfd)
+    assert df_config.TEST_BANNER_HEADER in out
+    assert f"конфиг: {df_config.canonical_config_path()}" in out
+
+
+def test_status_vv_lists_ops(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _status_target(env, monkeypatch)
+    state = _run("WS-1-a", "WS-1", "customer", "running")
+    state.ops["need"] = {"status": "completed"}
+    rs.save(state)
+    assert env.run("status", "-v") == 0
+    out, _ = _read(capfd)
+    assert "  need: completed" not in out
+    assert env.run("status", "-vv") == 0
+    out, _ = _read(capfd)
+    assert "WS-1-a  customer  running\n  need: completed\n" in out
+
+
+# --- правки ревью Task 4 ---
+
+
+def test_unchanged_resumed_run_old_cause_not_reported(
+    env: Env, monkeypatch, capfd
+) -> None:
+    """Раннер упал до записи run.json: старая причина стопа — не итог шага."""
+    _bind_streams(monkeypatch)
+    state = _run("WS-1-a", "WS-1", "customer", "stopped_need")
+    state.target_dir = str((env.tmp / "target").resolve())  # fallback сработает
+    rs.save(state)
+    (rs.run_dir("WS-1-a") / "stop-reason.txt").write_text(
+        "старая причина", encoding="utf-8"
+    )
+    monkeypatch.setattr(spec_loop, "main", lambda argv: 3)
+    assert env.run("run") == 3
+    out, err = _read(capfd)
+    assert "старая причина" not in out + err
+    assert "шаг завершился с кодом 3" in out
+    assert (out + err).count(dfl.LOG_HINT) == 1
+    monkeypatch.setattr(spec_loop, "main", lambda argv: 0)
+    assert env.run("run") == 0
+    out, err = _read(capfd)
+    assert "старая причина" not in out + err and "шаг завершился" not in out
+
+
+@pytest.mark.parametrize("code", [0, 3])
+def test_unreadable_question_points_to_log_once(
+    env: Env, monkeypatch, capfd, code: int
+) -> None:
+    _bind_streams(monkeypatch)
+    _step_leaves(monkeypatch, env, dfl.WAITING, code=code)
+
+    def status(session_id: str, cwd: Path) -> iv.DiscoveryReply:
+        raise OSError("uv не найден")
+
+    monkeypatch.setattr(dfl, "_discovery_status", status)
+    assert env.run("run", "--subject", "t") == code
+    out, err = _read(capfd)
+    assert "вопрос: dfl interview" in out
+    assert (out + err).count(dfl.LOG_HINT) == 1
+
+
+def test_readable_question_no_log_hint(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _step_leaves(monkeypatch, env, dfl.WAITING)
+    monkeypatch.setattr(dfl, "_discovery_status", lambda s, c: _question_reply())
+    assert env.run("run", "--subject", "t") == 0
+    out, err = _read(capfd)
+    assert dfl.LOG_HINT not in out + err
+
+
+def test_stopped_without_cause_nonzero_names_code(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _step_leaves(monkeypatch, env, "stopped_need", code=3)
+    assert env.run("run", "--subject", "t") == 3
+    out, _ = _read(capfd)
+    assert "шаг завершился с кодом 3" in out
+    assert "причина не записана" not in out
+
+
+@pytest.mark.parametrize(
+    ("failing", "merged"), [("propose", "OPEN"), ("approve", "MERGED")]
+)
+def test_brief_tool_failure_names_code(
+    env: Env, monkeypatch, capfd, failing: str, merged: str
+) -> None:
+    _bind_streams(monkeypatch)
+    _run("WS-1-a", "WS-1", "customer", "brief_ready")
+    env.forge.branches["brief/WS-1"] = [5]
+    env.forge.states[5] = merged
+    monkeypatch.setattr(bt, "main", lambda argv: 2 if argv[0] == failing else 0)
+    assert env.run("run") == 2
+    out, err = _read(capfd)
+    assert f"бриф: {failing} завершился с кодом 2" in out
+    assert (out + err).count(dfl.LOG_HINT) == 1
+
+
+def _make_log(env: Env, command: str, body: str, code: int | None) -> Path:
+    log = runlog.open_log(
+        env.tmp / "target", command, f"dfl {command} уровень 0", protect=None
+    )
+    log.fh.write(body)
+    if code is None:
+        log.fh.close()
+    else:
+        runlog.close_log(log, code)
+    return log.path
+
+
+def test_log_prints_last_and_report_hint_on_failure(env: Env, capfd) -> None:
+    _make_log(env, "run", "старый\n", 0)
+    _make_log(env, "answer", "новый\n", 1)
+    assert env.run("log") == 0
+    out, _ = _read(capfd)
+    assert "новый" in out and "старый" not in out
+    assert out.rstrip("\n").splitlines()[-1] == dfl.REPORT_HINT
+    assert "режим test" not in out
+
+
+def test_log_success_has_no_report_hint(env: Env, capfd) -> None:
+    _make_log(env, "run", "ок\n", 0)
+    assert env.run("log") == 0
+    out, _ = _read(capfd)
+    assert dfl.REPORT_HINT not in out
+
+
+def test_log_writes_no_log_and_needs_no_registration(env: Env) -> None:
+    _make_log(env, "run", "x\n", 0)
+    before = len(_logs(env))
+    assert env.run("log") == 0
+    assert len(_logs(env)) == before
+    assert env.registered == 0
+
+
+def test_log_n_and_list(env: Env, capfd) -> None:
+    _make_log(env, "run", "первый\n", 0)
+    _make_log(env, "answer", "второй\n", 3)
+    _make_log(env, "abandon", "третий\n", None)
+    assert env.run("log", "-n", "2") == 0
+    out, _ = _read(capfd)
+    assert "второй" in out and "третий" not in out
+    assert env.run("log", "-n", "1") == 0
+    out, _ = _read(capfd)
+    assert "третий" in out
+    assert env.run("log", "--list") == 0
+    lines = _read(capfd)[0].splitlines()
+    assert len(lines) == 3
+    pattern = r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d "
+    assert re.match(pattern + r"abandon код —$", lines[0])
+    assert re.match(pattern + r"answer код 3$", lines[1])
+    assert re.match(pattern + r"run код 0$", lines[2])
+
+
+def test_log_n_too_large_refused(env: Env, capfd) -> None:
+    _make_log(env, "run", "x\n", 0)
+    assert env.run("log", "-n", "2") == 2
+    _, err = _read(capfd)
+    assert "dfl log: отказ (код 2)" in err
+    assert "что сделать:" in err
+
+
+def test_log_n_zero_refused(env: Env, capfd) -> None:
+    _make_log(env, "run", "x\n", 0)
+    assert env.run("log", "-n", "0") == 2
+    assert "dfl log: отказ (код 2)" in _read(capfd)[1]
+
+
+def test_log_empty(env: Env, capfd) -> None:
+    assert env.run("log") == 0
+    assert "логов нет" in _read(capfd)[0]
+    assert env.run("log", "--list") == 0
+    assert "логов нет" in _read(capfd)[0]
+
+
+def test_log_non_utf8_bytes(env: Env, capfd) -> None:
+    path = _make_log(env, "run", "до\n", 0)
+    with path.open("ab") as fh:
+        fh.write(b"\xff\xfe\n")
+    assert env.run("log") == 0
+    assert "до" in _read(capfd)[0]
+
+
+def test_log_n_does_not_clash_with_verbose(env: Env, capfd) -> None:
+    _make_log(env, "run", "x\n", 0)
+    assert env.run("log", "-v", "-n", "1") == 0
+
+
+# --- правки финального ревью ---
+
+
+def _step_creates_engineer(monkeypatch, env: Env, *, url: str | None) -> None:
+    """Шаг раннера завершает engineer-прогон: с проверенным PR или без него."""
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        state = _run("WS-1-eng-b", "WS-1-eng", "engineer", "completed")
+        if url is not None:
+            _accepted(state, url)
+        return 0
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+
+
+def test_accepted_code_pr_merge_visible_at_level0(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    url = "https://github.com/o/alpha/pull/9"
+    _step_creates_engineer(monkeypatch, env, url=url)
+    assert env.run("run", "--subject", "t") == 0
+    out, _ = _read(capfd)
+    assert f"дальше: смержите {url} — конвейер закончен" in out
+
+
+def test_chain_stopped_hint_visible_at_level0_points_to_log(
+    env: Env, monkeypatch, capfd
+) -> None:
+    _bind_streams(monkeypatch)
+    _step_creates_engineer(monkeypatch, env, url=None)
+    assert env.run("run", "--subject", "t") == 0
+    out, _ = _read(capfd)
+    assert f"дальше: {dfl.CHAIN_STOPPED_HINT}" in out
+    assert "в выводе dfl run" not in out
+    assert "dfl log" in dfl.CHAIN_STOPPED_HINT
+
+
+def test_brief_ready_next_step_visible_at_level0(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _step_leaves(monkeypatch, env, "brief_ready")
+    assert env.run("run", "--subject", "t") == 0
+    out, _ = _read(capfd)
+    assert f"дальше: {BRIEF_NEXT}" in out
+    assert "мерж брифа, затем" not in out
+
+
+def test_optional_hint_stays_level1(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+
+    def spec_main(argv: list[str]) -> int:
+        _run("WS-1-a", "WS-1", "customer", "stopped_need")
+        return 0
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    assert env.run("run", "--subject", "t") == 0
+    out, _ = _read(capfd)
+    assert "дальше:" not in out
+    assert env.run("run", "-v") == 0
+    out, _ = _read(capfd)
+    assert "дальше: разберите причину" in out
+
+
+def test_unchanged_run_waiting_merge_reports_status_and_action(
+    env: Env, monkeypatch, capfd
+) -> None:
+    """resume на `waiting_human_merge` не пишет run.json — итог всё равно есть."""
+    _bind_streams(monkeypatch)
+    state = _run("WS-1-a", "WS-1", "customer", "waiting_human_merge")
+    state.pr = 7
+    rs.save(state)
+    monkeypatch.setattr(spec_loop, "main", lambda argv: 0)
+    assert env.run("run") == 0
+    out, _ = _read(capfd)
+    assert "прогон WS-1-a шагом не изменён: waiting_human_merge" in out
+    assert "дальше: смержите https://github.com/o/alpha/pull/7" in out
+
+
+def test_unchanged_orphan_interview_reports_question_pointer(
+    env: Env, monkeypatch, capfd
+) -> None:
+    _bind_streams(monkeypatch)
+    _run("WS-1-a", "WS-1", "customer", dfl.WAITING)  # сессии нет — сирота
+    monkeypatch.setattr(spec_loop, "main", lambda argv: 0)
+    assert env.run("run") == 0
+    out, err = _read(capfd)
+    assert "прогон WS-1-a шагом не изменён: waiting_interview" in out
+    assert "прогон WS-1-a ждёт ответа; вопрос: dfl interview" in out
+    assert (out + err).count(dfl.LOG_HINT) == 1
+
+
+def test_waiting_nonzero_code_names_code(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _step_leaves(monkeypatch, env, dfl.WAITING, code=3)
+    monkeypatch.setattr(dfl, "_discovery_status", lambda s, c: _question_reply())
+    assert env.run("run", "--subject", "t") == 3
+    out, _ = _read(capfd)
+    assert "шаг завершился с кодом 3" in out
+
+
+def test_correct_output_reaches_log(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _waiting("WS-1-a", "WS-1", "customer")
+    monkeypatch.setattr(dfl, "load_session", lambda sid: _session_view())
+    _claude_agent_returning(monkeypatch, '{"items": [], "ask": "Что поправить?"}')
+    assert env.run("correct", "поменяй") == 0
+    assert "Уточните: Что поправить?" in _read(capfd)[0]
+    [info] = _logs(env)
+    assert "Уточните: Что поправить?" in runlog.read_log(info.path)
+
+
+def test_cli_with_real_tee_level0_hides_runner_logs_it(
+    env: Env, monkeypatch, capfd
+) -> None:
+    """Боевой путь: `cli` оборачивает потоки настоящим `_Tee`."""
+    _bind_streams(monkeypatch)
+    assert dfl.cli(["--cwd", str(env.tmp / "target"), "run", "--subject", "t"]) == 0
+    out, err = _read(capfd)
+    assert "runner-line" not in out + err
+    [info] = _logs(env)
+    assert "runner-line" in runlog.read_log(info.path)
+
+
+def test_log_list_shows_local_time(monkeypatch) -> None:
+    """`dfl log --list`: метка имени (UTC) показывается местным временем."""
+    import time
+
+    monkeypatch.setenv("TZ", "Etc/GMT-3")  # UTC+3
+    time.tzset()
+    try:
+        info = runlog.LogInfo(Path("20261113T090000000000Z-run.log"), "run", 0)
+        assert dfl._list_line(info) == "2026-11-13 12:00:00 run код 0"
+    finally:
+        monkeypatch.delenv("TZ")
+        time.tzset()
