@@ -6,7 +6,9 @@
 Ответ уходит `discovery answer --question <id>` (функция `send`). Кончилось
 интервью неполным (код 10/11, обязательные темы не покрыты) — один раз
 добор: по каждой непокрытой теме вопрос человеку, раскладка и дописывание
-к ответу держателя темы (`resend` — `--supersede`). Отказ
+к ответу держателя темы (`resend` — `--supersede`); затем пункты без
+критерия проверки по находкам проверки брифа (GC-08): вопрос человеку,
+ответ дословно в `Acceptance` пункта (devtools#753). Отказ
 `discovery` — один повтор раскладки с причиной в промпте агента, затем
 человеку — простое сообщение и тот же вопрос заново. Человек не видит ни
 JSON, ни YAML, ни id пунктов.
@@ -15,6 +17,7 @@ JSON, ни YAML, ни id пунктов.
 from __future__ import annotations
 
 import enum
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -49,6 +52,20 @@ SKIP_WORDS = frozenset({"пропустить", "не знаю"})
 REFUSED_TEXT = "ответ не принят — ответьте на вопрос ещё раз"
 TOP_UP_HINT = "расскажите об этом своими словами («пропустить» — оставить так)"
 INCOMPLETE_CODES = (10, 11)
+# находка проверки брифа: у пункта нет критерия проверки (Acceptance/Target)
+NO_CRITERION_RE = re.compile(r"^GC-08 error \[([A-Z]+-\d+)\]")
+CRITERIA_INTRO = (
+    "интервью окончено, но бриф не прошёл проверку: у пунктов ниже нет "
+    "способа проверить, что они выполнены"
+)
+CRITERIA_HINT = (
+    "что проверить или какое значение приемлемо, хоть грубо "
+    "(«пропустить» — оставить так)"
+)
+CRITERIA_LEFT = (
+    "без критерия осталось пунктов: {n} — бриф не пройдёт проверку; "
+    "dfl run спросит снова"
+)
 
 
 class ChatResult(enum.Enum):
@@ -96,6 +113,7 @@ def chat(
                 return ChatResult.FINISHED
             topped_up = True
             _top_up(session, read, agent, resend, load)
+            _fill_criteria(_no_criterion(reply), session, read, resend, load)
     except _Stop:
         return ChatResult.STOPPED
     except KeyboardInterrupt:
@@ -140,6 +158,56 @@ def _top_up(session: str, read: Read, agent: Agent, resend: Send, load: Load) ->
         if key in view.covered():
             continue
         _top_up_topic(key, view, read, agent, resend)
+
+
+def _no_criterion(reply: iv.DiscoveryReply) -> list[str]:
+    """id пунктов без критерия проверки из находок проверки брифа (GC-08)."""
+    found = (
+        NO_CRITERION_RE.match(str(f)) for f in reply.envelope.get("findings") or []
+    )
+    return list(dict.fromkeys(m.group(1) for m in found if m))
+
+
+def _fill_criteria(
+    eids: list[str], session: str, read: Read, resend: Send, load: Load
+) -> None:
+    """Пункты без критерия: вопрос человеку по каждому; ответ дословно
+    становится `Acceptance` пункта, ответ держателя пересылается целиком."""
+    if not eids:
+        return
+    say(CRITERIA_INTRO)
+    left = 0
+    for eid in eids:
+        view = load(session)
+        qid = view.holders.get(eid)
+        if qid is None:
+            continue
+        record = view.entry_record(eid)
+        text = _ask_human(f"Как проверить «{record['body']}»? {CRITERIA_HINT}", read)
+        if is_skip(text) or not _sent_criterion(qid, record, text, view, resend):
+            left += 1
+    if left:
+        say(CRITERIA_LEFT.format(n=left))
+
+
+def _sent_criterion(
+    qid: str, record: dict[str, Any], text: str, view: SessionView, resend: Send
+) -> bool:
+    """Переслать ответ держателя с критерием пункта; отказ — сказать причину."""
+    payload = yaml.safe_dump(
+        {
+            "text": f"Критерий для «{record['body']}»: {text}",
+            "entries": [{**record, "Acceptance": text}],
+        },
+        allow_unicode=True,
+        sort_keys=False,
+    )
+    reply = resend(qid, _appended(view.held_answer(qid), payload))
+    if reply.code not in (1, 2):
+        return True
+    reason = reply.envelope.get("operation", {}).get("reason", "") or "отказ"
+    say(f"критерий не записан: {reason}")
+    return False
 
 
 def _top_up_topic(
