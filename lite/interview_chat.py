@@ -256,6 +256,12 @@ def _ask_human(header: str, read: Read) -> str:
             return text
 
 
+BROKEN_INPUT = (
+    "строка не прочитана: в ней битый символ (часто — Backspace стёр полбуквы); "
+    "введите эту строку ещё раз"
+)
+
+
 def read_answer(read: Read) -> str | None:
     """Ответ — строки до пустой; `None` — EOF или `/стоп`."""
     lines: list[str] = []
@@ -275,9 +281,26 @@ def is_skip(text: str) -> bool:
 
 def stdin_read(prompt: str) -> str | None:
     """Строка из терминала; EOF (Ctrl-D) и Ctrl-C — `None` (выход из цикла,
-    без трассировки); строка приглашения закрывается переводом строки."""
+    без трассировки); строка приглашения закрывается переводом строки.
+
+    Редактирование строки — через `readline`, если он есть: без него
+    Backspace в терминале стирает байт, а не символ, и от кириллической буквы
+    остаётся полсимвола (devtools#751). Такая строка не крах: подсказка и
+    повтор ввода этой строки."""
+    _enable_line_editing()
+    while True:
+        try:
+            return input(prompt)
+        except (EOFError, KeyboardInterrupt):
+            say("")
+            return None
+        except UnicodeDecodeError:
+            say(BROKEN_INPUT)
+
+
+def _enable_line_editing() -> None:
+    """Импорт `readline` включает посимвольное редактирование в `input`."""
     try:
-        return input(prompt)
-    except (EOFError, KeyboardInterrupt):
-        say("")
-        return None
+        import readline  # noqa: F401
+    except ImportError:  # нет в сборке Python — ввод работает и без него
+        pass

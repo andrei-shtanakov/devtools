@@ -698,3 +698,18 @@ def test_chat_lines_reach_log_sink() -> None:
     finally:
         set_sink(None)
     assert "Вопрос 1 (цели): Зачем это нужно?" in buf.getvalue()
+
+
+def test_stdin_read_broken_utf8_asks_again(monkeypatch, capsys) -> None:
+    """Битая UTF-8-строка (стёрт полсимвола) — подсказка и повтор, не крах."""
+    calls = iter([UnicodeDecodeError("utf-8", b"\xd1", 0, 1, "invalid"), "ответ"])
+
+    def fake_input(prompt: str) -> str:
+        item = next(calls)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    assert ic.stdin_read("> ") == "ответ"
+    assert ic.BROKEN_INPUT in capsys.readouterr().out
