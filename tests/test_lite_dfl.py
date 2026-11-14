@@ -6,9 +6,7 @@
 
 from __future__ import annotations
 
-import itertools
 import json
-import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -1640,20 +1638,14 @@ _EDGE_LINE = (
 )
 
 
-_EDGE_STAMPS = itertools.count(10**18)
-
-
 def _review_stop(run_id: str = "WS-1-a") -> None:
     """Прогон в `stopped_review` волны 2 с одной блокирующей находкой."""
     state = _run(run_id, "WS-1", "customer", "stopped_review", subject="t")
     state.wave = 2
+    state.ops["edge-2"] = {"status": "started"}  # FAIL edge-check: op начат
     rs.save(state)
     rd = rs.run_dir(run_id)
-    path = rd / "edge-findings.txt"
-    path.unlink(missing_ok=True)  # как `_step_edge`: снять и записать заново
-    path.write_text(_EDGE_LINE + "\n", encoding="utf-8")
-    stamp = next(_EDGE_STAMPS)  # проверка состоялась — новый файл стопа
-    os.utime(path, ns=(stamp, stamp))
+    (rd / "edge-findings.txt").write_text(_EDGE_LINE + "\n", encoding="utf-8")
     out = rd / "edge-check" / "w2"
     out.mkdir(parents=True, exist_ok=True)
     record = {
@@ -1732,7 +1724,8 @@ def _edge_passed(run_id: str = "WS-1-a") -> None:
 
 def test_check_counted_only_when_edge_reached(env: Env, monkeypatch, capfd) -> None:
     """Повторный шаг остановился до edge-check (стоп гейта) — проверка не
-    оплачена и не считается; итог круга со стопом печатает счётчик."""
+    оплачена и не считается. Как `runner.resume` из `stopped_review`: op
+    `edge-<w>` снят, файл стопа удалён — это не признак проверки."""
     _bind_streams(monkeypatch)
     _tty(monkeypatch)
 
@@ -1742,6 +1735,8 @@ def test_check_counted_only_when_edge_reached(env: Env, monkeypatch, capfd) -> N
             _review_stop()
             return 1
         state = rs.load("WS-1-a")
+        state.ops.pop("edge-2", None)  # resume: `_STOPPED_RESET_OPS`
+        (rs.run_dir("WS-1-a") / "edge-findings.txt").unlink()  # `_drop_findings_of`
         state.status = "stopped_gate"
         rs.save(state)
         return 1

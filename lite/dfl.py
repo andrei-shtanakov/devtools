@@ -550,32 +550,25 @@ def _resolve_rounds(
             return code
         rounds += 1
         seen |= keys
-        mark = _edge_mark(state)
         code = _step(target, subject, role, chatting=True)
-        if _edge_mark(state) != mark:
+        if _edge_ran(state):
             calls.check += 1
         say(calls.line(), 1)
     return code
 
 
-def _edge_mark(state: rs.RunState) -> tuple[object, ...]:
-    """Отпечаток шага edge волны `state`: статус и вердикт op и файл стопа.
+def _edge_ran(state: rs.RunState) -> bool:
+    """Повторный шаг дошёл до edge-check волны `state`: op `edge-<w>` есть.
 
-    Шаг edge снимает файл стопа на входе и пишет заново (`_step_edge`) или
-    завершает op; не изменилось ничего — повторный шаг до проверки не дошёл
-    (стоп раньше), платной проверки не было."""
+    `runner.resume` из `stopped_review` снимает этот op и файл стопа
+    (`_STOPPED_RESET_OPS`, `_drop_findings_of`), заново op создаёт только
+    `_step_edge`; стоп раньше (гейт, автор, коммит) — платной проверки не
+    было."""
     try:
         now = rs.load(state.run_id)
     except (OSError, ValueError, TypeError):
-        return ()
-    op = now.ops.get(runner.wave_key(state, "edge"), {})
-    path = rs.run_dir(state.run_id) / sf.FILE_OF_STATUS[sf.EDGE]
-    try:
-        st = path.stat()
-        stamp: tuple[int, ...] | None = (st.st_ino, st.st_mtime_ns, st.st_size)
-    except OSError:
-        stamp = None
-    return (op.get("status"), op.get("verdict"), stamp)
+        return False
+    return runner.wave_key(state, "edge") in now.ops
 
 
 def _review_run(repo: str, subject: str | None) -> rs.RunState | None:

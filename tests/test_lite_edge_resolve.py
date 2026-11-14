@@ -718,3 +718,39 @@ def test_journal_allowances_scoped_per_file(world: World) -> None:
     outcome = world.resolve([], world.agent(_fixes(2)), world.revise(per_file=per_file))
     assert outcome is er.Outcome.STOPPED
     assert "AC-02" in world.out()
+
+
+def test_removal_then_own_answer_not_allowed(world: World) -> None:
+    """Удаление FR-02 выбрано, затем по той же находке ответ «своё: …» —
+    разрешение берётся только из последнего решения: FR-02 удалять нельзя."""
+    world.findings(_finding())
+    removal = ej.Decision(
+        (NODE, EDGE, "R1"), "Цель G-03?", "убрать FR-02", "option", 1,
+        {"removes": ["FR-02"], "downgrades": []}, digest=DIGEST,
+    )  # fmt: skip
+    own = ej.Decision(
+        (NODE, EDGE, "R1"), "Цель G-03?", "покрыть", "own", 1, digest=DIGEST
+    )
+    ej.append(world.run_dir, 2, removal)
+    ej.append(world.run_dir, 2, own)
+    outcome = world.resolve([], world.agent(FIX), world.revise(WITHOUT_FR02))
+    assert outcome is er.Outcome.STOPPED
+    assert "FR-02" in world.out()
+    assert world.node.read_text(encoding="utf-8") == BEFORE
+
+
+def test_removal_spent_after_text_changed(world: World) -> None:
+    """Удаление выбрано на прежнем тексте; узел переписан (digest другой),
+    находка того же ключа вернулась — разрешение не переиспользуется."""
+    world.findings(_finding(), subject=[{"path": FILE, "sha256": "s-edited"}])
+    ej.append(
+        world.run_dir,
+        2,
+        ej.Decision(
+            (NODE, EDGE, "R1"), "Цель G-03?", "убрать FR-02", "option", 1,
+            {"removes": ["FR-02"], "downgrades": []}, digest=DIGEST,
+        ),
+    )  # fmt: skip
+    outcome = world.resolve([], world.agent(FIX), world.revise(WITHOUT_FR02))
+    assert outcome is er.Outcome.STOPPED
+    assert world.node.read_text(encoding="utf-8") == BEFORE

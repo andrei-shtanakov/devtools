@@ -56,22 +56,30 @@ def recall(
 ) -> dict[Key, Recall]:
     """Находка → что из журнала волны к ней относится (по ключу находки).
 
-    Повторный вопрос решает последнее решение по ключу; разрешения —
-    все решения по ключу (выбор мог быть до остановки или в прошлом вызове).
+    Повторный вопрос и разрешения решает последнее решение по ключу (оно
+    могло быть до остановки или в прошлом вызове); разрешения — только пока
+    digest находки тот же, что при ответе.
     """
     return {f.key: _recall(decisions, f, test, last_round) for f in findings}
+
+
+def _allows(last: Decision, f: Finding) -> dict[str, frozenset[str]]:
+    """Разрешения последнего решения — пока текст узла тот же (digest равен
+    и не пуст): переписывание состоялось или ответ сменился — разрешение
+    израсходовано."""
+    if not last.digest or last.digest != f.digest:
+        return {}
+    return {
+        "removes": frozenset(last.allows.get("removes", [])),
+        "downgrades": frozenset(last.allows.get("downgrades", [])),
+    }
 
 
 def _recall(
     decisions: list[Decision], f: Finding, test: bool, last_round: bool
 ) -> Recall:
     mine = [d for d in decisions if d.key == f.key]
-    allows = {
-        "removes": frozenset(i for d in mine for i in d.allows.get("removes", [])),
-        "downgrades": frozenset(
-            i for d in mine for i in d.allows.get("downgrades", [])
-        ),
-    }
+    allows = _allows(mine[-1], f) if mine else {}
     bindable = test and bool(f.digest)  # без digest принятие не к чему привязать
     if not mine:
         return Recall(offer_override=bindable and last_round, **allows)

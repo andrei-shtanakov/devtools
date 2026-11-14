@@ -406,8 +406,8 @@ def _rewrite(
 def _allows(
     journal: list[ej.Decision], findings: list[ej.Finding]
 ) -> tuple[set[str], set[str]]:
-    """Разрешённые удаления/понижения — все решения волны по находкам этого
-    файла (и прошлых вызовов: выбор мог быть до остановки)."""
+    """Разрешённые удаления/понижения по находкам этого файла: журнал волны
+    (выбор мог быть до остановки), последнее решение на неизменённом тексте."""
     memory = em.recall(journal, findings).values()
     return (
         {i for r in memory for i in r.removes},
