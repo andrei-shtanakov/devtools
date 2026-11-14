@@ -3,8 +3,10 @@
 Интервью кончилось, темы покрыты, а проверка брифа не прошла — `dfl` чинит
 то, что можно спросить у человека или вывести из уже записанного:
 
-- GC-08 «нет Acceptance» (FR, NFR) — вопрос «как проверить?», ответ
-  дословно в `Acceptance` пункта (devtools#753);
+- GC-08 «нет Acceptance» (FR, NFR) — гипотезу критерия (и `Q` исследования
+  для недостающего числа) предлагает агент, человек подтверждает; иные слова
+  человека — в `Preference` пункта, гипотеза по ним записывается без второго
+  вопроса (контракт брифа v1.2; было — ответ дословно, devtools#753);
 - GC-13 (IF без связи с системой S, AP без связи с S/CON) — связи
   предлагает агент по записанным пунктам, человек подтверждает (#755);
 - GC-05 (Must-FR customer-брифа без вердикта реализуемости) — вопрос по
@@ -27,7 +29,17 @@ from governance import interview as iv
 from governance.discovery_contract import gate_check
 from lite.interview_state import SessionView
 from lite.output import say
-from lite.structure import Agent, AgentUnavailable, FormError, first_json_object
+from lite.structure import (
+    Agent,
+    AgentUnavailable,
+    FormError,
+    criterion_errors,
+    first_json_object,
+    form_errors,
+    parse_items,
+    retry_note,
+    to_payload,
+)
 
 Ask = Callable[[str], str | None]  # ответ человека; `None` — пропуск
 Send = Callable[[str, str], iv.DiscoveryReply]
@@ -38,16 +50,31 @@ NO_SYSTEM_RE = re.compile(r"^GC-13 error \[((?:IF|AP)-\d+)\]")
 NO_VERDICT_RE = re.compile(
     r"^GC-05 error \[coverage\.feasibility_review\] Must-требование (FR-\d+)"
 )
-YES_WORDS = frozenset({"да", "ок", "ok", "y", "yes", "верно"})
+# Согласие: первое слово — из YES_WORDS, остальные — из YES_TAIL («ок, давай»,
+# «да, всё верно», «согласна, так и запишите»); регистр, пунктуация и «ё» —
+# не важны. Иные слова — уточнение человека.
+YES_WORDS = frozenset({
+    "да", "ок", "окей", "ok", "okay", "y", "yes", "верно", "согласен",
+    "согласна", "согласны", "подходит", "годится", "ага", "угу", "конечно",
+    "хорошо", "точно", "именно",
+})  # fmt: skip
+YES_TAIL = YES_WORDS | {
+    "так", "все", "давай", "давайте", "и", "запиши", "запишите", "записывай",
+    "записывайте", "пиши", "пишите", "можно",
+}  # fmt: skip
+# Голое отрицание или отмахивание («нет», «не так», «нет, не то») — как «нет».
+NO_WORDS = frozenset({"нет", "не", "no", "n"})
+NO_TAIL = NO_WORDS | {"так", "то", "это"}
+Q_ID_RE = re.compile(r"\bQ-\d+\b")
 FEASIBILITY_KEY = "feasibility_review"
 
 CRITERIA_INTRO = (
     "интервью окончено, но бриф не прошёл проверку: у пунктов ниже нет "
-    "способа проверить, что они выполнены"
+    "способа проверить, что они выполнены — предлагаю, как проверять"
 )
-CRITERIA_HINT = (
-    "что проверить или какое значение приемлемо, хоть грубо "
-    "(«пропустить» — оставить так)"
+CRITERIA_CONFIRM = (
+    "«{body}»: проверка — {hypothesis}. Так? («да» — записать; иначе скажите "
+    "своими словами, что имелось в виду; «пропустить»)"
 )
 TRACES_INTRO = (
     "бриф не прошёл проверку: интерфейсы и архитектурные предпочтения должны "
@@ -62,6 +89,8 @@ VERDICT_HINT = (
     "реализуемо как есть? «да» — да; иначе — что не так и как реалистично "
     "(«пропустить» — оставить)"
 )
+WORDS_ASK = "скажите своими словами, что имелось в виду («пропустить» — оставить)"
+WORDS_KEPT = "ваши слова записаны, критерий предложит следующий dfl run"
 GATE_LEFT = (
     "не исправлено пунктов: {n} — бриф не пройдёт проверку; dfl run спросит снова"
 )
@@ -79,7 +108,9 @@ def repair(
 ) -> None:
     """Починить по находкам `findings` всё, что умеем; итог — человеку."""
     lines = [str(f) for f in findings]
-    left = _fill_criteria(_ids(NO_CRITERION_RE, lines), session, ask, resend, load)
+    left = _fill_criteria(
+        _ids(NO_CRITERION_RE, lines), session, ask, agent, resend, load
+    )
     left += _fill_traces(_ids(NO_SYSTEM_RE, lines), session, ask, agent, resend, load)
     left += _fill_verdicts(
         _ids(NO_VERDICT_RE, lines), session, ask, resend, load, upstream
@@ -129,30 +160,213 @@ def _resent(
 
 
 def _fill_criteria(
-    eids: list[str], session: str, ask: Ask, resend: Send, load: Load
+    eids: list[str], session: str, ask: Ask, agent: Agent, resend: Send, load: Load
 ) -> int:
-    """Пункты без критерия: вопрос по каждому, ответ дословно в `Acceptance`.
+    """Пункты без критерия: гипотезу предлагает агент, человек подтверждает.
     Возвращает число неисправленных."""
     if not eids:
         return 0
     say(CRITERIA_INTRO)
-    left = 0
-    for eid in eids:
-        view = load(session)
-        qid = view.holders.get(eid)
-        if qid is None:
-            left += 1
-            continue
-        record = view.entry_record(eid)
-        text = ask(f"Как проверить «{record['body']}»? {CRITERIA_HINT}")
-        if text is None:
-            left += 1
-            continue
-        note = f"Критерий для «{record['body']}»: {text}"
-        entry = {**record, "Acceptance": text}
-        if not _resent(qid, note, [entry], view, resend):
-            left += 1
-    return left
+    fixed = [_fill_criterion(eid, load(session), ask, agent, resend) for eid in eids]
+    return fixed.count(False)
+
+
+def _fill_criterion(
+    eid: str, view: SessionView, ask: Ask, agent: Agent, resend: Send
+) -> bool:
+    """Один пункт: «да» — гипотеза записана; иные слова — в `Preference`,
+    гипотеза по ним записана без второго вопроса (не вышла — записаны только
+    слова, пункт не исправлен); пропуск или сбой агента — не исправлен
+    (вопроса «как проверить» нет: критерий — перевод агента)."""
+    qid = view.holders.get(eid)
+    if qid is None:
+        return False
+    record = view.entry_record(eid)
+    first = _proposed_criterion(eid, qid, view, agent, None)
+    if first is None:
+        return False
+    entries, shown, research = first
+    question = CRITERIA_CONFIRM.format(body=record["body"], hypothesis=shown)
+    answer = _confirmation(ask(question), ask)
+    if answer is None:
+        return False
+    if answer is True:
+        note = f"Критерий для «{record['body']}»: {shown}"
+        return _resent(qid, note, entries, view, resend)
+    words = _without_ids(answer, research)
+    note = f"Уточнение к «{record['body']}»: {words}"
+    second = _proposed_criterion(eid, qid, view, agent, words)
+    if second is None:
+        kept = {**record, "Preference": _preference(record, words)}
+        if _resent(qid, note, [kept], view, resend):
+            say(WORDS_KEPT)
+        return False
+    entries, shown, _research = second
+    if not _resent(qid, note, entries, view, resend):
+        return False
+    say(f"записано: «{record['body']}»: проверка — {shown}")
+    return True
+
+
+def _confirmation(
+    answer: str | None, ask: Ask, again: bool = True
+) -> bool | str | None:
+    """Ответ на гипотезу: `True` — согласие («Да.», «согласен», «ок, давай»),
+    строка — слова человека, `None` — пропуск. Голое «нет», «не так», ответ
+    без букв — один раз попросить слов (сам ответ в `Preference` не пишется)."""
+    if answer is None:
+        return None
+    if _agrees(answer):
+        return True
+    tokens = _tokens(answer)
+    if not tokens or (tokens[0] in NO_WORDS and set(tokens) <= NO_TAIL):
+        return _confirmation(ask(WORDS_ASK), ask, False) if again else None
+    return answer.strip()
+
+
+def _tokens(answer: str) -> list[str]:
+    """Слова ответа: без регистра и пунктуации, «ё» как «е» (цифры — слова)."""
+    return re.findall(r"[^\W_]+", answer.casefold().replace("ё", "е"))
+
+
+def _agrees(answer: str) -> bool:
+    """Обычное согласие («да», «согласен», «ок, давай», «да, всё верно»)."""
+    tokens = _tokens(answer)
+    return bool(tokens) and tokens[0] in YES_WORDS and set(tokens) <= YES_TAIL
+
+
+def _without_ids(words: str, research: dict[str, str]) -> str:
+    """Id `Q-NN` в словах человека → «текст исследования» (неизвестный —
+    выброшен): в `Preference` висячий id завалил бы GC-17."""
+    out = Q_ID_RE.sub(
+        lambda m: f"«{research[m.group(0)]}»" if m.group(0) in research else "",
+        words,
+    )
+    return re.sub(r"[ \t]{2,}", " ", out).strip()
+
+
+def _preference(record: dict[str, Any], words: str) -> str:
+    """Прежнее предпочтение пункта и новые слова человека."""
+    return "; ".join(p for p in (record.get("Preference"), words) if p)
+
+
+def _proposed_criterion(
+    eid: str, qid: str, view: SessionView, agent: Agent, words: str | None
+) -> tuple[list[dict[str, Any]], str, dict[str, str]] | None:
+    """Гипотеза агента → (записи: пункт и новые `Q`; гипотеза для человека —
+    без id; {id: текст} исследований). Слова человека `words` дописываются в
+    `Preference`. Нарушение формы — один повтор агента; сбой — причина
+    человеку, `None`."""
+    record = view.entry_record(eid)
+    if words is not None:
+        record["Preference"] = _preference(record, words)
+    said = view.held_answer(qid).get("text", "")
+    prompt = _criterion_prompt(record, view, said, words)
+    try:
+        try:
+            items = _criterion_items(eid, record, view, agent(prompt))
+        except FormError as exc:
+            retry = f"{prompt}\n\n{retry_note(str(exc))}"
+            items = _criterion_items(eid, record, view, agent(retry))
+    except (AgentUnavailable, FormError) as exc:
+        say(f"критерий для «{record['body']}» не предложен: {exc}")
+        return None
+    own, *fresh = yaml.safe_load(to_payload("", items, view))["entries"]
+    research = {e.id: e.body for e in view.entries if _prefix(e.id) == "Q"}
+    research.update((q["id"], q["body"]) for q in fresh)
+    hypothesis = "; ".join(own[k] for k in ("Acceptance", "Target") if own.get(k))
+    for q in fresh:
+        say(f"  найти: {q['body']}")
+    shown = Q_ID_RE.sub(
+        lambda m: f"«{research.get(m.group(0), 'значение исследования')}»",
+        hypothesis,
+    )
+    return [own, *fresh], shown, research
+
+
+def _criterion_items(
+    eid: str, record: dict[str, Any], view: SessionView, raw: str
+) -> list[dict[str, Any]]:
+    """Ответ агента → пункты раскладки: обновление `eid` (только критерий;
+    body, важность — прежние, предпочтение — из `record`) и новые `Q`, на
+    которые критерий ссылается. Иное — `FormError`."""
+    items, _ask = parse_items(raw)
+    own = [i for i in items if i.get("id") == eid]
+    fresh = [i for i in items if i.get("id") != eid]
+    if len(own) != 1 or any(i["prefix"] != "Q" or "id" in i for i in fresh):
+        raise FormError(f"нужен ровно пункт {eid} и, при нужде, новые Q")
+    kept = {k: own[0][k] for k in ("acceptance", "target") if k in own[0]}
+    if record.get("Preference"):
+        kept["preference"] = record["Preference"]
+    item = {"id": eid, "prefix": own[0]["prefix"], "body": record["body"],
+            "traces": [], **kept}  # fmt: skip
+    errors = form_errors([item, *fresh], view) or criterion_errors([item], view)
+    criterion = " ".join(kept.get(k, "") for k in ("acceptance", "target"))
+    errors += [
+        f"Q «{q['body']}» не упомянут в критерии — сошлись на его ref или убери"
+        for q in fresh
+        if not _mentions(criterion, q.get("ref"))
+    ]
+    if errors:
+        raise FormError("; ".join(errors))
+    return [item, *fresh]
+
+
+def _mentions(text: str, ref: str | None) -> bool:
+    """Отдельно стоящий `ref` в тексте."""
+    if not ref:
+        return False
+    return re.search(rf"(?<![\w-]){re.escape(ref)}(?![\w-])", text) is not None
+
+
+def _criterion_prompt(
+    record: dict[str, Any], view: SessionView, said: str, words: str | None
+) -> str:
+    """Промпт агента: пункт, слова держащего ответа и уточнение человека,
+    известные `Q`."""
+    eid = str(record["id"])
+    fields = "; ".join(
+        f"{k}: {v}" for k, v in record.items() if k not in ("id", "body")
+    )
+    redo = (
+        f"\nЧеловек отклонил прежнюю гипотезу и уточнил: «{words}» — переведи "
+        "именно это.\n"
+        if words
+        else ""
+    )
+    research = "\n".join(
+        f"- {e.id}: {e.body}" for e in view.entries if _prefix(e.id) == "Q"
+    )
+    field = "acceptance" if _prefix(eid) == "FR" else "acceptance или target"
+    return f"""\
+Ты аналитик-переводчик: у пункта брифа нет критерия проверки. Переведи
+предпочтение человека в проверяемое ограничение — гипотезу, которую человек
+подтвердит. Не выдумывай сути: только из пункта и слов человека.
+
+Пункт {eid}: {record["body"]}
+Поля пункта: {fields or "(нет)"}
+
+Слова человека (ответ, в котором записан пункт):
+<<<
+{said}
+>>>
+{redo}
+Правила:
+- верни пункт с "id": "{eid}", "prefix": "{_prefix(eid)}", его body и полем
+  {field} — твоей гипотезой (у человека не спрашивай);
+- если для гипотезы нужно число (порог, baseline), а человек его не назвал, —
+  не выдумывай: заведи в этом же ответе пункт Q (body — какое значение найти,
+  owner_role — analyst или engineer, "ref": "q-1") и сошлись на него в
+  критерии этим ref: «… не хуже значения из q-1»;
+- ссылаться на Q-NN можно только на уже записанные:
+{research or "- (нет)"}
+- других пунктов не возвращай.
+
+Верни только JSON, без пояснений:
+{{"items": [{{"id": "{eid}", "prefix": "{_prefix(eid)}", "body": "...",
+"acceptance": "..."}}, {{"prefix": "Q", "body": "...", "ref": "q-1",
+"owner_role": "analyst"}}]}}
+"""
 
 
 # --- GC-13: связи IF → S, AP → S/CON ---
@@ -177,7 +391,7 @@ def _fill_traces(
     for eid, traces in proposed.items():
         say(f"  «{bodies[eid]}» → " + ", ".join(f"«{bodies[t]}»" for t in traces))
     answer = ask(TRACES_CONFIRM)
-    if answer is None or answer.strip().casefold() not in YES_WORDS:
+    if answer is None or not _agrees(answer):
         return len(eids)
     left = len(eids) - len(proposed)
     for qid, group in _by_holder(proposed, view).items():
@@ -277,7 +491,7 @@ def _fill_verdicts(
         text = ask(f"{fr} «{label}» — {VERDICT_HINT}")
         if text is None:
             continue
-        ok = text.strip().casefold() in YES_WORDS
+        ok = _agrees(text)
         verdict = "реализуемо как есть" if ok else text
         entries.append({
             "id": f"X-{number:02d}",

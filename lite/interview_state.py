@@ -1,4 +1,4 @@
-"""Состояние сессии интервью из `discovery` (зонд `lite/interview_probe.py`)."""
+"""Состояние сессии интервью из `discovery show --session <id>`."""
 
 from __future__ import annotations
 
@@ -7,14 +7,13 @@ import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from governance import df_config
 
 Runner = Callable[..., subprocess.CompletedProcess]
 
-PROBE = Path(__file__).resolve().parent / "interview_probe.py"
+SHOW_OK_CODES = (0, 10, 11, 20)  # 20 — сессия ждёт ответа: для `show` норма
 _ID_RE = re.compile(r"^([A-Z]+)-(\d+)$")
 
 
@@ -103,47 +102,67 @@ class SessionView:
         return f"{prefix}-{max(used, default=0) + 1:02d}"
 
 
-def _probe_argv(session_id: str) -> list[str]:
-    """argv зонда закреплённым окружением `discovery`."""
+def _show_argv(session_id: str) -> list[str]:
+    """argv `discovery show` закреплённым окружением `discovery`."""
     try:
         project = df_config.workspace_dir("discovery")
     except df_config.ConfigError as exc:
         raise InterviewStateError(f"конфиг DarkFactory: {exc}") from exc
     return [
         "uv", "run", "--frozen", "--project", str(project),
-        "python", "-I", str(PROBE), session_id,
+        "discovery", "show", "--session", session_id,
     ]  # fmt: skip
 
 
-def _parse(raw: dict[str, Any]) -> SessionView:
-    """JSON зонда → `SessionView`."""
+def _parse(envelope: dict[str, Any]) -> SessionView:
+    """Конверт `discovery show` → `SessionView`.
+
+    `answered_keys` — покрытые темы (`session.coverage`): `covered()` читает его
+    только для тем без префикса, а для них покрытие и есть наличие ответа."""
+    raw = envelope["session"]
+    topics = raw["topics"]
     entries = [Entry(e["id"], e["body"], e["fields"]) for e in raw["entries"]]
     return SessionView(
         frame=raw["frame"],
-        required=raw["required"],
-        optional=raw["optional"],
+        required=topics["required"],
+        optional=topics["optional"],
         entries=entries,
         declared=raw["declared"],
         holders=raw["holders"],
-        answers=raw["answers"],
-        answered_keys=raw["answered_keys"],
-        readiness=raw["readiness"],
-        findings=raw["findings"],
-        asked=raw["asked"],
+        answers={a["question_id"]: a["payload"] for a in raw["answers"]},
+        answered_keys=[k for k, v in raw["coverage"].items() if v == "covered"],
+        readiness=envelope["readiness"],
+        findings=envelope["readiness_findings"],
+        asked={
+            q["question_id"]: str(q["coverage_key"])
+            for q in raw["asked"]
+            if q.get("coverage_key") is not None
+        },
     )
 
 
+def _failure_reason(done: subprocess.CompletedProcess) -> str:
+    """Причина отказа: `operation.reason` конверта в stdout, затем stderr, затем код."""
+    try:
+        reason = json.loads(done.stdout)["operation"]["reason"]
+    except (ValueError, KeyError, TypeError):
+        reason = None
+    if isinstance(reason, str) and reason.strip():
+        return reason.strip()
+    return (done.stderr or "").strip() or f"код {done.returncode}"
+
+
 def load_session(session_id: str, run: Runner = subprocess.run) -> SessionView:
-    """Состояние сессии; сбой зонда или разбора — `InterviewStateError`."""
-    argv = _probe_argv(session_id)
+    """Состояние сессии; сбой `show` или разбора — `InterviewStateError`."""
+    argv = _show_argv(session_id)
     try:
         done = run(argv, capture_output=True, text=True, check=False)
     except OSError as exc:
-        raise InterviewStateError(f"зонд не запущен: {exc}") from exc
-    if done.returncode != 0:
-        reason = (done.stderr or "").strip() or f"код {done.returncode}"
-        raise InterviewStateError(f"зонд сессии {session_id}: {reason}")
+        raise InterviewStateError(f"discovery show не запущен: {exc}") from exc
+    if done.returncode not in SHOW_OK_CODES:
+        reason = _failure_reason(done)
+        raise InterviewStateError(f"discovery show {session_id}: {reason}")
     try:
         return _parse(json.loads(done.stdout))
     except (ValueError, KeyError, TypeError) as exc:
-        raise InterviewStateError(f"зонд вернул не то: {exc!r}") from exc
+        raise InterviewStateError(f"discovery show вернул не то: {exc!r}") from exc

@@ -82,6 +82,16 @@ def test_failure_with_minor_is_failed_check(run) -> None:
     assert sf.summary(_edge()) == sf.FAILED_CHECK
 
 
+def test_failed_check_with_minor_labels_advisory(run) -> None:
+    """Сбой ревьюера рядом с minor (живой прогон 14.11): рекомендации — под
+    своим заголовком, иначе выглядят причиной стопа."""
+    _write("edge-findings.txt", MINOR, ERROR_EDGE)
+    texts = [t for t, _ in sf.shown(_edge())]
+    head = texts.index(sf.ADVISORY_HEAD)
+    assert texts[head + 1] == f"  - {sf.readable(MINOR)}"
+    assert texts.index(f"  - {sf.readable(ERROR_EDGE)}") < head
+
+
 def test_mixed_failures_shown_but_not_counted(run) -> None:
     _write("edge-findings.txt", MAJOR, ERROR_EDGE, NO_FINDINGS)
     stop = _edge()
@@ -104,6 +114,23 @@ def test_edit_hint_names_bundle_file_target_and_branch(run) -> None:
     assert hint is not None
     assert "workstreams/w/spec/10-requirements.md в /t" in hint
     assert "ветка spec/w-behaviour-w2" in hint and "коммитить не нужно" in hint
+
+
+def test_edit_hint_edge_keeps_paid_repeat_wording(run) -> None:
+    _write("edge-findings.txt", MAJOR)
+    hint = sf.edit_hint(run, _edge())
+    assert hint is not None
+    assert "повтор — новый платный вызов проверки" in hint
+
+
+def test_edit_hint_gate_does_not_call_repeat_paid(run) -> None:
+    _write("gate-findings.txt", "error GC-ORPHAN [BEH-01] сирота")
+    stop = sf.load("R-1", sf.GATE)
+    assert stop is not None
+    hint = sf.edit_hint(run, stop)
+    assert hint is not None
+    assert "новый платный вызов" not in hint
+    assert "после гейта снова пойдёт платная смысловая проверка" in hint
 
 
 def test_gate_output_without_errors_stays_level_one(run) -> None:

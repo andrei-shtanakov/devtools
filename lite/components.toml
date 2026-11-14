@@ -2,7 +2,7 @@ schema = "darkfactory-components/v1"
 
 [repos.discovery]
 url = "https://github.com/andrei-shtanakov/discovery.git"
-sha = "c7961b9e13c290d30cadd2ceea946768a041de90"
+sha = "91543b1bc8f976d6938a82b0db4764be1ecfa613"
 
 [repos.spec-runner]
 url = "https://github.com/andrei-shtanakov/spec-runner.git"

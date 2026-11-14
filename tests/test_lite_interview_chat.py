@@ -345,6 +345,24 @@ def test_render_view_no_current_question_and_nfr_target() -> None:
     assert "NFR-01 быстро — цель: до 2 с" in out
 
 
+def test_render_view_shows_preference() -> None:
+    """Ревью #763: записанные слова человека (`Preference`) видны в просмотре."""
+    view = _corr_view()
+    view.entries.append(
+        Entry("NFR-01", "быстро", {"Preference": "чтобы не ждать", "Target": "2 с"})
+    )
+    out = iview.render_view(view, None)
+    assert "NFR-01 быстро — цель: 2 с; предпочтение: чтобы не ждать" in out
+
+
+def test_correct_names_preference_only_change() -> None:
+    """Правка только `preference` — названа человеку, а не пустая строка."""
+    send = Sender()
+    item = _fr1_item(body="выгрузка раз в неделю", preference="без ручных шагов")
+    out = _correct(_agent({"items": [item], "ask": None}), send)
+    assert out == "FR-01 Preference: «» → «без ручных шагов»"
+
+
 def _fr1_item(**over: Any) -> dict[str, Any]:
     item = {
         "id": "FR-01",
@@ -784,33 +802,48 @@ def _gate_view() -> SessionView:
     )
 
 
+FR_HYP = "тесты спеки зелёные"
+NFR_HYP = "из 10 запусков 8 доходят до конца"
+
+
+def _proposal(record: dict[str, Any], acceptance: str) -> dict[str, Any]:
+    """Гипотеза критерия от агента (gate_repair, контракт v1.2)."""
+    prefix = record["id"].split("-")[0]
+    item = {"id": record["id"], "prefix": prefix, "body": record["body"],
+            "acceptance": acceptance}  # fmt: skip
+    return {"items": [item]}
+
+
+FR_PROPOSAL = _proposal(FR_RECORD, FR_HYP)
+NFR_PROPOSAL = _proposal(NFR_RECORD, NFR_HYP)
+
+
 def _gate_ended() -> Ended:
     return Ended(view=_gate_view(), code=10, findings=list(GATE_FINDINGS))
 
 
-def test_gate_criteria_asked_and_written_to_entries(capsys) -> None:
+def test_gate_criteria_proposed_confirmed_and_written(capsys) -> None:
     ended = _gate_ended()
-    read = _reader("тесты спеки зелёные", "", "из 10 запусков 8 доходят до конца", "")
-    agent = _agent()
+    read = _reader("да", "", "да", "")
+    agent = _agent(FR_PROPOSAL, NFR_PROPOSAL)
     assert _top_up(ended, read, agent) is ic.ChatResult.FINISHED
     out = capsys.readouterr().out
-    assert "Прогон спеки одной командой" in out
-    assert "Без чисел, пет-проект" in out
-    assert agent.prompts == []  # критерий — дословно, без агента
+    assert f"«Прогон спеки одной командой»: проверка — {FR_HYP}. Так?" in out
+    assert "«Без чисел, пет-проект»: проверка" in out
+    assert "Как проверить" not in out
     (q1, funcs), (q2, nfr) = ended.resent
     assert q1 == FUNCS_QID and q2 == NFR_QID
-    assert funcs["entries"] == [{**FR_RECORD, "Acceptance": "тесты спеки зелёные"}]
+    assert funcs["entries"] == [{**FR_RECORD, "Acceptance": FR_HYP}]
     assert funcs["text"].startswith("функции\n\n")
-    assert "тесты спеки зелёные" in funcs["text"]
-    assert nfr["entries"] == [
-        {**NFR_RECORD, "Acceptance": "из 10 запусков 8 доходят до конца"}
-    ]
+    assert FR_HYP in funcs["text"]
+    assert nfr["entries"] == [{**NFR_RECORD, "Acceptance": NFR_HYP}]
 
 
 def test_gate_criteria_skip_leaves_entry_and_says_what_remains(capsys) -> None:
     ended = _gate_ended()
-    read = _reader("пропустить", "", "из 10 запусков 8 доходят до конца", "")
-    assert _top_up(ended, read, _agent()) is ic.ChatResult.FINISHED
+    read = _reader("пропустить", "", "да", "")
+    agent = _agent(FR_PROPOSAL, NFR_PROPOSAL)
+    assert _top_up(ended, read, agent) is ic.ChatResult.FINISHED
     [(qid, _payload)] = ended.resent
     assert qid == NFR_QID
     out = capsys.readouterr().out
@@ -846,14 +879,16 @@ def test_gate_criteria_read_after_top_up() -> None:
         return statuses(session_id)
 
     ended.status = status  # type: ignore[method-assign]
-    assert _top_up(ended, _reader("тест", ""), _agent()) is ic.ChatResult.FINISHED
+    read = _reader("да", "")
+    assert _top_up(ended, read, _agent(FR_PROPOSAL)) is ic.ChatResult.FINISHED
     [(qid, _payload)] = ended.resent
     assert qid == FUNCS_QID
 
 
 def test_gate_criteria_eof_stops() -> None:
     ended = _gate_ended()
-    assert _top_up(ended, _reader(), _agent()) is ic.ChatResult.STOPPED
+    agent = _agent(FR_PROPOSAL)
+    assert _top_up(ended, _reader(), agent) is ic.ChatResult.STOPPED
     assert ended.resent == []
 
 
@@ -863,5 +898,6 @@ def test_gate_criteria_refusal_is_said(capsys) -> None:
     ended.resend = lambda qid, payload: iv.DiscoveryReply(  # type: ignore[method-assign]
         1, {"operation": {"reason": "bad"}}, ""
     )
-    assert _top_up(ended, _reader("тест", ""), _agent()) is ic.ChatResult.FINISHED
+    read = _reader("да", "")
+    assert _top_up(ended, read, _agent(FR_PROPOSAL)) is ic.ChatResult.FINISHED
     assert "bad" in capsys.readouterr().out

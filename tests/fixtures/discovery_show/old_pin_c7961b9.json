@@ -1,0 +1,110 @@
+{
+    "lifecycle": "awaiting_input",
+    "gate": "pass",
+    "readiness": "incomplete",
+    "next_action": {
+        "session_id": "s-old",
+        "question_id": "customer.goals.02",
+        "coverage_key": "goals",
+        "question_text": "Почему сейчас? Что случится, если ничего не делать полгода?"
+    },
+    "findings": [],
+    "readiness_findings": [
+        "required topic 'personas' is not covered",
+        "required topic 'jobs' is not covered",
+        "required topic 'functions' is not covered",
+        "required topic 'nfr' is not covered",
+        "required topic 'constraints' is not covered",
+        "required topic 'success_metrics' is not covered",
+        "required topic 'out_of_scope' is not covered"
+    ],
+    "operation": {
+        "status": "ok"
+    },
+    "session": {
+        "session_id": "s-old",
+        "frame": "customer",
+        "target": "t",
+        "traces_to": [],
+        "source_pin": "ee93092fdfe6195c28c7392d85b41c6b94b9fe0a",
+        "created_at": "2026-11-14T09:13:45Z",
+        "topics": {
+            "required": {
+                "goals": "G",
+                "personas": "P",
+                "jobs": "J",
+                "functions": "FR",
+                "nfr": "NFR",
+                "constraints": "CON",
+                "success_metrics": "M",
+                "out_of_scope": "OUT"
+            },
+            "optional": {
+                "risks": "RK"
+            }
+        },
+        "coverage": {
+            "goals": "covered",
+            "personas": "missing",
+            "jobs": "missing",
+            "functions": "missing",
+            "nfr": "missing",
+            "constraints": "missing",
+            "success_metrics": "missing",
+            "out_of_scope": "missing",
+            "risks": "missing"
+        },
+        "entries": [
+            {
+                "id": "G-01",
+                "body": "цель",
+                "fields": {}
+            },
+            {
+                "id": "G-02",
+                "body": "вторая",
+                "fields": {}
+            }
+        ],
+        "declared": [
+            "G-01",
+            "G-02"
+        ],
+        "holders": {
+            "G-01": "customer.goals.01",
+            "G-02": "customer.goals.01"
+        },
+        "asked": [
+            {
+                "question_id": "customer.goals.01",
+                "coverage_key": "goals",
+                "question_text": "Какую проблему решаем? Как это болит сегодня — на конкретном недавнем примере?"
+            },
+            {
+                "question_id": "customer.goals.02",
+                "coverage_key": "goals",
+                "question_text": "Почему сейчас? Что случится, если ничего не делать полгода?"
+            }
+        ],
+        "answers": [
+            {
+                "question_id": "customer.goals.01",
+                "answer_id": "sha256:d7d585c96453a85a92f34a3f9058366a6820cc87de696471827d5aa3d1eb7826",
+                "participant_role": "owner",
+                "payload": {
+                    "text": "цели",
+                    "entries": [
+                        {
+                            "id": "G-01",
+                            "body": "цель"
+                        },
+                        {
+                            "id": "G-02",
+                            "body": "вторая"
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+}
