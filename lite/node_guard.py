@@ -1,7 +1,11 @@
 """Сверка «узел не ослаблен» после переписывания автором.
 
-Fail-closed: любая неоднозначность в новом тексте (дубль заголовка, несколько
-строк Priority, нечитаемый Priority у бывшего Must) считается ослаблением.
+Разбор совпадает с инструментами бандла: id и их кратность — канонический
+`node_id_counts`, строка приоритета — `**Priority**:` как у гейта. Fail-closed:
+любая неоднозначность в новом тексте (дубль id, несколько строк Priority,
+нечитаемый Priority у бывшего Must) считается ослаблением. Блоки кода и
+HTML-комментарии НЕ вырезаются: строка Priority или заголовок внутри них
+учитываются, чтобы агент не мог спрятать вторую строку от гейта.
 """
 
 from __future__ import annotations
@@ -9,11 +13,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-_HEADING = re.compile(r"^####\s+([A-Z]+-\d+)(?=$|[\s:.])")
+from governance.decomposition_guard import node_id_counts
+
+# Только разметка секций: id берёт `node_id_counts`, граница — не продолжение id.
+_SECTION_ID = re.compile(r"^####\s+([A-Z][A-Z0-9]*-\d+[a-z]?)(?![-\w])")
 _ANY_HEADING = re.compile(r"^#{1,6}\s")
-_PRIORITY = re.compile(r"^\s*(?:[-*]\s+)?(?:\*\*)?Priority(?:\*\*)?\s*:\s*(.*)$")
-_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
-_FENCE = re.compile(r"^\s*(```|~~~)")
+_PRIORITY = re.compile(r"\*\*Priority\*\*:(.*)$")
+_LEADING_WORD = re.compile(r"[\s*]*([A-Za-z]+)")
 
 
 @dataclass
@@ -22,58 +28,47 @@ class _Parsed:
     ambiguous: set[str] = field(default_factory=set)
 
 
-def _visible_lines(text: str) -> list[str]:
-    """Строки без HTML-комментариев и огороженных блоков кода."""
-    lines: list[str] = []
-    in_fence = False
-    for line in _COMMENT.sub("", text).splitlines():
-        if _FENCE.match(line):
-            in_fence = not in_fence
-            continue
-        if not in_fence:
-            lines.append(line)
-    return lines
-
-
 def _normalize(raw: str) -> str | None:
-    value = raw.replace("*", "").strip()
-    if not value:
+    """Ведущее слово значения Priority; `must` в любом регистре — `Must`."""
+    match = _LEADING_WORD.match(raw)
+    if match is None:
         return None
-    return "Must" if value.lower() == "must" else value
+    word = match.group(1)
+    return "Must" if word.lower() == "must" else word
+
+
+def _sections(text: str) -> list[tuple[str | None, list[str]]]:
+    """Секции по заголовкам: (id секции или None, значения строк Priority)."""
+    sections: list[tuple[str | None, list[str]]] = []
+    for line in text.splitlines():
+        if _ANY_HEADING.match(line):
+            match = _SECTION_ID.match(line)
+            sections.append((match.group(1) if match else None, []))
+            continue
+        prio = _PRIORITY.search(line)
+        if prio is not None and sections:
+            sections[-1][1].append(prio.group(1))
+    return sections
 
 
 def _parse(text: str) -> _Parsed:
-    parsed = _Parsed()
-    current: str | None = None
-    seen_priority = False
-    for line in _visible_lines(text):
-        if _ANY_HEADING.match(line):
-            match = _HEADING.match(line)
-            current = match.group(1) if match else None
-            seen_priority = False
-            if current is None:
-                continue
-            if current in parsed.items:
-                parsed.ambiguous.add(current)
-            else:
-                parsed.items[current] = None
+    counts = node_id_counts(text)
+    parsed = _Parsed(ambiguous={item for item, n in counts.items() if n > 1})
+    parsed.items = dict.fromkeys(counts)
+    for item, values in _sections(text):
+        if item is None or item not in counts:
             continue
-        prio = _PRIORITY.match(line)
-        if prio is None or current is None:
-            continue
-        if seen_priority:
-            parsed.ambiguous.add(current)
-            continue
-        seen_priority = True
-        if parsed.items[current] is None:
-            parsed.items[current] = _normalize(prio.group(1))
+        if len(values) > 1:
+            parsed.ambiguous.add(item)
+        if parsed.items[item] is None and values:
+            parsed.items[item] = _normalize(values[0])
     return parsed
 
 
 def node_items(text: str) -> dict[str, str | None]:
-    """Id требований из заголовков `#### <ID>` и их Priority (или None).
+    """Id пунктов узла (как у `node_id_counts`) и их Priority (или None).
 
-    При повторе id берётся приоритет первого заголовка.
+    При повторе id берётся приоритет первой секции с читаемым значением.
     """
     return _parse(text).items
 

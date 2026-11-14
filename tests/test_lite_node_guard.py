@@ -69,33 +69,58 @@ def test_two_priority_lines_are_ambiguous() -> None:
 def test_priority_format_variants() -> None:
     text = (
         "#### A-1\n- **Priority**: must\n"
-        "#### A-2\nPriority: **Must**\n"
-        "#### A-3\n* Priority: Should\n"
+        "#### A-2\n**Priority**: **Must** (core)\n"
+        "#### A-3\n* **Priority**: Should\n"
+        "#### A-4\n**Priority**: Must.\n"
+        "#### A-5\n**Priority**: must \u2014 always\n"
     )
-    assert node_items(text) == {"A-1": "Must", "A-2": "Must", "A-3": "Should"}
+    assert node_items(text) == {
+        "A-1": "Must",
+        "A-2": "Must",
+        "A-3": "Should",
+        "A-4": "Must",
+        "A-5": "Must",
+    }
     assert weakened(text, text, set(), set()) == []
 
 
-def test_unreadable_priority_counts_as_downgrade() -> None:
+def test_plain_priority_prose_does_not_count() -> None:
+    text = "#### A-1\n**Priority**: Must\nPriority: Could (prose)\n"
+    assert node_items(text) == {"A-1": "Must"}
+    assert weakened(text, text, set(), set()) == []
+
+
+def test_unreadable_priority_value_is_reported() -> None:
     before = "#### FR-01\n**Priority**: Must\n"
-    after = "#### FR-01\nPriority: \n"
-    assert weakened(before, after, set(), set()) == ["FR-01"]
+    for bad in ("**Priority**:", "**Priority**: ***", "**Priority**: (Must)"):
+        after = f"#### FR-01\n{bad}\n"
+        assert weakened(before, after, set(), set()) == ["FR-01"], bad
+    after = "#### FR-01\n**Priority**:\n"
     assert weakened(before, after, set(), {"FR-01"}) == []
     assert weakened(before, "#### FR-01\ntext\n", set(), set()) == ["FR-01"]
 
 
-def test_fenced_blocks_and_comments_are_skipped() -> None:
+def test_fenced_and_commented_lines_fail_closed() -> None:
     before = "#### FR-01\n**Priority**: Must\n"
-    after = (
-        "#### FR-01\n**Priority**: Must\n"
-        "```\n#### FR-01\n**Priority**: Could\n```\n"
-        "<!--\n#### FR-01\n-->\n"
-    )
-    assert weakened(before, after, set(), set()) == []
-    assert node_items("```\n#### FR-09\n```\n<!-- #### FR-08 -->\n") == {}
+    fenced = before + "```\n**Priority**: Could\n```\n"
+    commented = before + "<!-- **Priority**: Could -->\n"
+    assert weakened(before, fenced, set(), set()) == ["FR-01"]
+    assert weakened(before, commented, set(), set()) == ["FR-01"]
+    hidden = before + "```\n#### FR-01\n```\n"
+    assert weakened(before, hidden, set(), set()) == ["FR-01"]
+
+
+def test_ids_follow_canonical_counter() -> None:
+    assert node_items("#### FR-01a\n**Priority**: Must\n") == {"FR-01a": "Must"}
+    assert node_items("#### AB2-7: t\n") == {"AB2-7": None}
+    before = "#### FR-01\n**Priority**: Must\n"
+    after = "#### FR-01,\n**Priority**: Must\n"
+    assert weakened(before, after, set(), set()) == ["FR-01"]
+    after2 = "#### FR-01)\n**Priority**: Must\n#### FR-02\n"
+    assert weakened(before, after2, set(), set()) == ["FR-01"]
 
 
 def test_id_boundary() -> None:
     assert node_items("#### FR-01-A\n**Priority**: Must\n") == {}
-    assert node_items("#### FR-01.\n") == {"FR-01": None}
+    assert node_items("#### FR-01 .\n") == {"FR-01": None}
     assert node_items("#### FR-01: t\n") == {"FR-01": None}
