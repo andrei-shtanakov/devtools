@@ -1,4 +1,4 @@
-"""Состояние сессии интервью (lite/interview_state.py, lite/interview_probe.py)."""
+"""Состояние сессии интервью (lite/interview_state.py, `discovery show`)."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from governance import df_config
 from lite import interview_state as st
 
 DISCOVERY = Path(__file__).resolve().parents[2] / "discovery"
+FIXTURES = Path(__file__).parent / "fixtures" / "discovery_show"
 LIVE_DISCOVERY = (DISCOVERY / ".venv").is_dir()
 
 
@@ -33,8 +34,34 @@ def _raw(**over: object) -> dict:
     return {**base, **over}
 
 
+def _envelope(raw: dict) -> dict:
+    """Конверт `discovery show` из полей `_raw` (форма реального вывода)."""
+    topics = {**raw["required"], **raw["optional"]}
+    return {
+        "readiness": raw["readiness"],
+        "readiness_findings": raw["findings"],
+        "session": {
+            "frame": raw["frame"],
+            "topics": {"required": raw["required"], "optional": raw["optional"]},
+            "coverage": {
+                k: "covered" if k in raw["answered_keys"] else "missing" for k in topics
+            },
+            "entries": raw["entries"],
+            "declared": raw["declared"],
+            "holders": raw["holders"],
+            "asked": [
+                {"question_id": q, "coverage_key": k, "question_text": "?"}
+                for q, k in raw["asked"].items()
+            ],
+            "answers": [
+                {"question_id": q, "payload": p} for q, p in raw["answers"].items()
+            ],
+        },
+    }
+
+
 def _view(**over: object) -> st.SessionView:
-    return st._parse(_raw(**over))
+    return st._parse(_envelope(_raw(**over)))
 
 
 @pytest.fixture
@@ -55,8 +82,8 @@ def fake_runner(monkeypatch):
     return make
 
 
-def test_load_session_parses_probe_json(fake_runner) -> None:
-    run = fake_runner(json.dumps(_raw()))
+def test_load_session_parses_show_json(fake_runner) -> None:
+    run = fake_runner(json.dumps(_envelope(_raw())), code=20)
     view = st.load_session("s-1", run)
     assert view.frame == "customer"
     assert view.entries == [st.Entry("FR-02", "b", {"Priority": "Must"})]
@@ -65,8 +92,7 @@ def test_load_session_parses_probe_json(fake_runner) -> None:
     assert view.asked == {"customer.functions.01": "functions"}
     argv = run.calls[0]
     assert argv[:5] == ["uv", "run", "--frozen", "--project", "/ws/discovery"]
-    assert argv[5:8] == ["python", "-I", str(st.PROBE)]
-    assert argv[-1] == "s-1"
+    assert argv[5:] == ["discovery", "show", "--session", "s-1"]
 
 
 def test_next_id_after_all_declared() -> None:
@@ -86,9 +112,11 @@ def test_covered_by_prefix_and_answered_keys() -> None:
     assert _view(answered_keys=["feasibility_review"]).covered() == {"functions"}
 
 
-def test_probe_failure_raises_with_reason(fake_runner) -> None:
+def test_show_failure_raises_with_reason(fake_runner) -> None:
     with pytest.raises(st.InterviewStateError, match="SessionUnreadable: нет"):
         st.load_session("s-1", fake_runner(stderr="SessionUnreadable: нет", code=1))
+    with pytest.raises(st.InterviewStateError, match="код 2"):
+        st.load_session("s-1", fake_runner(stdout="{}", code=2))
     with pytest.raises(st.InterviewStateError, match="не то"):
         st.load_session("s-1", fake_runner(stdout="[]"))
 
@@ -102,6 +130,30 @@ def test_missing_discovery_dir_raises(monkeypatch) -> None:
         st.load_session("s-1")
 
 
+def test_parse_real_show_output() -> None:
+    """Фикстура — реальный вывод `discovery show` (pin 91543b1): сессия
+    customer, G-01 переобъявлен вторым ответом, G-02 вытеснен."""
+    raw = (FIXTURES / "customer_two_goals.json").read_text(encoding="utf-8")
+    view = st._parse(json.loads(raw))
+    assert view.frame == "customer"
+    assert view.required["goals"] == "G"
+    assert view.optional == {"risks": "RK"}
+    assert view.entries == [st.Entry("G-01", "цель v2", {})]
+    assert view.declared == ["G-01", "G-02"]
+    assert view.holders == {"G-01": "customer.goals.01"}
+    assert list(view.answers) == ["customer.goals.01"]
+    assert view.answers["customer.goals.01"]["text"] == "цели v2"
+    assert view.asked == {
+        "customer.goals.01": "goals",
+        "customer.goals.02": "goals",
+    }
+    assert view.answered_keys == ["goals"]
+    assert view.covered() == {"goals"}
+    assert view.readiness == "incomplete"
+    assert "required topic 'personas' is not covered" in view.findings
+    assert view.next_id("G") == "G-03"
+
+
 def _discovery(env: dict[str, str], *args: str) -> dict:
     argv = ["uv", "run", "--frozen", "--project", str(DISCOVERY), "discovery", *args]
     done = subprocess.run(argv, env=env, capture_output=True, text=True, check=False)
@@ -110,7 +162,7 @@ def _discovery(env: dict[str, str], *args: str) -> dict:
 
 
 @pytest.mark.skipif(not LIVE_DISCOVERY, reason="нет .venv discovery")
-def test_probe_reads_real_session(tmp_path: Path, monkeypatch) -> None:
+def test_show_reads_real_session(tmp_path: Path, monkeypatch) -> None:
     env = {**os.environ, "DISCOVERY_HOME": str(tmp_path / "home")}
     monkeypatch.setenv("DISCOVERY_HOME", env["DISCOVERY_HOME"])
     monkeypatch.setattr(df_config, "workspace_dir", lambda name: DISCOVERY)
