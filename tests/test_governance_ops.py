@@ -3059,3 +3059,11 @@ def test_revise_delegates_to_launch_author(monkeypatch) -> None:
     call, prompt = seen[0]
     assert call is _CALL
     assert "/calls/out.md" in prompt and "find" in prompt
+
+
+def test_acceptance_prompt_names_orphan_scenario_rule() -> None:
+    """Автор приёмки знает правило гейта GC-ORPHAN (живой прогон sdd-runer W4)."""
+    from governance.ops import author_prompt
+
+    prompt = author_prompt("acceptance", "s", "b", None, "/o/25-acceptance.md")
+    assert "GC-ORPHAN" in prompt and "scenarios:" in prompt

@@ -9,8 +9,9 @@
 В `edge-findings.txt` рядом с находками (`R1 major: … @ файл:строки`) лежат
 отказы самой проверки (`EdgeCheckError`, ребро с вердиктом `ERROR`): это не
 замечания к узлу, править бандл по ним нечего. `gate-findings.txt` — сырой
-вывод gate-check (с `not_evaluated` и прочим текстом): он не считается
-построчно и печатается только подробнее уровня 0.
+вывод гейта: ошибки (гард раннера `error GC-…:` или сам gate-check
+`GC-NN error […]`) считаются и печатаются на уровне 0 (не больше
+`GATE_SHOWN`), прочее (`not_evaluated`, предупреждения) — подробнее уровня 0.
 """
 
 from __future__ import annotations
@@ -44,6 +45,10 @@ ADVISORY_HEAD = "  рекомендации (проверку не валят, �
 # `insufficient` или `fail` без причины — проверка штатная, не сбой прибора
 UNRATED = runner.EDGE_UNRATED
 UNRATED_TEXT = "ревьюер не оценил пункт правил — замечаний к файлу нет"
+GATE_SHOWN = 10  # строк ошибок гейта на уровне 0
+# ошибка гейта: гард раннера (`error GC-ORPHAN: …`) или gate-check
+# (`GC-08 error [FR-01] …`)
+GATE_ERROR_RE = re.compile(r"^(?:error GC-[\w-]+|GC-[\w-]+ error\b)")
 FAILED_CHECK = (
     "смысловая проверка узлов не состоялась — сбой ревьюера, ваш файл ни при "
     "чём; повторите dfl run, повторится — dfl report (подробно: dfl run -v)"
@@ -108,7 +113,13 @@ def _entries(text: str) -> list[str]:
 def summary(stop: Stop) -> str:
     """Причина стопа одной строкой."""
     if stop.status == GATE:
-        return f"проверка бандла не прошла (вывод: {stop.path})"
+        errors = [r for r in stop.failures if GATE_ERROR_RE.match(r)]
+        head = (
+            f"проверка бандла не прошла: ошибок {len(errors)}"
+            if errors
+            else ("проверка бандла не прошла")
+        )
+        return f"{head} (вывод: {stop.path})"
     blocking, advisory = split(stop.findings)
     if not blocking:
         return FAILED_CHECK if stop.failures else UNBLOCKED_STOP
@@ -126,7 +137,16 @@ def split(findings: list[str]) -> tuple[list[str], list[str]]:
 def shown(stop: Stop) -> list[tuple[str, int]]:
     """Строки для экрана с уровнем: находки edge — 0; вывод гейта — 1."""
     if stop.status == GATE:
-        return [(f"  {row}", 1) for row in stop.failures]
+        # ошибки гейта — то, что править (уровень 0, не больше GATE_SHOWN);
+        # прочий вывод (`not_evaluated`, предупреждения) — подробность
+        errors = [r for r in stop.failures if GATE_ERROR_RE.match(r)]
+        shown_errors = set(errors[:GATE_SHOWN])
+        return [
+            (f"  - {row.removeprefix('error ')}", 0)
+            if row in shown_errors
+            else (f"  {row}", 1)
+            for row in stop.failures
+        ]
     blocking, advisory = split(stop.findings)
     # отказ прибора — подробность для разработчиков, не задание человеку
     failed = [(f"  - {readable(f)}", 1) for f in stop.failures]
