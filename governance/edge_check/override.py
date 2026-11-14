@@ -1,12 +1,19 @@
-"""Ключи замечаний edge-check, снятых человеком (журнал решений `dfl`).
+"""Замечания edge-check, принятые человеком вопреки (журнал решений `dfl`).
 
 Журнал `edge-decisions.jsonl` пишет `lite/edge_journal.py`; читает его и
-раннер, поэтому читатель override-ключей живёт здесь: governance не
+раннер, поэтому читатель override-решений живёт здесь: governance не
 импортирует lite (направление зависимости — lite → governance).
+
+Решение привязано к самой находке, а не к ключу (узел, ребро, правило):
+`finding_digest` — sha256 над ключом, классом, формулировкой, местом и
+хэшами входа subject ребра. Та же находка на неизменённом узле — тот же
+digest; другая формулировка, место или изменённый текст узла — другой,
+и принятие на неё не переносится. Строка журнала без digest не принимает.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -20,64 +27,106 @@ BLOCKING = frozenset({"blocker", "major"})
 Key = tuple[str, str, str]
 
 
-def _key_of(row: object, wave: int) -> Key | None:
+def subject_shas(subject: object) -> list[str]:
+    """Хэши входа subject записи ребра (`[{path, sha256}]`), отсортированные."""
+    if not isinstance(subject, list):
+        return []
+    return sorted(str(f.get("sha256", "")) for f in subject if isinstance(f, dict))
+
+
+def finding_digest(node: str, edge: str, finding: dict, subject: list[str]) -> str:
+    """Отпечаток находки: ключ, класс, формулировка, место и хэши subject.
+
+    Один на `dfl` (запись решения) и раннер/публикацию (сверка).
+    """
+    loc = finding.get("location") or {}
+    if not isinstance(loc, dict):
+        loc = {}
+    payload = [
+        node,
+        edge,
+        str(finding.get("rule_id")),
+        str(finding.get("class")),
+        str(finding.get("statement")),
+        loc.get("path"),
+        loc.get("lines"),
+        sorted(subject),
+    ]
+    data = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+
+def _digest_of(row: object, wave: int) -> str | None:
     if not isinstance(row, dict):
         return None
     if row.get("wave") != wave or row.get("kind") != OVERRIDE_KIND:
         return None
-    key = row.get("key")
-    if not isinstance(key, list) or len(key) != 3:
-        return None
-    return (str(key[0]), str(key[1]), str(key[2]))
+    digest = row.get("digest")
+    return digest if isinstance(digest, str) and digest else None
 
 
-def overridden(run_dir: Path, wave: int) -> set[Key]:
-    """Ключи (узел, ребро, правило) с решением `override` в волне `wave`.
+def overridden(run_dir: Path, wave: int) -> set[str]:
+    """Digest'ы находок с решением `override` в волне `wave`.
 
-    Битые строки журнала пропускаются; нет файла — пустое множество.
+    Строка без digest (журнал до привязки) не принимает ничего; битые
+    строки пропускаются; нет файла — пустое множество.
     """
     path = run_dir / JOURNAL
     if not path.is_file():
         return set()
-    keys: set[Key] = set()
+    digests: set[str] = set()
     for line in path.read_text(encoding="utf-8").splitlines():
         try:
-            key = _key_of(json.loads(line), wave)
+            digest = _digest_of(json.loads(line), wave)
         except json.JSONDecodeError:
             continue
-        if key is not None:
-            keys.add(key)
-    return keys
+        if digest is not None:
+            digests.add(digest)
+    return digests
 
 
-def accepted(records: dict[tuple[str, str], dict], keys: set[Key]) -> set[Key] | None:
-    """Ключи блокирующих находок уровня, если человек принял их ВСЕ; иначе `None`.
+def accepted(
+    records: dict[tuple[str, str], dict], digests: set[str]
+) -> set[Key] | None:
+    """Ключи блокирующих находок уровня, если человек принял их ВСЕ (digest
+    каждой — в `digests`, см. `finding_digest`); иначе `None`.
 
     Принимается вопреки только FAIL, объяснённый блокирующими находками:
     ребро `ERROR` или с иным вердиктом, FAIL без блокирующих находок, пункт
     правил не `pass`, не покрытый находкой (`insufficient`, `fail` без
-    причины), и непринятый ключ — `None` (прежний стоп).
+    причины), и непринятая находка — `None` (прежний стоп).
     """
     found: set[Key] = set()
     for (node, edge), record in records.items():
         verdict = record.get("verdict")
         if verdict == "PASS":
             continue
-        rules = _blocking_rules(record)
-        if verdict != "FAIL" or not rules or not _explained(record):
+        blocking = _blocking(record)
+        if verdict != "FAIL" or not blocking or not _explained(record):
             return None
-        found |= {(node, edge, rule) for rule in rules}
-    if not found or not found <= keys:
-        return None
-    return found
+        subject = subject_shas(record.get("subject"))
+        for f in blocking:
+            if finding_digest(node, edge, f, subject) not in digests:
+                return None
+            found.add((node, edge, str(f.get("rule_id"))))
+    return found or None
 
 
-def _blocking_rules(record: dict) -> set[str]:
+def blocking_digests(records: dict[tuple[str, str], dict]) -> set[str]:
+    """Digest'ы блокирующих находок всех записей уровня."""
     return {
-        str(f.get("rule_id"))
+        finding_digest(node, edge, f, subject_shas(record.get("subject")))
+        for (node, edge), record in records.items()
+        for f in _blocking(record)
+    }
+
+
+def _blocking(record: dict) -> list[dict]:
+    return [
+        f
         for f in record.get("findings") or []
         if isinstance(f, dict) and f.get("class") in BLOCKING
-    }
+    ]
 
 
 def _explained(record: dict) -> bool:

@@ -129,7 +129,7 @@ def resolve(
     chosen = _ask_all(state, [_visible(i) for i in items], prior, read, round_no)
     if chosen is None:
         return Outcome.STOPPED
-    if {f.key for f in findings} <= ej.overridden(run_dir, state.wave):
+    if {f.digest for f in findings} <= ej.overridden(run_dir, state.wave):
         say("замечания приняты вопреки — записано в журнал; проверяю снова")
         return Outcome.OVERRIDDEN
     return _rewrite(state, findings, nodes, chosen, revise, round_no, calls)
@@ -142,7 +142,8 @@ def applicable_findings(state: rs.RunState) -> list[ej.Finding] | None:
     блокирующих находок, есть отказ прибора (ошибка ребра) или FAIL ребра
     без находок (`insufficient`, `runner.EDGE_UNRATED`); записи не
     читаются; у находки нет файла или файл — не узел её вида (§9 п.4).
-    Из записей рёбер берутся только находки, чей ключ назван в файле стопа: остальное — след прошлой попытки.
+    Из записей рёбер берутся только находки, чей ключ назван в файле стопа:
+    остальное — след прошлой попытки.
     """
     keys = stop_keys(state)
     if not keys:
@@ -319,10 +320,19 @@ def _parse(
     item: Item, question: str, text: str, allow_override: bool, round_no: int
 ) -> ej.Decision | None:
     """Ответ → решение; не разобран (или «не согласен» без причины) — `None`."""
-    key, text = item.finding.key, text.strip()
+    finding, text = item.finding, text.strip()
 
     def made(answer: str, kind: str, allows: dict[str, list[str]]) -> ej.Decision:
-        return ej.Decision(key, question, answer, kind, round_no, allows)
+        return ej.Decision(
+            finding.key,
+            question,
+            answer,
+            kind,
+            round_no,
+            allows,
+            digest=finding.digest,
+            subject=list(finding.subject),
+        )
 
     if text.isdigit():
         no = int(text)
@@ -366,7 +376,7 @@ def _rewrite(
     прерывание — вернуть тексты всех файлов круга."""
     run_dir = rs.run_dir(state.run_id)
     skipped = ej.overridden(run_dir, state.wave)
-    todo = [f for f in findings if f.key not in skipped]
+    todo = [f for f in findings if f.digest not in skipped]
     journal = ej.load(run_dir, state.wave)
     done: list[str] = []
     try:

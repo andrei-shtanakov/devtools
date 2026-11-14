@@ -2,8 +2,9 @@
 
 `dfl` разбирает блокирующие находки разговором; каждое решение дописывается
 строкой JSON в `edge-decisions.jsonl` каталога прогона (поле `wave` отделяет
-волны). Ключ override-решений читает и раннер — через
-`governance.edge_check.override` (lite → governance, не наоборот).
+волны). Override-решения читает и раннер — через
+`governance.edge_check.override` (lite → governance, не наоборот); решение
+привязано к самой находке её digest'ом (`override.finding_digest`).
 """
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ class Finding:
     statement: str
     path: str | None
     lines: str
+    digest: str = ""  # `override.finding_digest`: привязка решения к находке
+    subject: tuple[str, ...] = ()  # хэши входа subject ребра
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -46,9 +49,11 @@ class Decision:
     kind: str  # "option" | "own" | "disagree" | "override"
     round: int
     allows: dict[str, list[str]] = field(default_factory=dict)
+    digest: str = ""  # находка, к которой относится решение (override сверяет)
+    subject: list[str] = field(default_factory=list)  # хэши subject ребра
 
 
-def _finding(node: str, edge: str, raw: dict) -> Finding:
+def _finding(node: str, edge: str, raw: dict, subject: list[str]) -> Finding:
     loc = raw.get("location") or {}
     return Finding(
         node=node,
@@ -58,6 +63,8 @@ def _finding(node: str, edge: str, raw: dict) -> Finding:
         statement=str(raw.get("statement")),
         path=loc.get("path"),
         lines=str(loc.get("lines")),
+        digest=override.finding_digest(node, edge, raw, subject),
+        subject=tuple(subject),
     )
 
 
@@ -67,7 +74,10 @@ def blocking_findings(run_dir: Path, wave: int) -> list[Finding]:
     return [
         f
         for (node, edge), record in records.items()
-        for f in (_finding(node, edge, r) for r in record.get("findings", []))
+        for f in (
+            _finding(node, edge, r, override.subject_shas(record.get("subject")))
+            for r in record.get("findings", [])
+        )
         if f.cls in BLOCKING
     ]
 
@@ -106,6 +116,6 @@ def load(run_dir: Path, wave: int) -> list[Decision]:
     return out
 
 
-def overridden(run_dir: Path, wave: int) -> set[tuple[str, str, str]]:
-    """Ключи с решением `override` (делегирует governance)."""
+def overridden(run_dir: Path, wave: int) -> set[str]:
+    """Digest'ы находок с решением `override` (делегирует governance)."""
     return override.overridden(run_dir, wave)

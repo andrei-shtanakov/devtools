@@ -16,6 +16,7 @@ import pytest
 from governance import run_state as rs
 from governance import runner
 from governance.author_launch import AuthorCall, LaunchOutcome
+from governance.edge_check import override
 from lite import edge_journal as ej
 from lite import edge_resolve as er
 from lite.structure import AgentUnavailable
@@ -330,7 +331,9 @@ def test_repeat_after_disagree_offers_override(world: World) -> None:
     outcome = world.resolve(["1", ""], world.agent(FIX), world.revise())
     assert outcome is er.Outcome.OVERRIDDEN
     assert er.OVERRIDE_OFFER in world.out()
-    assert ej.overridden(world.run_dir, 2) == {(NODE, EDGE, "R1")}
+    # решение привязано к самой находке — тот же digest, что считает раннер
+    digest = override.finding_digest(NODE, EDGE, _finding(), [])
+    assert ej.overridden(world.run_dir, 2) == {digest}
     assert world.revisions == []
 
 

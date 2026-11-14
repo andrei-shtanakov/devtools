@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from lite import edge_journal as ej
@@ -63,12 +64,17 @@ def test_journal_roundtrip_per_wave(tmp_path: Path) -> None:
     assert ej.load(tmp_path, 4) == []
 
 
-def test_overridden_keys(tmp_path: Path) -> None:
-    ej.append(tmp_path, 2, _decision("R1", kind="override"))
+def test_overridden_digests(tmp_path: Path) -> None:
+    """Принятие привязано к находке: журнал отдаёт её digest, не ключ."""
+    _write_record(tmp_path, 2)
+    found = ej.blocking_findings(tmp_path, 2)[0]
+    ej.append(
+        tmp_path, 2, replace(_decision("R1", kind="override"), digest=found.digest)
+    )
     ej.append(tmp_path, 2, _decision("R2"))
-    assert ej.overridden(tmp_path, 2) == {
-        ("requirements", "requirements-vs-charter", "R1")
-    }
+    ej.append(tmp_path, 2, _decision("R3", kind="override"))  # без digest
+    assert ej.overridden(tmp_path, 2) == {found.digest}
+    assert ej.load(tmp_path, 2)[0].digest == found.digest
 
 
 def test_corrupt_line_skipped(tmp_path: Path) -> None:

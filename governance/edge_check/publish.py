@@ -102,14 +102,15 @@ def surface_violations(
 #: Вердикт уровня, принятого человеком вопреки замечаниям (только `test`).
 OVERRIDE = "OVERRIDE"
 OVERRIDE_TEXT = "принято человеком вопреки замечаниям"
-Overridden = set[edge_override.Key] | None
+#: Digest'ы находок, принятых человеком (`edge_override.finding_digest`).
+Overridden = set[str] | None
 
 
 def level_verdict(
     records: dict[tuple[str, str], dict], overridden: Overridden = None
 ) -> str:
-    """Вердикт уровня; `OVERRIDE` — FAIL, все блокирующие ключи которого
-    в `overridden` (`edge_override.accepted`)."""
+    """Вердикт уровня; `OVERRIDE` — FAIL, digest каждой блокирующей находки
+    которого (пересчитан по записям) — в `overridden` (`edge_override.accepted`)."""
     verdicts = {r.get("verdict") for r in records.values()}
     if "ERROR" in verdicts or not records:
         return "ERROR"
@@ -158,7 +159,7 @@ def checklist_body(
     if verdict == OVERRIDE and overridden:
         keys = edge_override.accepted(records, overridden) or set()
         lines += [
-            f"Узел {OVERRIDE_TEXT} (режим test, журнал "
+            f"Узел: {OVERRIDE_TEXT} (режим test, журнал "
             f"`{edge_override.JOURNAL}` прогона): "
             + ", ".join(f"`{n}/{e}/{r}`" for n, e, r in sorted(keys))
             + ".",
@@ -223,7 +224,7 @@ def publish_wave(
 ) -> int:
     """Опубликовать candidate волны с evidence и одобряющим ревью; → код.
 
-    `overridden` — ключи, принятые человеком вопреки замечаниям (раннер
+    `overridden` — digest'ы находок, принятых человеком вопреки замечаниям (раннер
     передаёт их только при вердикте шага edge `OVERRIDE`); действуют лишь
     в `test`, в `strict` FAIL остаётся FAIL.
     """

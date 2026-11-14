@@ -4322,20 +4322,24 @@ def _overridden_level(
     state: RunState, verdict: str, records: dict[tuple[str, str], dict]
 ) -> set[edge_override.Key] | None:
     """`test`: FAIL уровня, все блокирующие находки которого человек принял
-    вопреки замечаниям (журнал `dfl`, спека edge-resolution §6 п.1); ключи
+    вопреки замечаниям (журнал `dfl`, спека edge-resolution §6 п.1;
+    решение привязано к самой находке — `override.finding_digest`); ключи
     принятых находок, иначе `None`. В `strict` — всегда `None`."""
     if state.mode != "test" or verdict != "FAIL":
         return None
-    keys = edge_override.overridden(run_dir(state.run_id), state.wave)
-    return edge_override.accepted(records, keys)
+    digests = edge_override.overridden(run_dir(state.run_id), state.wave)
+    return edge_override.accepted(records, digests)
 
 
-def _edge_overridden(state: RunState) -> set[edge_override.Key] | None:
-    """Ключи, принятые шагом edge волны (`OVERRIDE`); только `test`."""
+def _edge_overridden(state: RunState) -> set[str] | None:
+    """Digest'ы находок, принятых шагом edge волны (`OVERRIDE`); только `test`.
+
+    Публикация пересчитывает digest'ы по записям на диске и сверяет с ними.
+    """
     op = state.ops.get(wave_key(state, "edge"), {})
     if state.mode != "test" or op.get("verdict") != edge_publish.OVERRIDE:
         return None
-    return {(str(n), str(e), str(r)) for n, e, r in op.get("overridden") or []}
+    return {str(d) for d in op.get("overridden_digests") or []}
 
 
 def _step_edge(state: RunState, ops: Ops) -> bool:
@@ -4384,6 +4388,7 @@ def _step_edge(state: RunState, ops: Ops) -> bool:
             verdict=edge_publish.OVERRIDE,
             edges=edges,
             overridden=[list(k) for k in sorted(accepted)],
+            overridden_digests=sorted(edge_override.blocking_digests(records)),
         )
         return True
     lines: list[str] = []

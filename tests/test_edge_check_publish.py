@@ -9,7 +9,7 @@ import pytest
 
 from governance import act_surface, bundle_dag
 from governance.act_request import ACT_REVIEW_V1, manifest_path
-from governance.edge_check import publish
+from governance.edge_check import override, publish
 from governance.run_state import new_run
 
 WS = "WS-1"
@@ -236,15 +236,18 @@ def test_publish_wave_stale_head_after_wait(
 
 # --- Принятие вопреки замечаниям (OVERRIDE, только test; спека §6 п.1) ---------
 
-OVR_KEY = ("design", "requirements", "R1")
+OVR_FINDING = {"rule_id": "R1", "class": "major", "statement": "x"}
 FAIL_RECORDS: dict[tuple[str, str], dict] = {
-    k: {
-        **v,
-        "verdict": "FAIL",
-        "findings": [{"rule_id": "R1", "class": "major", "statement": "x"}],
-    }
+    k: {**v, "verdict": "FAIL", "findings": [OVR_FINDING]}
     for k, v in PASS_RECORDS.items()
 }
+#: Digest принятой человеком находки (журнал `dfl`) — привязка к ней самой.
+OVR_KEY = override.finding_digest(
+    "design",
+    "requirements",
+    OVR_FINDING,
+    override.subject_shas(PASS_RECORDS[("design", "requirements")]["subject"]),
+)
 
 
 def test_publish_override_body_names_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -300,3 +303,18 @@ def test_override_not_applied_unless_all_blocking_accepted(
         "FAIL",
         "ERROR",
     }
+
+
+def test_publish_override_recomputes_digest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Тот же ключ, другая формулировка находки — принятие не переносится."""
+    state = _wave_state("test", monkeypatch)
+    forge = _Forge()
+    changed = {
+        k: {**v, "findings": [{**OVR_FINDING, "statement": "другое"}]}
+        for k, v in FAIL_RECORDS.items()
+    }
+    code = publish.publish_wave(state, forge, KEY, changed, overridden={OVR_KEY})
+    assert code == publish.CODE_CHANGES and forge.published == []
+    assert (
+        publish.edge_verdict(HEAD, changed, overridden={OVR_KEY})["verdict"] == "FAIL"
+    )

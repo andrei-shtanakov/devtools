@@ -12322,12 +12322,42 @@ _OVR_KEYS = [
 ]
 
 
-def _override_journal(run_id: str, keys: list[tuple[str, str, str]]) -> None:
-    """Решения `override` человека в журнале `dfl` (волна 1)."""
+#: Записи стенда (`FakeOps.edge_check_level`) хэшей subject не несут.
+_OVR_SUBJECT: list[dict] = []
+
+
+def _ovr_finding(rule: str, statement: str = "не покрыто") -> dict:
+    """Находка — байт в байт как у стенда edge-check (узел charter)."""
+    return {
+        "rule_id": rule,
+        "class": "major",
+        "statement": statement,
+        "location": {"path": "charter.md", "lines": [1, 1]},
+    }
+
+
+def _override_journal(
+    run_id: str,
+    keys: list[tuple[str, str, str]],
+    *,
+    statement: str = "не покрыто",
+    digest: bool = True,
+) -> None:
+    """Решения `override` человека в журнале `dfl` (волна 1): digest —
+    находки с формулировкой `statement` (по умолчанию — та, что на диске)."""
+    from governance.edge_check import override
+
     path = rs.run_dir(run_id) / "edge-decisions.jsonl"
     with path.open("a", encoding="utf-8") as fh:
-        for k in keys:
-            row = {"wave": 1, "kind": "override", "key": list(k)}
+        for node, edge, rule in keys:
+            row: dict = {"wave": 1, "kind": "override", "key": [node, edge, rule]}
+            if digest:
+                row["digest"] = override.finding_digest(
+                    node,
+                    edge,
+                    _ovr_finding(rule, statement),
+                    override.subject_shas(_OVR_SUBJECT),
+                )
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
@@ -12336,9 +12366,9 @@ def _fail_records(monkeypatch) -> None:
     records = {
         (node, edge): {
             "verdict": "FAIL",
-            "subject": [],
+            "subject": _OVR_SUBJECT,
             "bases": [],
-            "findings": [{"rule_id": rule, "class": "major", "statement": "x"}],
+            "findings": [_ovr_finding(rule)],
         }
         for node, edge, rule in _OVR_KEYS
     }
@@ -12384,7 +12414,8 @@ def test_edge_fail_all_blocking_overridden_completes_in_test(
     assert edge["overridden"] == [list(k) for k in sorted(_OVR_KEYS)]
     assert state.status != "stopped_review"
     assert not (rs.run_dir("r-ovr-test") / "edge-findings.txt").exists()
-    assert published == [{"overridden": set(_OVR_KEYS)}]
+    assert published == [{"overridden": set(edge["overridden_digests"])}]
+    assert len(edge["overridden_digests"]) == 2
     assert state.ops["candidate-1"]["edge_verdict"]["verdict"] == "OVERRIDE"
 
 
@@ -12419,3 +12450,21 @@ def test_auto_merge_accepts_override_in_test(
     assert merges and merges[0] == ("human_merge", 777, WAVE_HEAD)
     assert calls and calls[0] == (1, "charter")
     assert state.ops["finalize-1"]["status"] == "completed"
+
+
+@pytest.mark.parametrize(
+    "journal",
+    [{"statement": "другая находка"}, {"digest": False}],
+    ids=["same-key-other-statement", "row-without-digest"],
+)
+def test_override_stale_or_unbound_decision_still_fails(
+    tmp_path: Path, runs_root, monkeypatch, journal: dict
+) -> None:
+    """Принятие привязано к самой находке: тот же ключ с другой
+    формулировкой и строка журнала без digest — не принятие."""
+    _, ops, published = _override_run(tmp_path, monkeypatch, "r-ovr-stale", test=True)
+    _override_journal("r-ovr-stale", _OVR_KEYS, **journal)
+    state = locked_runner.resume("r-ovr-stale", ops)
+    assert state.status == "stopped_review"
+    assert state.ops["edge-1"]["status"] == "started"
+    assert "candidate-1" not in state.ops and published == []
