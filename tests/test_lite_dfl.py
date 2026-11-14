@@ -21,6 +21,7 @@ from governance import run_state as rs
 from governance.brief_facts import BriefPrFacts
 from governance.facts import Fact, Outcome
 from lite import dfl, runlog
+from lite import edge_resolve as er
 from lite import failure_log as fl
 from lite.output import VERBOSITY_ENV, verbosity
 from tests.conftest import _STRICT_GH_DIRS
@@ -1629,6 +1630,200 @@ def test_edge_stop_prints_findings_and_what_to_edit(
     assert "  - R1 major (10-requirements.md:[410, 439]): Цель G-03" in out
     assert "дальше: поправьте workstreams/WS-1/spec/10-requirements.md в /t" in out
     assert "шаг завершился с кодом" not in out
+
+
+_EDGE_LINE = (
+    "error EDGE-CHECK(requirements/requirements-vs-charter): R1 major: "
+    "Цель G-03 не покрыта @ 10-requirements.md:[410, 439]"
+)
+
+
+def _review_stop(run_id: str = "WS-1-a") -> None:
+    """Прогон в `stopped_review` волны 2 с одной блокирующей находкой."""
+    state = _run(run_id, "WS-1", "customer", "stopped_review", subject="t")
+    state.wave = 2
+    state.ops["edge-2"] = {"status": "started"}  # FAIL edge-check: op начат
+    rs.save(state)
+    rd = rs.run_dir(run_id)
+    (rd / "edge-findings.txt").write_text(_EDGE_LINE + "\n", encoding="utf-8")
+    out = rd / "edge-check" / "w2"
+    out.mkdir(parents=True, exist_ok=True)
+    record = {
+        "node": "requirements",
+        "edge": "requirements-vs-charter",
+        "findings": [
+            {"rule_id": "R1", "class": "major", "statement": "Цель G-03",
+             "location": {"path": "10-requirements.md", "lines": [1, 2]}},
+        ],
+    }  # fmt: skip
+    (out / "requirements--requirements-vs-charter.json").write_text(
+        json.dumps(record, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def _resolver(outcome: str, rounds: list[int]):
+    def resolve(state: rs.RunState, round_no: int, calls: er.PaidCalls) -> object:
+        rounds.append(round_no)
+        calls.triage += 1
+        calls.revise += 1
+        return er.Outcome[outcome]
+
+    return resolve
+
+
+def test_run_resolves_then_steps_again(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch)
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        if len(env.spec_calls) == 1:
+            _review_stop()
+            return 1
+        _run("WS-1-a", "WS-1", "customer", "running", subject="t")
+        return 0
+
+    rounds: list[int] = []
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    monkeypatch.setattr(dfl, "_resolve", _resolver("REVISED", rounds))
+    assert env.run("run", "--subject", "t") == 0
+    assert rounds == [1]
+    assert env.spec_calls[1] == ["--subject", "t", "--repo", REPO,
+                                 "--run-id", "WS-1-a"]  # fmt: skip
+    out, _ = _read(capfd)
+    assert "  - R1 major (10-requirements.md:[410, 439]): Цель G-03" in out
+    assert "поправьте" not in out  # вместо подсказки — разбор
+
+
+def test_round_paid_calls_at_level1(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch)
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        if len(env.spec_calls) == 1:
+            _review_stop()
+            return 1
+        _edge_passed()
+        return 0
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    monkeypatch.setattr(dfl, "_resolve", _resolver("REVISED", []))
+    assert env.run("run", "-v", "--subject", "t") == 0
+    out, _ = _read(capfd)
+    assert "платных вызовов: сортировка 1, переписывание 1, проверка 1" in out
+
+
+def _edge_passed(run_id: str = "WS-1-a") -> None:
+    """Повторный шаг дошёл до edge-check волны 2, и она прошла."""
+    state = _run(run_id, "WS-1", "customer", "running", subject="t")
+    state.wave = 2
+    state.ops["edge-2"] = {"status": "completed", "verdict": "PASS"}
+    rs.save(state)
+
+
+def test_check_counted_only_when_edge_reached(env: Env, monkeypatch, capfd) -> None:
+    """Повторный шаг остановился до edge-check (стоп гейта) — проверка не
+    оплачена и не считается. Как `runner.resume` из `stopped_review`: op
+    `edge-<w>` снят, файл стопа удалён — это не признак проверки."""
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch)
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        if len(env.spec_calls) == 1:
+            _review_stop()
+            return 1
+        state = rs.load("WS-1-a")
+        state.ops.pop("edge-2", None)  # resume: `_STOPPED_RESET_OPS`
+        (rs.run_dir("WS-1-a") / "edge-findings.txt").unlink()  # `_drop_findings_of`
+        state.status = "stopped_gate"
+        rs.save(state)
+        return 1
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    monkeypatch.setattr(dfl, "_resolve", _resolver("REVISED", []))
+    assert env.run("run", "-v", "--subject", "t") == 1
+    out, _ = _read(capfd)
+    assert "платных вызовов: сортировка 1, переписывание 1, проверка 0" in out
+    assert "проверка 1" not in out
+
+
+def test_stopped_round_prints_paid_calls(env: Env, monkeypatch, capfd) -> None:
+    """Круг потратил вызовы и кончился стопом (отклонённое переписывание) —
+    число платных вызовов печатается и здесь (уровень 0)."""
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch)
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        _review_stop()
+        return 1
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    monkeypatch.setattr(dfl, "_resolve", _resolver("STOPPED", []))
+    assert env.run("run", "--subject", "t") == 1
+    out, _ = _read(capfd)
+    assert "платных вызовов: сортировка 1, переписывание 1, проверка 0" in out
+
+
+def test_resolution_stopped_prints_old_hint(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch)
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        _review_stop()
+        return 1
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    monkeypatch.setattr(dfl, "_resolve", _resolver("NOT_APPLICABLE", []))
+    assert env.run("run", "--subject", "t") == 1
+    assert len(env.spec_calls) == 1
+    out, _ = _read(capfd)
+    assert "дальше: поправьте workstreams/WS-1/spec/10-requirements.md" in out
+
+
+def test_no_tty_keeps_old_stop(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch, False)
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        _review_stop()
+        return 1
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    monkeypatch.setattr(
+        dfl, "_resolve", lambda state, round_no, calls: pytest.fail("без tty")
+    )
+    assert env.run("run", "--subject", "t") == 1
+    assert len(env.spec_calls) == 1
+    out, _ = _read(capfd)
+    assert "дальше: поправьте workstreams/WS-1/spec/10-requirements.md" in out
+
+
+def test_round_limit_summary(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch)
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        _review_stop()
+        return 1
+
+    rounds: list[int] = []
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    monkeypatch.setattr(dfl, "_resolve", _resolver("REVISED", rounds))
+    assert env.run("run", "--subject", "t") == 1
+    assert rounds == [1, 2] and len(env.spec_calls) == 3
+    out, _ = _read(capfd)
+    assert (
+        "не сошлось за 2 круга: requirements/requirements-vs-charter/R1; "
+        "повторяются — признак devtools#728" in out
+    )
+    assert "платных вызовов: сортировка 2, переписывание 2, проверка 2" in out
+    assert "dfl abandon" in out
 
 
 def test_stopped_run_nonzero_code_one_log_hint(env: Env, monkeypatch, capfd) -> None:

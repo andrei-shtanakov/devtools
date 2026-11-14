@@ -9,7 +9,7 @@ import pytest
 
 from governance import act_surface, bundle_dag
 from governance.act_request import ACT_REVIEW_V1, manifest_path
-from governance.edge_check import publish
+from governance.edge_check import override, publish
 from governance.run_state import new_run
 
 WS = "WS-1"
@@ -232,3 +232,95 @@ def test_publish_wave_stale_head_after_wait(
     assert forge.fetched == ["spec/x"] and forge.published == []
     lagging = "форджа отстаёт" in capsys.readouterr().out
     assert lagging == (code == publish.CODE_UNRESOLVED), "причина названа верно"
+
+
+# --- Принятие вопреки замечаниям (OVERRIDE, только test; спека §6 п.1) ---------
+
+OVR_FINDING = {"rule_id": "R1", "class": "major", "statement": "x"}
+FAIL_RECORDS: dict[tuple[str, str], dict] = {
+    k: {**v, "verdict": "FAIL", "findings": [OVR_FINDING]}
+    for k, v in PASS_RECORDS.items()
+}
+#: Digest принятой человеком находки (журнал `dfl`) — привязка к ней самой.
+OVR_KEY = override.finding_digest(
+    "design",
+    "requirements",
+    OVR_FINDING,
+    override.subject_shas(PASS_RECORDS[("design", "requirements")]["subject"]),
+)
+
+
+def test_publish_override_body_names_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """test: FAIL, все блокирующие ключи приняты человеком — ревью
+    публикуется, тело называет принятие и ключи; вердикт — OVERRIDE."""
+    state = _wave_state("test", monkeypatch)
+    forge = _Forge()
+    code = publish.publish_wave(state, forge, KEY, FAIL_RECORDS, overridden={OVR_KEY})
+    assert code == publish.CODE_OK
+    assert forge.published == ["COMMENT"]
+    body = forge.body or ""
+    assert "принято человеком вопреки замечаниям" in body
+    assert "design/requirements/R1" in body
+    assert ": OVERRIDE." in body
+    verdict = publish.edge_verdict(HEAD, FAIL_RECORDS, overridden={OVR_KEY})
+    assert verdict["verdict"] == "OVERRIDE"
+
+
+def test_publish_override_ignored_in_strict(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = _wave_state("strict", monkeypatch)
+    forge = _Forge()
+    code = publish.publish_wave(state, forge, KEY, FAIL_RECORDS, overridden={OVR_KEY})
+    assert code == publish.CODE_CHANGES and forge.published == []
+
+
+@pytest.mark.parametrize(
+    "records",
+    [
+        # Ключ другого правила: принятие не покрывает находку.
+        {
+            k: {**v, "findings": [{"rule_id": "R2", "class": "major"}]}
+            for k, v in FAIL_RECORDS.items()
+        },
+        # FAIL без находок (пункт не оценён) — не принимается вопреки.
+        {k: {**v, "findings": []} for k, v in FAIL_RECORDS.items()},
+        # Пункт `insufficient` рядом с принятой находкой.
+        {
+            k: {**v, "criteria": [{"id": "R3", "status": "insufficient"}]}
+            for k, v in FAIL_RECORDS.items()
+        },
+        # ERROR ребра рядом с принятым FAIL.
+        {**FAIL_RECORDS, ("acceptance", "x"): {"verdict": "ERROR"}},
+    ],
+)
+def test_override_not_applied_unless_all_blocking_accepted(
+    records: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = _wave_state("test", monkeypatch)
+    forge = _Forge()
+    code = publish.publish_wave(state, forge, KEY, records, overridden={OVR_KEY})
+    assert code == publish.CODE_CHANGES and forge.published == []
+    assert publish.edge_verdict(HEAD, records, overridden={OVR_KEY})["verdict"] in {
+        "FAIL",
+        "ERROR",
+    }
+
+
+def test_publish_override_recomputes_digest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Публикация пересчитывает digest по записям: изменённый текст узла
+    (subject) — принятие не переносится; переформулировка — переносится."""
+    state = _wave_state("test", monkeypatch)
+    forge = _Forge()
+    changed = {
+        k: {**v, "subject": [{"path": "20-design.md", "sha256": "s2"}]}
+        for k, v in FAIL_RECORDS.items()
+    }
+    code = publish.publish_wave(state, forge, KEY, changed, overridden={OVR_KEY})
+    assert code == publish.CODE_CHANGES and forge.published == []
+    verdict = publish.edge_verdict(HEAD, changed, overridden={OVR_KEY})
+    assert verdict["verdict"] == "FAIL"
+    rephrased = {
+        k: {**v, "findings": [{**OVR_FINDING, "statement": "другое"}]}
+        for k, v in FAIL_RECORDS.items()
+    }
+    verdict = publish.edge_verdict(HEAD, rephrased, overridden={OVR_KEY})
+    assert verdict["verdict"] == "OVERRIDE"
