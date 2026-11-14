@@ -42,6 +42,7 @@ from governance.brief_facts import (
 )
 from governance.brief_input import descriptor_source_blobs, descriptor_source_paths
 from governance.decomposition_guard import DELIVERABLE_KINDS, node_id_counts
+from governance.edge_check.author_rules import rules_for
 from governance.facts import Fact, Outcome, unavailable
 
 DEVTOOLS_ROOT = Path(__file__).resolve().parent.parent
@@ -1011,6 +1012,9 @@ def author_prompt(
             )
     if source_ids is not None and kind == "decomposition":
         source_guidance += _source_ids_guidance(source_ids)
+    edge_rules = rules_for(kind)
+    if edge_rules:
+        rules = f"{rules}\n{edge_rules}"
     return (
         f"kind={kind} subject={subject!r} bundle_dir={bundle_dir}\n"
         f"The bundle lives at {bundle_dir}/ (relative to the working "

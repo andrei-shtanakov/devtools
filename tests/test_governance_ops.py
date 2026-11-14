@@ -3019,3 +3019,10 @@ def test_edit_pr_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
     with pytest.raises(RuntimeError, match="PATCH pulls/7 rc=1: boom"):
         RealOps().edit_pr("/t", "o/r", 7, "T", "B")
+
+
+def test_author_prompt_carries_edge_rules():
+    from governance.edge_check.author_rules import rules_for
+
+    prompt = ops_mod.author_prompt("requirements", "s", "ws/spec", None, "/o")
+    assert rules_for("requirements") in prompt
