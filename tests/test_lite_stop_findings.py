@@ -71,10 +71,15 @@ def test_failures_not_counted_and_no_edit_hint(run) -> None:
     _write("edge-findings.txt", ERROR_LEVEL)
     stop = _edge()
     assert stop.findings == [] and stop.failures == [ERROR_LEVEL]
-    assert sf.summary(stop) == (
-        "смысловая проверка узлов не состоялась: профиль не объявляет узлов уровня 3"
-    )
+    assert sf.summary(stop) == sf.FAILED_CHECK
+    assert sf.shown(stop) == [(f"  - {sf.readable(ERROR_LEVEL)}", 1)]
     assert sf.edit_hint(run, stop) is None
+
+
+def test_failure_with_minor_is_failed_check(run) -> None:
+    """Отказ ребра рядом с minor — сбой проверки, не «пункт не оценён»."""
+    _write("edge-findings.txt", MINOR, ERROR_EDGE)
+    assert sf.summary(_edge()) == sf.FAILED_CHECK
 
 
 def test_mixed_failures_shown_but_not_counted(run) -> None:

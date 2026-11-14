@@ -38,6 +38,10 @@ BLOCKING = frozenset({"blocker", "major"})
 ADVISORY_HEAD = "  рекомендации (проверку не валят, можно оставить):"
 # FAIL без блокирующих находок: пункт `insufficient`, `fail` без причины,
 # отказ ребра (`edge_check.check.decide`) — по находкам на экране не чинится
+FAILED_CHECK = (
+    "смысловая проверка узлов не состоялась — сбой ревьюера, ваш файл ни при "
+    "чём; повторите dfl run, повторится — dfl report (подробно: dfl run -v)"
+)
 UNBLOCKED_STOP = (
     "смысловая проверка узлов не прошла без блокирующих замечаний (пункт "
     "правил не оценён) — повторите dfl run; повторится — dfl report"
@@ -97,13 +101,9 @@ def summary(stop: Stop) -> str:
     """Причина стопа одной строкой."""
     if stop.status == GATE:
         return f"проверка бандла не прошла (вывод: {stop.path})"
-    if not stop.findings:
-        first = FAILURE_RE.match(stop.failures[0])
-        what = first.group(1) if first else stop.failures[0]
-        return f"смысловая проверка узлов не состоялась: {what}"
     blocking, advisory = split(stop.findings)
     if not blocking:
-        return UNBLOCKED_STOP
+        return FAILED_CHECK if stop.failures else UNBLOCKED_STOP
     out = f"смысловая проверка узлов: блокирующих замечаний {len(blocking)}"
     return out + (f", рекомендаций {len(advisory)}" if advisory else "")
 
@@ -120,9 +120,12 @@ def shown(stop: Stop) -> list[tuple[str, int]]:
     if stop.status == GATE:
         return [(f"  {row}", 1) for row in stop.failures]
     blocking, advisory = split(stop.findings)
-    rows = [(f"  - {readable(f)}", 0) for f in blocking + stop.failures]
+    # отказ прибора — подробность для разработчиков, не задание человеку
+    failed = [(f"  - {readable(f)}", 1) for f in stop.failures]
+    rows = [(f"  - {readable(f)}", 0) for f in blocking]
     if not blocking:  # стоп не из-за них: «можно оставить» было бы неправдой
-        return rows + [(f"  - {readable(f)}", 0) for f in advisory]
+        return failed + [(f"  - {readable(f)}", 0) for f in advisory]
+    rows += failed
     if advisory:
         rows.append((ADVISORY_HEAD, 0))
         rows += [(f"  - {readable(f)}", 0) for f in advisory]
