@@ -66,6 +66,18 @@ class FormError(Exception):
     """Ответ агента не по схеме; текст — причина для повтора агента."""
 
 
+class CriterionMissing(FormError):
+    """Форма ответа агента верна, но у FR/NFR нет критерия; `items`, `ask` —
+    разобранный ответ (второй раз он уходит без критерия)."""
+
+    def __init__(
+        self, message: str, items: list[dict[str, Any]], ask: str | None
+    ) -> None:
+        super().__init__(message)
+        self.items = items
+        self.ask = ask
+
+
 class AgentUnavailable(Exception):
     """Агент не запустился, не уложился во время или упал; текст — причина.
 
@@ -123,7 +135,7 @@ def structure_answer(
     if may_ask:
         if ask:
             return Ask(ask)
-        gaps = validate(items, q, view)
+        gaps = validate(items, q, view, criterion=False)
         if gaps:
             return Ask("\n".join(gaps))
     return Ready(to_payload(text, items, view))
@@ -132,21 +144,31 @@ def structure_answer(
 def _ask_with_retry(
     agent: Agent, prompt: str, view: SessionView
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """Вызов агента; нарушение формы — один повтор с текстом ошибки."""
+    """Вызов агента; нарушение формы — один повтор с текстом ошибки. Повтор
+    без критерия, но в остальном по форме, — пункты без критерия: ответ
+    человека не валится, критерий предложит починка GC-08 после интервью."""
     try:
         return _ask_agent(agent, prompt, view)
     except FormError as exc:
-        return _ask_agent(agent, f"{prompt}\n\n{retry_note(str(exc))}", view)
+        retry = f"{prompt}\n\n{retry_note(str(exc))}"
+    try:
+        return _ask_agent(agent, retry, view)
+    except CriterionMissing as exc:
+        return exc.items, exc.ask
 
 
 def _ask_agent(
     agent: Agent, prompt: str, view: SessionView
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """Один вызов агента с проверкой формы; нарушение — `FormError`."""
+    """Один вызов агента с проверкой формы; нарушение — `FormError`, только
+    нет критерия — `CriterionMissing`."""
     items, ask = parse_items(agent(prompt))
-    errors = form_errors(items, view) or criterion_errors(items, view)
+    errors = form_errors(items, view)
     if errors:
         raise FormError("; ".join(errors))
+    missing = criterion_errors(items, view)
+    if missing:
+        raise CriterionMissing("; ".join(missing), items, ask)
     return items, ask
 
 
@@ -435,11 +457,19 @@ def _bad_refs(refs: list[str], known: set[str]) -> list[str]:
     return bad
 
 
-def validate(items: list[dict[str, Any]], q: Question, view: SessionView) -> list[str]:
+def validate(
+    items: list[dict[str, Any]],
+    q: Question,
+    view: SessionView,
+    *,
+    criterion: bool = True,
+) -> list[str]:
     """Смысловые дыры по правилам брифа — уточнения для человека (без id).
 
     Пункт с префиксом темы требуется, только пока тема не покрыта: на
-    следующие вопросы покрытой темы ответ может и не дать нового пункта."""
+    следующие вопросы покрытой темы ответ может и не дать нового пункта.
+    `criterion=False` — без дыры критерия (интервью: её не спрашивают у
+    человека, критерий предложит починка GC-08)."""
     gaps = []
     prefix = _required_prefix(q, view)
     uncovered = q.coverage_key not in view.covered()
@@ -448,11 +478,13 @@ def validate(items: list[dict[str, Any]], q: Question, view: SessionView) -> lis
         gaps.append(f"Не понял из ответа {label}. {q.text}")
     targets = _trace_prefixes(items)
     for item in items:
-        gaps += _item_gaps(item, targets(item))
+        gaps += _item_gaps(item, targets(item), criterion)
     return gaps
 
 
-def _item_gaps(item: dict[str, Any], traced: set[str]) -> list[str]:
+def _item_gaps(
+    item: dict[str, Any], traced: set[str], criterion: bool = True
+) -> list[str]:
     """Недостающие поля пункта (GC-06…GC-08, GC-13).
 
     Критерий и значение (GC-08) у человека не спрашиваются: это перевод
@@ -461,7 +493,7 @@ def _item_gaps(item: dict[str, Any], traced: set[str]) -> list[str]:
     раньше ловится `criterion_errors`."""
     body, prefix = item["body"], item["prefix"]
     gaps = []
-    if _criterion_missing(item):
+    if criterion and _criterion_missing(item):
         gaps.append(f"Не задано, как проверить «{body}» — критерий предложит агент.")
     if prefix == "FR":
         if not traced & {"G", "J"}:

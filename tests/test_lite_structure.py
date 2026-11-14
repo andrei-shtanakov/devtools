@@ -126,12 +126,27 @@ def test_fr_without_acceptance_is_form_error_for_agent() -> None:
 
 
 @pytest.mark.parametrize("may_ask", [True, False])
-def test_missing_criterion_twice_fails_without_human_question(may_ask: bool) -> None:
+def test_missing_criterion_twice_sent_without_criterion(may_ask: bool) -> None:
+    """Агент дважды не дал ТОЛЬКО критерий — ответ человека не валится
+    («переформулируйте»), а уходит разложенным без критерия: его предложит
+    починка GC-08 после интервью (финальное ревью v1.2). Вопроса человеку
+    о критерии нет и при `may_ask`."""
     item = {"prefix": "NFR", "body": "Быстро", "preference": "быстро"}
     agent = _agent({"items": [item]}, {"items": [item]})
-    got = sx.structure_answer(FUNCS, "ответ", _customer(), agent, may_ask=may_ask)
-    assert isinstance(got, sx.Failed)
+    got = sx.structure_answer(NFRQ, "ответ", _customer(), agent, may_ask=may_ask)
+    assert isinstance(got, sx.Ready)
     assert len(agent.prompts) == 2
+    [entry] = _entries(got.payload)
+    assert entry["body"] == "Быстро" and "Acceptance" not in entry
+
+
+def test_other_form_error_on_retry_still_fails() -> None:
+    """Повтор без критерия, но с иной ошибкой формы — по-прежнему `Failed`."""
+    item = {"prefix": "NFR", "body": "Быстро", "preference": "быстро"}
+    bad = {**item, "id": "NFR-99"}
+    agent = _agent({"items": [item]}, {"items": [bad]})
+    got = sx.structure_answer(NFRQ, "ответ", _customer(), agent, may_ask=True)
+    assert got == sx.Failed(sx.FAILED_TEXT)
 
 
 def test_agent_ask_becomes_ask() -> None:
