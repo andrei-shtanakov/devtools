@@ -164,3 +164,14 @@ def test_edit_hint_names_only_blocking_files(run) -> None:
     _write("edge-findings.txt", MAJOR, other)
     hint = sf.edit_hint(run, _edge())
     assert hint is not None and "15-behaviour-spec.md" not in hint
+
+
+def test_unrated_fail_is_not_instrument_failure(run) -> None:
+    """FAIL ребра без находок — штатный исход проверки, не «сбой ревьюера»
+    (ревью #760); строка видна на уровне 0."""
+    _write("edge-findings.txt", NO_FINDINGS)
+    stop = _edge()
+    assert stop.unrated == [NO_FINDINGS] and stop.failures == []
+    assert sf.summary(stop) == sf.UNBLOCKED_STOP
+    assert sf.shown(stop) == [(f"  - {sf.UNRATED_TEXT}", 0)]
+    assert sf.edit_hint(run, stop) is None
