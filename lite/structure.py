@@ -58,7 +58,8 @@ _Q_REF_RE = re.compile(r"\bQ-\d+\b")  # как GC-17 в vendored gate_check
 RESEARCH_PREFIX = "Q"
 RESEARCH_ROLES = ("analyst", "engineer")
 _REFERRING = ("FR", "NFR", "M")  # GC-17: чьи ссылки на Q-NN проверяются
-_REF_TEXT = ("body", "preference", "acceptance", "target")
+_REF_TEXT = ("body", "acceptance", "target")  # где пишет агент (не preference)
+_REF_SHAPE = r"[a-z]+-\d+"  # ref нового пункта: «q-1», «new-1»
 
 
 class FormError(Exception):
@@ -143,7 +144,7 @@ def _ask_agent(
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Один вызов агента с проверкой формы; нарушение — `FormError`."""
     items, ask = parse_items(agent(prompt))
-    errors = form_errors(items, view)
+    errors = form_errors(items, view) or criterion_errors(items, view)
     if errors:
         raise FormError("; ".join(errors))
     return items, ask
@@ -172,7 +173,7 @@ def build_prompt(q: Question, text: str, view: SessionView) -> str:
         need = f"Для этой темы нужен хотя бы один пункт с префиксом {prefix}."
     allowed = "\n".join(f"- {p} — тема {k}" for p, k in topics.items())
     existing = "\n".join(
-        f"- {e.id} (тема {topics.get(_prefix_of(e.id), '?')}): {e.body}"
+        f"- {e.id} ({_topic_note(_prefix_of(e.id), topics)}): {e.body}"
         + _fields_note(e.fields)
         for e in view.entries
     )
@@ -215,7 +216,8 @@ def build_prompt(q: Question, text: str, view: SessionView) -> str:
 - FR, NFR, M: preference — слова человека дословно (цитата из ответа, без
   пересказа), если он выразил предпочтение («чтобы было бесшовно»);
   acceptance/target — твоя гипотеза-перевод этого предпочтения в проверяемое
-  ограничение: пиши её сам, у человека не спрашивай.
+  ограничение: пиши её сам, у человека не спрашивай (у FR и NFR критерий
+  обязателен).
 - Если для гипотезы нужно число (порог, baseline, целевое значение), а
   человек его не назвал, — не выдумывай и не спрашивай: заведи в этом же
   ответе пункт Q (открытый вопрос исследования): body — какое значение
@@ -305,7 +307,9 @@ def _parse_item(item: Any, n: int) -> dict[str, Any]:
             out[key] = value.strip()
     if "priority" in out:
         out["priority"] = _canonical_priority(out["priority"], n)
-    if out["prefix"] == RESEARCH_PREFIX and "id" not in out:
+    if out["prefix"] != RESEARCH_PREFIX:
+        out.pop("owner_role", None)  # роль исследователя — только у Q
+    elif "id" not in out:
         out["blocking"] = False  # v1.2: Q исследования гейт не держит
     return out
 
@@ -337,13 +341,17 @@ def form_errors(items: list[dict[str, Any]], view: SessionView) -> list[str]:
             for t in item.get("traces", [])
             if t not in known and t not in refs
         ]
-        errors += _research_errors(item, n, known)
+    q_refs = {i["ref"] for i in items if "ref" in i and i["prefix"] == RESEARCH_PREFIX}
+    for n, item in enumerate(items, 1):
+        errors += _research_errors(item, n, known, q_refs, set(refs))
     return errors
 
 
-def _research_errors(item: dict[str, Any], n: int, known: set[str]) -> list[str]:
-    """Q — с ролью исследователя; ссылка FR/NFR/M на Q-NN — на записанный Q
-    (новый Q этого ответа указывается своим ref)."""
+def _research_errors(
+    item: dict[str, Any], n: int, known: set[str], q_refs: set[str], refs: set[str]
+) -> list[str]:
+    """Q — с ролью исследователя; ссылки FR/NFR/M (GC-17): Q-NN — на
+    записанный Q, ref — на Q этого же ответа; в preference id не бывает."""
     if item["prefix"] == RESEARCH_PREFIX:
         if item.get("owner_role") in RESEARCH_ROLES:
             return []
@@ -351,12 +359,53 @@ def _research_errors(item: dict[str, Any], n: int, known: set[str]) -> list[str]
     if item["prefix"] not in _REFERRING:
         return []
     text = " ".join(str(item.get(key, "")) for key in _REF_TEXT)
-    return [
+    errors = [
         f"пункт {n}: ссылка на {ref}, но такого Q нет — заведи Q в этом ответе "
         "и сошлись на его ref"
         for ref in dict.fromkeys(_Q_REF_RE.findall(text))
         if ref not in known
     ]
+    errors += [
+        f"пункт {n}: «{ref}» — не ref пункта Q этого ответа; ссылайся только "
+        "на ref заведённого здесь Q"
+        for ref in dict.fromkeys(_ref_pattern(refs).findall(text))
+        if ref not in q_refs
+    ]
+    errors += [
+        f"пункт {n}: preference — дословные слова человека, id {ref} в них "
+        "быть не может; ссылку пиши в критерии"
+        for ref in dict.fromkeys(_Q_REF_RE.findall(item.get("preference", "")))
+    ]
+    return errors
+
+
+def _ref_pattern(refs: set[str]) -> re.Pattern[str]:
+    """Отдельно стоящий ref: форма `q-1` или любой ref этого ответа."""
+    alts = [_REF_SHAPE, *map(re.escape, sorted(refs, key=len, reverse=True))]
+    return re.compile(r"(?<![\w-])(" + "|".join(alts) + r")(?![\w-])")
+
+
+def criterion_errors(items: list[dict[str, Any]], view: SessionView) -> list[str]:
+    """FR без acceptance, NFR без acceptance/target (итог с прежней записью
+    для обновления) — повтор агента: критерий — его гипотеза (GC-08, v1.2).
+    Вызывать после `form_errors` без ошибок (id обновлений действующие)."""
+    errors = []
+    for n, item in enumerate(items, 1):
+        whole = _merged(item, view) if "id" in item else item
+        if _criterion_missing(whole):
+            errors.append(
+                f"пункт {n}: у {item['prefix']} нет критерия — напиши сам "
+                "гипотезу acceptance/target по словам человека (не спрашивай "
+                "его); не хватает числа — заведи Q и сошлись на его ref"
+            )
+    return errors
+
+
+def _criterion_missing(item: dict[str, Any]) -> bool:
+    """FR без acceptance; NFR без acceptance и target."""
+    if item["prefix"] == "FR":
+        return "acceptance" not in item
+    return item["prefix"] == "NFR" and not ({"acceptance", "target"} & item.keys())
 
 
 def _id_errors(items: list[dict[str, Any]], known: set[str]) -> list[str]:
@@ -403,12 +452,16 @@ def validate(items: list[dict[str, Any]], q: Question, view: SessionView) -> lis
 
 
 def _item_gaps(item: dict[str, Any], traced: set[str]) -> list[str]:
-    """Недостающие по смыслу поля пункта (GC-06, GC-07, GC-13).
+    """Недостающие поля пункта (GC-06…GC-08, GC-13).
 
     Критерий и значение (GC-08) у человека не спрашиваются: это перевод
-    агента, недостающее число — `Q` исследования (контракт v1.2)."""
+    агента, недостающее число — `Q` исследования (контракт v1.2). Его
+    отсутствие названо без вопроса — для `dfl correct`; в интервью оно
+    раньше ловится `criterion_errors`."""
     body, prefix = item["body"], item["prefix"]
     gaps = []
+    if _criterion_missing(item):
+        gaps.append(f"Не задано, как проверить «{body}» — критерий предложит агент.")
     if prefix == "FR":
         if not traced & {"G", "J"}:
             gaps.append(f"Какой цели или задаче служит «{body}»?")
@@ -464,14 +517,14 @@ def to_payload(text: str, items: list[dict[str, Any]], view: SessionView) -> str
 
 
 def _with_q_ids(item: dict[str, Any], q_refs: dict[str, str]) -> dict[str, Any]:
-    """ref нового Q в критерии пункта → назначенный id (`q-1` → `Q-01`)."""
+    """ref нового Q в тексте пункта → назначенный id (`q-1` → `Q-01`)."""
     if not q_refs:
         return item
     pattern = re.compile(
         r"(?<![\w-])(" + "|".join(map(re.escape, q_refs)) + r")(?![\w-])"
     )
     out = dict(item)
-    for key in ("acceptance", "target"):
+    for key in _REF_TEXT:
         if key in out:
             out[key] = pattern.sub(lambda m: q_refs[m.group(1)], out[key])
     return out
@@ -539,6 +592,13 @@ def _merged(item: dict[str, Any], view: SessionView) -> dict[str, Any]:
     if "ref" in item:
         merged["ref"] = item["ref"]
     return merged
+
+
+def _topic_note(prefix: str, topics: dict[str, str]) -> str:
+    """`тема goals` для пункта темы; `исследование` для открытого Q."""
+    if prefix == RESEARCH_PREFIX:
+        return "исследование"
+    return f"тема {topics.get(prefix, '?')}"
 
 
 def _fields_note(fields: dict[str, Any]) -> str:

@@ -113,15 +113,25 @@ def test_missing_required_prefix_asks() -> None:
     assert "G-" not in got.question and "{" not in got.question
 
 
-def test_fr_without_acceptance_not_asked_of_human() -> None:
-    """v1.2: критерий — перевод агента, у человека его не спрашивают."""
+def test_fr_without_acceptance_is_form_error_for_agent() -> None:
+    """v1.2: критерий — перевод агента: его нет — повтор агента, не вопрос
+    человеку."""
     item = {k: v for k, v in FR_FULL.items() if k != "acceptance"}
-    got = sx.structure_answer(
-        FUNCS, "ответ", _customer(), _agent({"items": [item]}), may_ask=True
-    )
+    agent = _agent({"items": [item]}, {"items": [FR_FULL]})
+    got = sx.structure_answer(FUNCS, "ответ", _customer(), agent, may_ask=True)
     assert isinstance(got, sx.Ready)
-    (entry,) = _entries(got.payload)
-    assert "Acceptance" not in entry and entry["Priority"] == "Must"
+    assert len(agent.prompts) == 2
+    assert "гипотез" in agent.prompts[1] and "Q" in agent.prompts[1]
+    assert _entries(got.payload)[0]["Acceptance"] == "Файл открывается в Excel"
+
+
+@pytest.mark.parametrize("may_ask", [True, False])
+def test_missing_criterion_twice_fails_without_human_question(may_ask: bool) -> None:
+    item = {"prefix": "NFR", "body": "Быстро", "preference": "быстро"}
+    agent = _agent({"items": [item]}, {"items": [item]})
+    got = sx.structure_answer(FUNCS, "ответ", _customer(), agent, may_ask=may_ask)
+    assert isinstance(got, sx.Failed)
+    assert len(agent.prompts) == 2
 
 
 def test_agent_ask_becomes_ask() -> None:
@@ -143,7 +153,7 @@ def test_validate_reports_gate_fields() -> None:
         {"prefix": "M", "body": "Время сверки"},
     ]
     gaps = sx.validate(items, FUNCS, _customer())
-    assert len(gaps) == 3  # FR: цель, важность; M (критерий — перевод агента)
+    assert len(gaps) == 5  # FR: цель, важность, критерий; NFR; M
     assert sx.validate([{**FR_FULL}], FUNCS, _customer()) == []
     nfr = {"prefix": "NFR", "body": "Быстро", "target": "< 1 с"}
     assert sx.validate([nfr, FR_FULL], FUNCS, _customer()) == []
@@ -402,7 +412,7 @@ def test_update_validated_as_merged_result() -> None:
     upd = {"id": "FR-01", "prefix": "FR", "body": "Выгрузка операций в CSV",
            "priority": "Should"}  # fmt: skip
     # traces нет ни в прежнем пункте, ни в обновлении — спросить человека
-    no_traces = _with_fr(traces=[])
+    no_traces = _with_fr(traces=[], Acceptance="Файл открывается в Excel")
     got = sx.structure_answer(
         PRIO, "ответ", no_traces, _agent({"items": [upd]}), may_ask=True
     )
@@ -486,14 +496,24 @@ def test_preference_verbatim_with_agent_hypothesis_no_number_question() -> None:
     assert len(agent.prompts) == 1
 
 
-def test_nfr_without_criterion_is_not_asked_of_human() -> None:
-    """(d) Ни критерия, ни значения у человека не просим."""
+def test_criterion_gap_is_not_a_number_question() -> None:
+    """(d) Дыра критерия (для dfl correct) не просит у человека значения."""
     item = {"prefix": "NFR", "body": "Быстро", "preference": "быстро"}
-    gaps = sx.validate([item, FR_FULL], NFRQ, _customer())
-    assert gaps == []
-    fr = {**FR_FULL}
-    del fr["acceptance"]
-    assert sx.validate([fr], FUNCS, _customer()) == []
+    fr = {k: v for k, v in FR_FULL.items() if k != "acceptance"}
+    gaps = sx.validate([item, fr], NFRQ, _customer())
+    assert len(gaps) == 2
+    for gap in gaps:
+        assert "?" not in gap and "значени" not in gap and "агент" in gap
+
+
+def test_update_without_criterion_anywhere_reasks_agent() -> None:
+    upd = {"id": "FR-01", "prefix": "FR", "body": "Выгрузка операций в CSV",
+           "priority": "Should"}  # fmt: skip
+    fixed = {**upd, "acceptance": "Файл открывается в Excel"}
+    agent = _agent({"items": [upd]}, {"items": [fixed]})
+    got = sx.structure_answer(PRIO, "ответ", _with_fr(), agent, may_ask=True)
+    assert isinstance(got, sx.Ready)
+    assert len(agent.prompts) == 2 and "FR" in agent.prompts[1]
 
 
 def test_number_goes_to_research_q_in_same_answer() -> None:
@@ -574,3 +594,62 @@ def test_prompt_is_translator_and_names_v12_form() -> None:
     for needed in ("preference", "дословно", "гипотез", "owner_role",
                    "analyst", "не хуже значения из", "чисел"):  # fmt: skip
         assert needed in prompt, needed
+
+
+# --- fix round 1: висячие ref, ref в body, мелочи ---
+
+
+def test_dangling_lowercase_ref_rejected() -> None:
+    items = [
+        {"prefix": "Q", "body": "Порог?", "ref": "q-1", "owner_role": "analyst"},
+        {"prefix": "NFR", "body": "Быстро", "target": "не хуже значения из q-2"},
+    ]
+    errors = sx.form_errors(items, _customer())
+    assert any("q-2" in e for e in errors)
+
+
+def test_ref_of_non_q_item_in_criterion_rejected() -> None:
+    items = [
+        {"prefix": "G", "body": "Цель", "ref": "new-1"},
+        {**FR_FULL, "traces": ["new-1"], "acceptance": "не хуже значения из new-1"},
+    ]
+    errors = sx.form_errors(items, _customer())
+    assert any("new-1" in e for e in errors)
+
+
+def test_q_ref_in_body_replaced_by_id() -> None:
+    items = [
+        {"prefix": "Q", "body": "Порог?", "ref": "q-1", "owner_role": "analyst"},
+        {"prefix": "NFR", "body": "Отклик не хуже значения из q-1",
+         "target": "не хуже значения из q-1"},
+    ]  # fmt: skip
+    got = sx.structure_answer(NFRQ, "быстро", _customer(), _agent({"items": items}),
+                              may_ask=True)  # fmt: skip
+    assert isinstance(got, sx.Ready)
+    nfr = _entries(got.payload)[1]
+    assert nfr["body"] == "Отклик не хуже значения из Q-01"
+    assert nfr["Target"] == "не хуже значения из Q-01"
+
+
+def test_q_id_in_preference_message_names_verbatim_words() -> None:
+    item = {"prefix": "NFR", "body": "Быстро", "preference": "как в Q-3",
+            "target": "т"}  # fmt: skip
+    (error,) = sx.form_errors([item], _customer())
+    assert "Q-3" in error and "дословн" in error and "заведи Q" not in error
+
+
+def test_owner_role_only_on_q() -> None:
+    items, _ = sx.parse_items(json.dumps({"items": [
+        {**FR_FULL, "owner_role": "analyst"},
+        {"prefix": "Q", "body": "Порог?", "owner_role": "analyst"},
+    ]}))  # fmt: skip
+    assert "owner_role" not in items[0] and items[1]["owner_role"] == "analyst"
+
+
+def test_prompt_labels_existing_q_as_research() -> None:
+    view = _customer(
+        entries=[Entry("Q-01", "Порог?", {"owner_role": "analyst"})],
+        declared=["Q-01"],
+    )
+    prompt = sx.build_prompt(NFRQ, "ответ", view)
+    assert "Q-01 (исследование): Порог?" in prompt and "тема ?" not in prompt
