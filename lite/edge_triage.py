@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from lite.edge_journal import Decision, Finding
+from lite.edge_memory import recall
 from lite.structure import Agent, FormError, first_json_object
 
 CACHE_DIR = "edge-triage"
@@ -59,17 +60,30 @@ def triage(
     агент недоступен — `AgentUnavailable`.
     """
     cache = _cache_path(cache_dir, findings, nodes, bases, prior)
-    if cache is not None and cache.is_file():
+    cached = _read_cache(cache)
+    if cached is not None:
         try:
-            return _from_json(findings, json.loads(cache.read_text("utf-8")))
-        except (ValueError, FormError):
-            pass  # битый кэш — спросим агента заново
+            return _from_json(findings, cached)
+        except FormError:
+            pass  # кэш не по схеме — спросим агента заново
     raw = first_json_object(agent(_prompt(findings, nodes, bases, prior)))
-    items = _parse(findings, raw, {d.key for d in prior})
+    decided = {k for k, r in recall(prior, findings).items() if r.decided}
+    items = _parse(findings, raw, decided)
     if cache is not None:
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_text(_to_json(items), encoding="utf-8")
     return items
+
+
+def _read_cache(cache: Path | None) -> dict[str, Any] | None:
+    """Объект из кэша; нет, не читается или не объект JSON — `None`."""
+    if cache is None:
+        return None
+    try:
+        raw = json.loads(cache.read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    return raw if isinstance(raw, dict) else None
 
 
 def _cache_path(

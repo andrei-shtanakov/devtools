@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import itertools
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -1638,13 +1640,20 @@ _EDGE_LINE = (
 )
 
 
+_EDGE_STAMPS = itertools.count(10**18)
+
+
 def _review_stop(run_id: str = "WS-1-a") -> None:
     """Прогон в `stopped_review` волны 2 с одной блокирующей находкой."""
     state = _run(run_id, "WS-1", "customer", "stopped_review", subject="t")
     state.wave = 2
     rs.save(state)
     rd = rs.run_dir(run_id)
-    (rd / "edge-findings.txt").write_text(_EDGE_LINE + "\n", encoding="utf-8")
+    path = rd / "edge-findings.txt"
+    path.unlink(missing_ok=True)  # как `_step_edge`: снять и записать заново
+    path.write_text(_EDGE_LINE + "\n", encoding="utf-8")
+    stamp = next(_EDGE_STAMPS)  # проверка состоялась — новый файл стопа
+    os.utime(path, ns=(stamp, stamp))
     out = rd / "edge-check" / "w2"
     out.mkdir(parents=True, exist_ok=True)
     record = {
@@ -1703,7 +1712,7 @@ def test_round_paid_calls_at_level1(env: Env, monkeypatch, capfd) -> None:
         if len(env.spec_calls) == 1:
             _review_stop()
             return 1
-        _run("WS-1-a", "WS-1", "customer", "running", subject="t")
+        _edge_passed()
         return 0
 
     monkeypatch.setattr(spec_loop, "main", spec_main)
@@ -1711,6 +1720,56 @@ def test_round_paid_calls_at_level1(env: Env, monkeypatch, capfd) -> None:
     assert env.run("run", "-v", "--subject", "t") == 0
     out, _ = _read(capfd)
     assert "платных вызовов: сортировка 1, переписывание 1, проверка 1" in out
+
+
+def _edge_passed(run_id: str = "WS-1-a") -> None:
+    """Повторный шаг дошёл до edge-check волны 2, и она прошла."""
+    state = _run(run_id, "WS-1", "customer", "running", subject="t")
+    state.wave = 2
+    state.ops["edge-2"] = {"status": "completed", "verdict": "PASS"}
+    rs.save(state)
+
+
+def test_check_counted_only_when_edge_reached(env: Env, monkeypatch, capfd) -> None:
+    """Повторный шаг остановился до edge-check (стоп гейта) — проверка не
+    оплачена и не считается; итог круга со стопом печатает счётчик."""
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch)
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        if len(env.spec_calls) == 1:
+            _review_stop()
+            return 1
+        state = rs.load("WS-1-a")
+        state.status = "stopped_gate"
+        rs.save(state)
+        return 1
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    monkeypatch.setattr(dfl, "_resolve", _resolver("REVISED", []))
+    assert env.run("run", "-v", "--subject", "t") == 1
+    out, _ = _read(capfd)
+    assert "платных вызовов: сортировка 1, переписывание 1, проверка 0" in out
+    assert "проверка 1" not in out
+
+
+def test_stopped_round_prints_paid_calls(env: Env, monkeypatch, capfd) -> None:
+    """Круг потратил вызовы и кончился стопом (отклонённое переписывание) —
+    число платных вызовов печатается и здесь (уровень 0)."""
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch)
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        _review_stop()
+        return 1
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    monkeypatch.setattr(dfl, "_resolve", _resolver("STOPPED", []))
+    assert env.run("run", "--subject", "t") == 1
+    out, _ = _read(capfd)
+    assert "платных вызовов: сортировка 1, переписывание 1, проверка 0" in out
 
 
 def test_resolution_stopped_prints_old_hint(env: Env, monkeypatch, capfd) -> None:

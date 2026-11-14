@@ -144,3 +144,34 @@ def test_triage_cached_by_input_hash(tmp_path: Path) -> None:
     assert len(list((tmp_path / "edge-triage").glob("*.json"))) == 1
     _run([_f("R9")], _agent({"items": [fix]}), cache_dir=tmp_path)
     assert len(list((tmp_path / "edge-triage").glob("*.json"))) == 2
+
+
+@pytest.mark.parametrize("broken", ["[1, 2]", '"строка"', None])
+def test_broken_cache_falls_back_to_agent(tmp_path: Path, broken: str | None) -> None:
+    """Кэш не объект JSON или не UTF-8 — без трассировки, спросить агента."""
+    fix = {"finding": 1, "kind": "fix", "question": "", "options": []}
+    _run([_f()], _agent({"items": [fix]}), cache_dir=tmp_path)
+    [cache] = (tmp_path / "edge-triage").glob("*.json")
+    cache.unlink()
+    if broken is None:
+        cache.write_bytes(b"\xff\xfe")  # не UTF-8 — UnicodeDecodeError
+    else:
+        cache.write_text(broken, encoding="utf-8")
+    agent = _agent({"items": [fix]})
+    [item] = _run([_f()], agent, cache_dir=tmp_path)
+    assert item.kind == "fix" and len(agent.calls) == 1
+
+
+def test_unreadable_cache_falls_back_to_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fix = {"finding": 1, "kind": "fix", "question": "", "options": []}
+    _run([_f()], _agent({"items": [fix]}), cache_dir=tmp_path)
+
+    def denied(self: Path, *a: Any, **kw: Any) -> str:
+        raise PermissionError("нет доступа")
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    agent = _agent({"items": [fix]})
+    [item] = _run([_f()], agent, cache_dir=tmp_path)
+    assert item.kind == "fix" and len(agent.calls) == 1

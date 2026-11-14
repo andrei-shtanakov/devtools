@@ -18,6 +18,7 @@ from governance import runner
 from governance.author_launch import AuthorCall, LaunchOutcome
 from governance.edge_check import override
 from lite import edge_journal as ej
+from lite import edge_memory as em
 from lite import edge_resolve as er
 from lite.structure import AgentUnavailable
 
@@ -326,18 +327,21 @@ def test_chosen_removal_allowed(world: World) -> None:
     assert d.allows == {"removes": ["FR-02"], "downgrades": []}
 
 
+def _disagree(digest: str = "", rule: str = "R1") -> ej.Decision:
+    """Несогласие в журнале; `digest` — находка на момент ответа."""
+    key = (NODE, EDGE, rule)
+    return ej.Decision(key, "Цель G-03?", "вне объёма", "disagree", 1, digest=digest)
+
+
 def test_repeat_after_disagree_offers_override(world: World) -> None:
     world.findings(_finding())
-    ej.append(
-        world.run_dir,
-        2,
-        ej.Decision((NODE, EDGE, "R1"), "Цель G-03?", "вне объёма", "disagree", 1),
-    )
-    # прошлое решение есть: сортировка даёт fix, но после несогласия
-    # человека спрашивают снова — с принятием вопреки замечанию
+    # несогласие дано на прежнем тексте узла (digest другой): узел переписан,
+    # замечание вернулось — спросить снова, с принятием вопреки замечанию
+    ej.append(world.run_dir, 2, _disagree(digest="old-text"))
     outcome = world.resolve(["1", ""], world.agent(FIX), world.revise())
     assert outcome is er.Outcome.OVERRIDDEN
     assert er.OVERRIDE_OFFER in world.out()
+    assert em.RETURNED in world.out()
     # решение привязано к самой находке — тот же digest, что считает раннер
     digest = override.finding_digest(NODE, EDGE, _finding(), ["s-node"])
     assert ej.overridden(world.run_dir, 2) == {digest}
@@ -591,13 +595,126 @@ def test_override_not_offered_without_subject_hashes(world: World) -> None:
     """Запись без хэшей subject: принятию не к чему привязаться — вопрос
     после несогласия задаётся без варианта «принять вопреки», строки нет."""
     world.findings(_finding(), subject=None)
-    ej.append(
-        world.run_dir,
-        2,
-        ej.Decision((NODE, EDGE, "R1"), "Цель G-03?", "вне объёма", "disagree", 1),
-    )
+    ej.append(world.run_dir, 2, _disagree(digest="old-text"))
     outcome = world.resolve(["2", "", "2", ""], world.agent(FIX), world.revise())
     assert er.OVERRIDE_OFFER not in world.out()
     assert outcome is er.Outcome.STOPPED
     assert ej.overridden(world.run_dir, 2) == set()
     assert all(d.kind != "override" for d in ej.load(world.run_dir, 2))
+
+
+# --- память решений между кругами и вызовами (финальное ревью, I1–I3) ---
+
+DIGEST = override.finding_digest(NODE, EDGE, _finding(), ["s-node"])
+
+
+def test_disagree_same_text_not_reasked(world: World) -> None:
+    """Несогласие на том же тексте узла (переписывания ещё не было) — не
+    спрашивать снова и не писать «вернулось»."""
+    world.findings(_finding())
+    ej.append(world.run_dir, 2, _disagree(digest=DIGEST))
+    outcome = world.resolve([], world.agent(FIX), world.revise())
+    assert outcome is er.Outcome.REVISED
+    assert er.FIXING.format(n=1, m=0) in world.out()
+    assert em.RETURNED not in world.out() and er.OVERRIDE_OFFER not in world.out()
+    assert "не согласен: вне объёма" in world.revisions[0]["decisions"]
+
+
+def test_disagree_without_digest_reasked_neutrally(world: World) -> None:
+    """Старая строка без digest — неизвестно, менялся ли текст: спросить, но
+    без «вернулось» и без принятия вопреки (не последний круг)."""
+    world.findings(_finding())
+    ej.append(world.run_dir, 2, _disagree())
+    outcome = world.resolve(["своё: покрыть", ""], world.agent(FIX), world.revise())
+    assert outcome is er.Outcome.REVISED
+    out = world.out()
+    assert em.AGAIN in out
+    assert em.RETURNED not in out and er.OVERRIDE_OFFER not in out
+    last = world.resolve(
+        ["1", ""], world.agent(FIX), world.revise(), round_no=er.MAX_ROUNDS
+    )
+    assert last is er.Outcome.REVISED  # «своё» — последнее решение, не спросят
+
+
+def test_disagree_then_stop_next_run_does_not_reask(world: World) -> None:
+    """Несогласие с K1, остановка на K2; следующий `dfl run` не спрашивает K1."""
+    world.findings(_finding("R1"), _finding("R2"))
+    items = _decision_item() + [{**_decision_item()[0], "finding": 2}]
+    first = world.resolve(
+        ["не согласен: вне объёма", "", None], world.agent(items), world.revise()
+    )
+    assert first is er.Outcome.STOPPED
+    world.said.clear()
+    second = world.resolve(["1", ""], world.agent(items), world.revise())
+    assert second is er.Outcome.REVISED
+    out = world.out()
+    assert "замечание R1" not in out and em.RETURNED not in out
+    assert er.FIXING.format(n=1, m=1) in out
+    kinds = [(d.key[2], d.kind) for d in ej.load(world.run_dir, 2)]
+    assert kinds == [("R1", "disagree"), ("R2", "option")]
+
+
+def test_current_override_not_asked(world: World) -> None:
+    world.findings(_finding())
+    ej.append(world.run_dir, 2, _override(DIGEST))
+    outcome = world.resolve([], world.agent(FIX), world.revise())
+    assert outcome is er.Outcome.OVERRIDDEN
+    assert er.FIXING.format(n=1, m=0) in world.out() and world.revisions == []
+
+
+def _override(digest: str) -> ej.Decision:
+    return ej.Decision(
+        (NODE, EDGE, "R1"), "Цель G-03?", er.OVERRIDE_OFFER, "override", 2,
+        digest=digest, subject=["s-node"],
+    )  # fmt: skip
+
+
+def test_override_then_text_changed_asked_again(world: World) -> None:
+    """Принятие вопреки, затем текст узла изменился: принятие не действует —
+    человека спрашивают снова (с причиной) и снова предлагают принять."""
+    world.findings(_finding())
+    first = world.resolve(
+        ["3", ""], world.agent(_decision_item()), world.revise(), er.MAX_ROUNDS
+    )
+    assert first is er.Outcome.OVERRIDDEN
+    world.said.clear()
+    world.stop_lines = []
+    world.findings(_finding(), subject=[{"path": FILE, "sha256": "s-edited"}])
+    second = world.resolve(["1", ""], world.agent(FIX), world.revise())
+    out = world.out()
+    assert "текст узла изменился после вашего принятия" in out
+    assert er.OVERRIDE_OFFER in out
+    assert second is er.Outcome.OVERRIDDEN and world.revisions == []
+    edited = override.finding_digest(NODE, EDGE, _finding(), ["s-edited"])
+    assert edited in ej.overridden(world.run_dir, 2)
+
+
+def test_chosen_removal_then_stop_allowed_next_run(world: World) -> None:
+    """Выбранное удаление FR-02 (K1), стоп на K2; следующий вызов разрешает
+    переписыванию удалить FR-02 — решение берётся из журнала."""
+    world.findings(_finding("R1"), _finding("R2"))
+    items = _decision_item(removes=["FR-02"]) + [{**_decision_item()[0], "finding": 2}]
+    first = world.resolve(["2", "", None], world.agent(items), world.revise())
+    assert first is er.Outcome.STOPPED
+    second = world.resolve(["1", ""], world.agent(items), world.revise(WITHOUT_FR02))
+    assert second is er.Outcome.REVISED
+    assert world.node.read_text(encoding="utf-8") == WITHOUT_FR02
+
+
+def test_journal_allowances_scoped_per_file(world: World) -> None:
+    """Разрешение из журнала по находке design не снимает AC-02 в acceptance."""
+    _two_files(world)
+    key = ("design", "design-vs-requirements-behaviour", "R1")
+    ej.append(
+        world.run_dir,
+        4,
+        ej.Decision(key, "Убрать AC-02?", "да", "option", 1,
+                    {"removes": ["AC-02"], "downgrades": []}),
+    )  # fmt: skip
+    per_file = {
+        "20-design.md": (DESIGN + "\nправка\n", 0),
+        "25-acceptance.md": ("#### AC-01: вход\ntext\n", 0),
+    }
+    outcome = world.resolve([], world.agent(_fixes(2)), world.revise(per_file=per_file))
+    assert outcome is er.Outcome.STOPPED
+    assert "AC-02" in world.out()

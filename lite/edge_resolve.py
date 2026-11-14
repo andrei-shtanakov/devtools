@@ -30,6 +30,7 @@ from governance.edge_check.author_rules import DEFAULT_CONTRACTS
 from governance.edge_check.rules import EdgeCheckError, load_rules
 from governance.ops import _AUTHOR_FILENAMES
 from lite import edge_journal as ej
+from lite import edge_memory as em
 from lite import node_guard
 from lite import stop_findings as sf
 from lite.edge_triage import Item, Option, triage
@@ -47,7 +48,6 @@ DISAGREE_PREFIX = "не согласен:"
 ANSWER_HELP = "«своё: …» · «не согласен: <почему>» · «пропустить» — остановиться"
 REASK = "не понял ответ — номер варианта, «своё: …», «не согласен: …» или «пропустить»"
 NO_REASON = "напишите причину после «не согласен:»"
-REPEAT_QUESTION = "Замечание вернулось после вашего несогласия. Что делаем?"
 KIND_LABELS = {
     "option": "",
     "own": OWN_PREFIX + " ",
@@ -78,6 +78,10 @@ class PaidCalls:
     triage: int = 0
     revise: int = 0
     check: int = 0
+
+    def spent(self) -> bool:
+        """Был ли хоть один платный вызов."""
+        return bool(self.triage or self.revise or self.check)
 
     def line(self) -> str:
         """Строка для человека."""
@@ -132,7 +136,7 @@ def resolve(
     if {f.digest for f in findings} <= ej.overridden(run_dir, state.wave):
         say("замечания приняты вопреки — записано в журнал; проверяю снова")
         return Outcome.OVERRIDDEN
-    return _rewrite(state, findings, nodes, chosen, revise, round_no, calls)
+    return _rewrite(state, findings, nodes, revise, round_no, calls)
 
 
 def applicable_findings(state: rs.RunState) -> list[ej.Finding] | None:
@@ -259,23 +263,22 @@ def _ask_all(
     read: Read,
     round_no: int,
 ) -> list[ej.Decision] | None:
-    """Вопросы по `decision` и по вернувшимся после несогласия; каждое решение
-    сразу в журнал. Человек остановился — `None` (записанное остаётся)."""
-    disagreed = {d.key for d in prior if d.kind == "disagree"}
-    test = state.mode == "test"
-    asked = [
-        i for i in items if i.kind == "decision" or (test and _repeat(i, disagreed))
-    ]
+    """Вопросы по `decision` и по тем, что журнал велит спросить снова
+    (`edge_memory.recall`); каждое решение сразу в журнал. Человек
+    остановился — `None` (записанное остаётся)."""
+    memory = em.recall(
+        prior,
+        [i.finding for i in items],
+        test=state.mode == "test",
+        last_round=round_no == MAX_ROUNDS,
+    )
+    asked = [i for i in items if i.kind == "decision" or memory[i.finding.key].ask]
     say(FIXING.format(n=len(items) - len(asked), m=len(asked)))
     chosen: list[ej.Decision] = []
     for item in asked:
-        # Без digest (нет хэшей subject) принятие не к чему привязать.
-        allow = (
-            test
-            and bool(item.finding.digest)
-            and (item.finding.key in disagreed or round_no == MAX_ROUNDS)
-        )
-        decision = _ask(item, read, allow, round_no)
+        recall = memory[item.finding.key]
+        question = recall.question or item.question
+        decision = _ask(item, question, read, recall.offer_override, round_no)
         if decision is None:
             say("разбор остановлен — продолжить: dfl run")
             return None
@@ -284,15 +287,10 @@ def _ask_all(
     return chosen
 
 
-def _repeat(item: Item, disagreed: set[Key]) -> bool:
-    return item.kind == "fix" and item.finding.key in disagreed
-
-
 def _ask(
-    item: Item, read: Read, allow_override: bool, round_no: int
+    item: Item, question: str, read: Read, allow_override: bool, round_no: int
 ) -> ej.Decision | None:
     """Один вопрос; непонятый ответ — переспросить один раз, затем стоп."""
-    question = item.question or REPEAT_QUESTION
     say(f"замечание {_where(item.finding)}: {item.finding.statement}")
     say(question)
     for no, option in enumerate(item.options, 1):
@@ -372,7 +370,6 @@ def _rewrite(
     state: rs.RunState,
     findings: list[ej.Finding],
     nodes: dict[str, str],
-    chosen: list[ej.Decision],
     revise: Revise,
     round_no: int,
     calls: PaidCalls,
@@ -392,7 +389,7 @@ def _rewrite(
             calls.revise += 1
             reason = _revise_file(state, name, nodes[name], mine, journal, revise)
             if reason is None:
-                reason = _weakened(state, name, nodes[name], _allows(chosen, mine))
+                reason = _weakened(state, name, nodes[name], _allows(journal, mine))
             if reason is not None:
                 say(reason)
                 _restore(state, nodes, done)
@@ -407,14 +404,14 @@ def _rewrite(
 
 
 def _allows(
-    chosen: list[ej.Decision], findings: list[ej.Finding]
+    journal: list[ej.Decision], findings: list[ej.Finding]
 ) -> tuple[set[str], set[str]]:
-    """Разрешённые удаления/понижения — только решения по находкам этого файла."""
-    keys = {f.key for f in findings}
-    mine = [d for d in chosen if d.key in keys]
+    """Разрешённые удаления/понижения — все решения волны по находкам этого
+    файла (и прошлых вызовов: выбор мог быть до остановки)."""
+    memory = em.recall(journal, findings).values()
     return (
-        {i for d in mine for i in d.allows.get("removes", [])},
-        {i for d in mine for i in d.allows.get("downgrades", [])},
+        {i for r in memory for i in r.removes},
+        {i for r in memory for i in r.downgrades},
     )
 
 
