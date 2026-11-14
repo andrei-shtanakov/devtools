@@ -130,6 +130,22 @@ def test_missing_discovery_dir_raises(monkeypatch) -> None:
         st.load_session("s-1")
 
 
+def test_show_failure_reason_from_stdout_envelope(fake_runner) -> None:
+    envelope = {"operation": {"status": "error", "reason": "нет сессии s-1"}}
+    run = fake_runner(stdout=json.dumps(envelope), code=1)
+    with pytest.raises(st.InterviewStateError, match="нет сессии s-1"):
+        st.load_session("s-1", run)
+
+
+def test_parse_show_output_of_old_pin() -> None:
+    """Сессия, созданная discovery c7961b9, читается `show` пина 91543b1."""
+    raw = (FIXTURES / "old_pin_c7961b9.json").read_text(encoding="utf-8")
+    view = st._parse(json.loads(raw))
+    assert view.frame == "customer"
+    assert [e.id for e in view.entries] == ["G-01", "G-02"]
+    assert view.covered() == {"goals"}
+
+
 def test_parse_real_show_output() -> None:
     """Фикстура — реальный вывод `discovery show` (pin 91543b1): сессия
     customer, G-01 переобъявлен вторым ответом, G-02 вытеснен."""
@@ -161,7 +177,7 @@ def _discovery(env: dict[str, str], *args: str) -> dict:
     return json.loads(done.stdout)
 
 
-@pytest.mark.skipif(not LIVE_DISCOVERY, reason="нет .venv discovery")
+@pytest.mark.skipif(not LIVE_DISCOVERY, reason=f"нет .venv discovery: {DISCOVERY}")
 def test_show_reads_real_session(tmp_path: Path, monkeypatch) -> None:
     env = {**os.environ, "DISCOVERY_HOME": str(tmp_path / "home")}
     monkeypatch.setenv("DISCOVERY_HOME", env["DISCOVERY_HOME"])

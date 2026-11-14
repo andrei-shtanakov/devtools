@@ -141,6 +141,17 @@ def _parse(envelope: dict[str, Any]) -> SessionView:
     )
 
 
+def _failure_reason(done: subprocess.CompletedProcess) -> str:
+    """Причина отказа: `operation.reason` конверта в stdout, затем stderr, затем код."""
+    try:
+        reason = json.loads(done.stdout)["operation"]["reason"]
+    except (ValueError, KeyError, TypeError):
+        reason = None
+    if isinstance(reason, str) and reason.strip():
+        return reason.strip()
+    return (done.stderr or "").strip() or f"код {done.returncode}"
+
+
 def load_session(session_id: str, run: Runner = subprocess.run) -> SessionView:
     """Состояние сессии; сбой `show` или разбора — `InterviewStateError`."""
     argv = _show_argv(session_id)
@@ -149,7 +160,7 @@ def load_session(session_id: str, run: Runner = subprocess.run) -> SessionView:
     except OSError as exc:
         raise InterviewStateError(f"discovery show не запущен: {exc}") from exc
     if done.returncode not in SHOW_OK_CODES:
-        reason = (done.stderr or "").strip() or f"код {done.returncode}"
+        reason = _failure_reason(done)
         raise InterviewStateError(f"discovery show {session_id}: {reason}")
     try:
         return _parse(json.loads(done.stdout))
