@@ -88,7 +88,7 @@ def parse_response(raw: str, ruleset: RuleSet, prepared: PreparedInput) -> Respo
 
     try:
         for f in findings_raw:
-            path = str(f["path"])
+            path = _input_path(str(f["path"]), prepared, lines_by_path)
             if path not in lines_by_path:
                 raise EdgeCheckError(
                     "finding_outside_input",
@@ -158,3 +158,17 @@ def parse_response(raw: str, ruleset: RuleSet, prepared: PreparedInput) -> Respo
         ) from exc
 
     return Response(criteria, tuple(findings), model_id)
+
+
+def _input_path(
+    raw: str, prepared: PreparedInput, lines_by_path: dict[str, int]
+) -> str:
+    """Путь находки; `<роль>: <путь>` — как заголовок файла во входе
+    (`### subject: 15-behaviour-spec.md`), который модель скопировала
+    целиком, — сводится к пути, если роль и путь есть во входе (sdd-runer
+    W3, 14.11: `finding_outside_input` на собственном файле узла)."""
+    role, sep, rest = raw.partition(": ")
+    roles = {f.role for f in prepared.files}
+    if sep and role in roles and rest.strip() in lines_by_path:
+        return rest.strip()
+    return raw

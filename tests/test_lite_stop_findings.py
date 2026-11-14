@@ -71,10 +71,15 @@ def test_failures_not_counted_and_no_edit_hint(run) -> None:
     _write("edge-findings.txt", ERROR_LEVEL)
     stop = _edge()
     assert stop.findings == [] and stop.failures == [ERROR_LEVEL]
-    assert sf.summary(stop) == (
-        "смысловая проверка узлов не состоялась: профиль не объявляет узлов уровня 3"
-    )
+    assert sf.summary(stop) == sf.FAILED_CHECK
+    assert sf.shown(stop) == [(f"  - {sf.readable(ERROR_LEVEL)}", 1)]
     assert sf.edit_hint(run, stop) is None
+
+
+def test_failure_with_minor_is_failed_check(run) -> None:
+    """Отказ ребра рядом с minor — сбой проверки, не «пункт не оценён»."""
+    _write("edge-findings.txt", MINOR, ERROR_EDGE)
+    assert sf.summary(_edge()) == sf.FAILED_CHECK
 
 
 def test_mixed_failures_shown_but_not_counted(run) -> None:
@@ -159,3 +164,14 @@ def test_edit_hint_names_only_blocking_files(run) -> None:
     _write("edge-findings.txt", MAJOR, other)
     hint = sf.edit_hint(run, _edge())
     assert hint is not None and "15-behaviour-spec.md" not in hint
+
+
+def test_unrated_fail_is_not_instrument_failure(run) -> None:
+    """FAIL ребра без находок — штатный исход проверки, не «сбой ревьюера»
+    (ревью #760); строка видна на уровне 0."""
+    _write("edge-findings.txt", NO_FINDINGS)
+    stop = _edge()
+    assert stop.unrated == [NO_FINDINGS] and stop.failures == []
+    assert sf.summary(stop) == sf.UNBLOCKED_STOP
+    assert sf.shown(stop) == [(f"  - {sf.UNRATED_TEXT}", 0)]
+    assert sf.edit_hint(run, stop) is None
