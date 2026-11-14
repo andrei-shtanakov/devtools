@@ -136,7 +136,7 @@ def _ask_with_retry(
     try:
         return _ask_agent(agent, prompt, view)
     except FormError as exc:
-        return _ask_agent(agent, f"{prompt}\n\n{_retry_note(str(exc))}", view)
+        return _ask_agent(agent, f"{prompt}\n\n{retry_note(str(exc))}", view)
 
 
 def _ask_agent(
@@ -150,7 +150,7 @@ def _ask_agent(
     return items, ask
 
 
-def _retry_note(error: str) -> str:
+def retry_note(error: str) -> str:
     """Добавка к промпту повтора: почему прошлый ответ отклонён."""
     return (
         f"Твой предыдущий ответ отклонён: {error}. "

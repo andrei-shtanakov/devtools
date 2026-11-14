@@ -37,6 +37,7 @@ from lite.structure import (
     first_json_object,
     form_errors,
     parse_items,
+    retry_note,
     to_payload,
 )
 
@@ -50,6 +51,9 @@ NO_VERDICT_RE = re.compile(
     r"^GC-05 error \[coverage\.feasibility_review\] Must-требование (FR-\d+)"
 )
 YES_WORDS = frozenset({"да", "ок", "ok", "y", "yes", "верно"})
+YES_TAIL = YES_WORDS | {"так", "всё", "все"}  # «да, так», «да, всё верно»
+NO_WORDS = frozenset({"нет", "не", "no", "n"})
+Q_ID_RE = re.compile(r"\bQ-\d+\b")
 FEASIBILITY_KEY = "feasibility_review"
 
 CRITERIA_INTRO = (
@@ -73,6 +77,8 @@ VERDICT_HINT = (
     "реализуемо как есть? «да» — да; иначе — что не так и как реалистично "
     "(«пропустить» — оставить)"
 )
+WORDS_ASK = "скажите своими словами, что имелось в виду («пропустить» — оставить)"
+WORDS_KEPT = "ваши слова записаны, критерий предложит следующий dfl run"
 GATE_LEFT = (
     "не исправлено пунктов: {n} — бриф не пройдёт проверку; dfl run спросит снова"
 )
@@ -157,76 +163,136 @@ def _fill_criterion(
     eid: str, view: SessionView, ask: Ask, agent: Agent, resend: Send
 ) -> bool:
     """Один пункт: «да» — гипотеза записана; иные слова — в `Preference`,
-    гипотеза по ним записана без второго вопроса; пропуск или сбой агента —
-    не исправлен (вопроса «как проверить» нет: критерий — перевод агента)."""
+    гипотеза по ним записана без второго вопроса (не вышла — записаны только
+    слова, пункт не исправлен); пропуск или сбой агента — не исправлен
+    (вопроса «как проверить» нет: критерий — перевод агента)."""
     qid = view.holders.get(eid)
     if qid is None:
         return False
-    body = view.entry_record(eid)["body"]
-    proposed = _proposed_criterion(eid, qid, view, agent, None)
-    if proposed is None:
+    record = view.entry_record(eid)
+    first = _proposed_criterion(eid, qid, view, agent, None)
+    if first is None:
         return False
-    entries, hypothesis = proposed
-    answer = ask(CRITERIA_CONFIRM.format(body=body, hypothesis=hypothesis))
+    entries, shown, research = first
+    question = CRITERIA_CONFIRM.format(body=record["body"], hypothesis=shown)
+    answer = _confirmation(ask(question), ask)
     if answer is None:
         return False
-    if answer.strip().casefold() in YES_WORDS:
-        note = f"Критерий для «{body}»: {hypothesis}"
+    if answer is True:
+        note = f"Критерий для «{record['body']}»: {shown}"
         return _resent(qid, note, entries, view, resend)
-    proposed = _proposed_criterion(eid, qid, view, agent, answer.strip())
-    if proposed is None:
+    words = _without_ids(answer, research)
+    note = f"Уточнение к «{record['body']}»: {words}"
+    second = _proposed_criterion(eid, qid, view, agent, words)
+    if second is None:
+        kept = {**record, "Preference": _preference(record, words)}
+        if _resent(qid, note, [kept], view, resend):
+            say(WORDS_KEPT)
         return False
-    entries, hypothesis = proposed
-    if not _resent(qid, f"Уточнение к «{body}»: {answer}", entries, view, resend):
+    entries, shown, _research = second
+    if not _resent(qid, note, entries, view, resend):
         return False
-    say(f"записано: «{body}»: проверка — {hypothesis}")
+    say(f"записано: «{record['body']}»: проверка — {shown}")
     return True
+
+
+def _confirmation(
+    answer: str | None, ask: Ask, again: bool = True
+) -> bool | str | None:
+    """Ответ на гипотезу: `True` — согласие («Да.», «да, так»), строка —
+    слова человека, `None` — пропуск. Голое «нет» — один раз попросить слов."""
+    if answer is None:
+        return None
+    tokens = re.findall(r"\w+", answer.casefold())
+    if tokens and tokens[0] in YES_WORDS and set(tokens) <= YES_TAIL:
+        return True
+    if tokens and set(tokens) <= NO_WORDS:
+        return _confirmation(ask(WORDS_ASK), ask, False) if again else None
+    return answer.strip()
+
+
+def _without_ids(words: str, research: dict[str, str]) -> str:
+    """Id `Q-NN` в словах человека → «текст исследования» (неизвестный —
+    выброшен): в `Preference` висячий id завалил бы GC-17."""
+    out = Q_ID_RE.sub(
+        lambda m: f"«{research[m.group(0)]}»" if m.group(0) in research else "",
+        words,
+    )
+    return re.sub(r"[ \t]{2,}", " ", out).strip()
+
+
+def _preference(record: dict[str, Any], words: str) -> str:
+    """Прежнее предпочтение пункта и новые слова человека."""
+    return "; ".join(p for p in (record.get("Preference"), words) if p)
 
 
 def _proposed_criterion(
     eid: str, qid: str, view: SessionView, agent: Agent, words: str | None
-) -> tuple[list[dict[str, Any]], str] | None:
-    """Гипотеза агента → (записи: пункт и новые `Q`, гипотеза для человека).
-    Слова человека `words` дописываются в `Preference` пункта. Сбой агента
-    или формы — причина человеку, `None`."""
+) -> tuple[list[dict[str, Any]], str, dict[str, str]] | None:
+    """Гипотеза агента → (записи: пункт и новые `Q`; гипотеза для человека —
+    без id; {id: текст} исследований). Слова человека `words` дописываются в
+    `Preference`. Нарушение формы — один повтор агента; сбой — причина
+    человеку, `None`."""
     record = view.entry_record(eid)
     if words is not None:
-        record["Preference"] = "; ".join(
-            p for p in (record.get("Preference"), words) if p
-        )
+        record["Preference"] = _preference(record, words)
     said = view.held_answer(qid).get("text", "")
     prompt = _criterion_prompt(record, view, said, words)
     try:
-        items = _criterion_items(eid, record, view, agent(prompt))
+        try:
+            items = _criterion_items(eid, record, view, agent(prompt))
+        except FormError as exc:
+            retry = f"{prompt}\n\n{retry_note(str(exc))}"
+            items = _criterion_items(eid, record, view, agent(retry))
     except (AgentUnavailable, FormError) as exc:
         say(f"критерий для «{record['body']}» не предложен: {exc}")
         return None
     own, *fresh = yaml.safe_load(to_payload("", items, view))["entries"]
-    if words is not None:
-        own["Preference"] = record["Preference"]
+    research = {e.id: e.body for e in view.entries if _prefix(e.id) == "Q"}
+    research.update((q["id"], q["body"]) for q in fresh)
     hypothesis = "; ".join(own[k] for k in ("Acceptance", "Target") if own.get(k))
     for q in fresh:
-        say(f"  {q['id']} — найти: {q['body']}")
-    return [own, *fresh], hypothesis
+        say(f"  найти: {q['body']}")
+    shown = Q_ID_RE.sub(
+        lambda m: f"«{research.get(m.group(0), 'значение исследования')}»",
+        hypothesis,
+    )
+    return [own, *fresh], shown, research
 
 
 def _criterion_items(
     eid: str, record: dict[str, Any], view: SessionView, raw: str
 ) -> list[dict[str, Any]]:
     """Ответ агента → пункты раскладки: обновление `eid` (только критерий;
-    body, важность, предпочтение — прежние) и новые `Q`. Иное — `FormError`."""
+    body, важность — прежние, предпочтение — из `record`) и новые `Q`, на
+    которые критерий ссылается. Иное — `FormError`."""
     items, _ask = parse_items(raw)
     own = [i for i in items if i.get("id") == eid]
     fresh = [i for i in items if i.get("id") != eid]
     if len(own) != 1 or any(i["prefix"] != "Q" or "id" in i for i in fresh):
         raise FormError(f"нужен ровно пункт {eid} и, при нужде, новые Q")
     kept = {k: own[0][k] for k in ("acceptance", "target") if k in own[0]}
+    if record.get("Preference"):
+        kept["preference"] = record["Preference"]
     item = {"id": eid, "prefix": own[0]["prefix"], "body": record["body"],
             "traces": [], **kept}  # fmt: skip
     errors = form_errors([item, *fresh], view) or criterion_errors([item], view)
+    criterion = " ".join(kept.get(k, "") for k in ("acceptance", "target"))
+    errors += [
+        f"Q «{q['body']}» не упомянут в критерии — сошлись на его ref или убери"
+        for q in fresh
+        if not _mentions(criterion, q.get("ref"))
+    ]
     if errors:
         raise FormError("; ".join(errors))
     return [item, *fresh]
+
+
+def _mentions(text: str, ref: str | None) -> bool:
+    """Отдельно стоящий `ref` в тексте."""
+    if not ref:
+        return False
+    return re.search(rf"(?<![\w-]){re.escape(ref)}(?![\w-])", text) is not None
 
 
 def _criterion_prompt(

@@ -6,14 +6,17 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
+import pytest
 import yaml
 
 from governance import interview as iv
 from governance.discovery_contract import gate_check
 from lite import gate_repair as gr
+from lite import structure as sx
 from lite.interview_state import Entry, SessionView
 from lite.structure import AgentUnavailable
 
@@ -384,7 +387,8 @@ def test_criteria_agent_down_no_how_to_check_question(capsys) -> None:
 def test_criteria_malformed_or_dangling_q_not_fixed(capsys) -> None:
     disc = Disc()
     dangling = _nfr("не дольше значения из Q-07")
-    _crit(CRIT_FINDINGS, _asker(), _agent("не JSON", dangling), disc)
+    agent = _agent("не JSON", "не JSON", dangling, dangling)
+    _crit(CRIT_FINDINGS, _asker(), agent, disc)
     assert disc.resent == []
     assert gr.GATE_LEFT.format(n=2) in capsys.readouterr().out
 
@@ -394,13 +398,94 @@ def test_criteria_other_entries_rejected(capsys) -> None:
     disc = Disc()
     extra = _fr(FR_HYP)
     extra["items"].append({"prefix": "FR", "body": "Ещё функция"})
-    _crit(CRIT_FINDINGS[:1], _asker(), _agent(extra), disc)
+    _crit(CRIT_FINDINGS[:1], _asker(), _agent(extra, extra), disc)
     assert disc.resent == []
     assert gr.GATE_LEFT.format(n=1) in capsys.readouterr().out
 
 
-def test_criteria_reproposal_down_writes_nothing(capsys) -> None:
+def test_criteria_reproposal_down_keeps_words_in_preference(capsys) -> None:
+    """Повторное предложение не вышло — слова человека всё равно записаны
+    (только Preference: без критерия и Q), пункт не исправлен."""
     disc = Disc()
-    _crit(CRIT_FINDINGS[:1], _asker("иначе"), _agent(_fr(FR_HYP), "DOWN"), disc)
+    words = "без единого ручного шага"
+    _crit(CRIT_FINDINGS[:1], _asker(words), _agent(_fr(FR_HYP), "DOWN"), disc)
+    [(qid, funcs)] = disc.resent
+    assert qid == FUNCS_QID
+    assert funcs["entries"] == [{**FR1, "Preference": words}]
+    assert words in funcs["text"]
+    out = capsys.readouterr().out
+    assert gr.WORDS_KEPT in out
+    assert gr.GATE_LEFT.format(n=1) in out
+
+
+def test_criteria_display_has_no_ids_and_find_line(capsys) -> None:
+    disc = Disc()
+    ask = _asker("да")
+    _crit(CRIT_FINDINGS[1:], ask, _agent(_nfr(NFR_HYP, Q_ITEM)), disc)
+    shown = ask.asked[0] + capsys.readouterr().out
+    assert "Q-0" not in shown and "q-1" not in shown
+    assert f"«{Q_ITEM['body']}»" in ask.asked[0]
+    assert f"  найти: {Q_ITEM['body']}" in shown
+    [(_qid, nfr)] = disc.resent
+    assert nfr["entries"][0]["Acceptance"].endswith("Q-01")  # в брифе id есть
+
+
+def test_criteria_correction_with_id_keeps_gate_clean() -> None:
+    """Id в словах человека не попадает в Preference: висячий Q-NN завалил
+    бы GC-17 (известный — текстом пункта, неизвестный — выброшен)."""
+    disc = Disc()
+    view = _crit_view()
+    view.entries.append(Entry("Q-03", "Порог паузы", {}))
+    words = "нет, Q-03 и Q-09 тут ни при чём, просто без повторного ввода"
+    agent = _agent(_nfr(NFR_HYP, Q_ITEM), _nfr("Введённое сохраняется"))
+    _repair(CRIT_FINDINGS[1:], _asker(words), agent, disc, view=lambda: view)
+    [(_qid, nfr)] = disc.resent
+    entry = nfr["entries"][0]
+    assert not re.search(r"Q-\d", entry["Preference"])
+    assert "«Порог паузы»" in entry["Preference"]
+    item = sx.entry_as_item(entry)
+    assert sx.form_errors([item], view) == []
+
+
+@pytest.mark.parametrize("yes", ["Да.", "да, так", "  ок!  "])
+def test_criteria_confirmation_normalised(yes: str) -> None:
+    disc = Disc()
+    _crit(CRIT_FINDINGS[:1], _asker(yes), _agent(_fr(FR_HYP)), disc)
+    [(_qid, funcs)] = disc.resent
+    assert funcs["entries"] == [{**FR1, "Acceptance": FR_HYP}]
+
+
+def test_criteria_bare_no_asks_for_words_once() -> None:
+    disc = Disc()
+    ask = _asker("Нет.", "без ручных шагов")
+    agent = _agent(_fr(FR_HYP), _fr("Без ручных действий"))
+    _crit(CRIT_FINDINGS[:1], ask, agent, disc)
+    assert ask.asked[1] == gr.WORDS_ASK
+    [(_qid, funcs)] = disc.resent
+    entry = funcs["entries"][0]
+    assert entry["Preference"] == "без ручных шагов"
+    assert entry["Acceptance"] == "Без ручных действий"
+
+
+def test_criteria_bare_no_twice_not_fixed(capsys) -> None:
+    disc = Disc()
+    _crit(CRIT_FINDINGS[:1], _asker("нет", "нет"), _agent(_fr(FR_HYP)), disc)
     assert disc.resent == []
     assert gr.GATE_LEFT.format(n=1) in capsys.readouterr().out
+
+
+def test_criteria_unreferenced_q_rejected(capsys) -> None:
+    disc = Disc()
+    stray = _nfr("Переход без повторного ввода", Q_ITEM)
+    _crit(CRIT_FINDINGS[1:], _asker(), _agent(stray, stray), disc)
+    assert disc.resent == []
+    assert gr.GATE_LEFT.format(n=1) in capsys.readouterr().out
+
+
+def test_criteria_malformed_retried_once() -> None:
+    disc = Disc()
+    agent = _agent("не JSON", _fr(FR_HYP))
+    _crit(CRIT_FINDINGS[:1], _asker("да"), agent, disc)
+    assert "отклонён" in agent.prompts[1]
+    [(_qid, funcs)] = disc.resent
+    assert funcs["entries"] == [{**FR1, "Acceptance": FR_HYP}]
