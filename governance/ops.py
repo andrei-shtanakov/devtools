@@ -1030,6 +1030,32 @@ def author_prompt(
     )
 
 
+def revise_prompt(
+    kind: str,
+    subject: str,
+    bundle_dir: str,
+    output_path: str,
+    current: str,
+    findings: str,
+    decisions: str,
+) -> str:
+    """Промпт переписывания узла по замечаниям edge-check и решениям заказчика."""
+    base = author_prompt(kind, subject, bundle_dir, None, output_path)
+    return (
+        f"{base}\n\n"
+        "REVISION MODE. Rewrite the file, fixing ONLY the findings listed "
+        "below. Apply the customer's decisions verbatim. Where the customer "
+        "disagrees with a finding, keep the text and record it next to the "
+        "finding's place as a line in Russian: «Решение заказчика: … "
+        "Причина: …». Do not touch other files. Do not delete or weaken "
+        "requirements (including downgrading Must), except as the "
+        "decisions explicitly allow.\n"
+        f"\n--- CURRENT NODE ---\n{current}\n"
+        f"\n--- FINDINGS ---\n{findings}\n"
+        f"\n--- CUSTOMER DECISIONS ---\n{decisions}\n"
+    )
+
+
 def _call_prompt(
     call: AuthorCall,
     kind: str,
@@ -2340,6 +2366,29 @@ class RealOps(BriefFactsMixin):
         return author_launch.launch_author(
             call,
             functools.partial(_call_prompt, call, kind, subject, brief_context),
+        )
+
+    def revise(
+        self,
+        call: AuthorCall,
+        kind: str,
+        subject: str,
+        current: str,
+        findings: str,
+        decisions: str,
+    ) -> LaunchOutcome:
+        """Переписывание узла по замечаниям — только через границу автора."""
+        return author_launch.launch_author(
+            call,
+            functools.partial(
+                revise_prompt,
+                kind,
+                subject,
+                call.bundle_dir,
+                current=current,
+                findings=findings,
+                decisions=decisions,
+            ),
         )
 
     def author_disp(

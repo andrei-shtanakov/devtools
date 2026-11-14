@@ -3026,3 +3026,36 @@ def test_author_prompt_carries_edge_rules():
 
     prompt = ops_mod.author_prompt("requirements", "s", "ws/spec", None, "/o")
     assert rules_for("requirements") in prompt
+
+
+def test_revise_prompt_has_rules_findings_decisions() -> None:
+    prompt = ops_mod.revise_prompt(
+        "requirements",
+        "s",
+        "ws/spec",
+        "/o/10-requirements.md",
+        "CURRENT-NODE-TEXT",
+        "FINDING-ONE",
+        "DECISION-ONE",
+    )
+    assert "#### FR-NN:" in prompt
+    assert "/o/10-requirements.md" in prompt
+    for part in ("CURRENT-NODE-TEXT", "FINDING-ONE", "DECISION-ONE"):
+        assert part in prompt
+    assert "Решение заказчика:" in prompt and "Причина:" in prompt
+
+
+def test_revise_delegates_to_launch_author(monkeypatch) -> None:
+    seen: list = []
+    outcome = LaunchOutcome(0, "")
+
+    def fake_launch(call, make_prompt):
+        seen.append((call, make_prompt("/calls/out.md")))
+        return outcome
+
+    monkeypatch.setattr(ops_mod.author_launch, "launch_author", fake_launch)
+    got = RealOps().revise(_CALL, "requirements", "s", "cur", "find", "dec")
+    assert got is outcome
+    call, prompt = seen[0]
+    assert call is _CALL
+    assert "/calls/out.md" in prompt and "find" in prompt
