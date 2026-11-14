@@ -124,19 +124,24 @@ def _asker(*answers: str | None) -> Any:
 
 def _agent(*answers: Any) -> Any:
     queue = [a if isinstance(a, str) else json.dumps(a) for a in answers]
+    prompts: list[str] = []
 
     def agent(prompt: str) -> str:
+        prompts.append(prompt)
         item = queue.pop(0)
         if item == "DOWN":
             raise AgentUnavailable("нет сети")
         return item
 
+    agent.prompts = prompts  # type: ignore[attr-defined]
     return agent
 
 
-def _repair(findings: list[str], ask: Any, agent: Any, disc: Disc) -> None:
+def _repair(
+    findings: list[str], ask: Any, agent: Any, disc: Disc, view: Any = _view
+) -> None:
     gr.repair(findings, SESSION, ask=ask, agent=agent, resend=disc.resend,
-              load=lambda s: _view(), upstream=lambda: UPSTREAM)  # fmt: skip
+              load=lambda s: view(), upstream=lambda: UPSTREAM)  # fmt: skip
 
 
 TRACES = {"traces": {"IF-01": ["S-01"], "IF-02": ["S-01", "CON-01"],
@@ -235,3 +240,167 @@ def test_unrelated_findings_ignored(capsys) -> None:
     disc = Disc()
     _repair(["GC-06 error [FR-01] нет traces → G/J"], _asker(), _agent(), disc)
     assert disc.resent == [] and capsys.readouterr().out == ""
+
+
+# --- GC-08: гипотеза критерия агента на подтверждение (контракт v1.2) ---
+
+CRIT_FINDINGS = [
+    "GC-08 error [FR-01] нет **Acceptance**",
+    "GC-08 error [NFR-01] нет **Acceptance**/**Target**",
+]
+FUNCS_QID = "customer.functions.01"
+NFR_QID = "customer.nfr.01"
+FUNCS_TEXT = "прогон спеки одной командой, без ручных шагов"
+NFR_TEXT = "чтобы было бесшовно"
+FR1 = {"id": "FR-01", "body": "Прогон спеки одной командой",
+       "traces": ["G-01"], "Priority": "Must"}  # fmt: skip
+NFR1 = {"id": "NFR-01", "body": "Бесшовная работа", "Preference": NFR_TEXT}
+FR_HYP = "Спека проходит от запуска до отчёта одной командой без ручных шагов"
+NFR_HYP = "Переход между шагами без повторного ввода, не дольше значения из q-1"
+Q_ITEM = {"prefix": "Q", "body": "Какая пауза между шагами приемлема?",
+          "ref": "q-1", "owner_role": "analyst"}  # fmt: skip
+
+
+def _crit_view() -> SessionView:
+    return SessionView(
+        frame="customer",
+        required={"goals": "G", "functions": "FR", "nfr": "NFR"},
+        optional={},
+        entries=[
+            Entry("G-01", "Цель", {}),
+            Entry("FR-01", FR1["body"], {"traces": ["G-01"], "Priority": "Must"}),
+            Entry("NFR-01", NFR1["body"], {"Preference": NFR_TEXT}),
+        ],
+        declared=[],
+        holders={
+            "G-01": "customer.goals.01",
+            "FR-01": FUNCS_QID,
+            "NFR-01": NFR_QID,
+        },  # fmt: skip
+        answers={
+            "customer.goals.01": {
+                "text": "цель",
+                "entries": [{"id": "G-01", "body": "Цель"}],
+            },
+            FUNCS_QID: {"text": FUNCS_TEXT, "entries": [dict(FR1)]},
+            NFR_QID: {"text": NFR_TEXT, "entries": [dict(NFR1)]},
+        },  # fmt: skip
+        answered_keys=["goals", "functions", "nfr"],
+        readiness="ready",
+        asked={},
+    )
+
+
+def _fr(acceptance: str, **extra: Any) -> dict[str, Any]:
+    item = {"id": "FR-01", "prefix": "FR", "body": FR1["body"],
+            "acceptance": acceptance, **extra}  # fmt: skip
+    return {"items": [item]}
+
+
+def _nfr(acceptance: str, *more: dict[str, Any]) -> dict[str, Any]:
+    item = {"id": "NFR-01", "prefix": "NFR", "body": NFR1["body"],
+            "acceptance": acceptance}  # fmt: skip
+    return {"items": [item, *more]}
+
+
+def _crit(findings: list[str], ask: Any, agent: Any, disc: Disc) -> None:
+    _repair(findings, ask, agent, disc, view=_crit_view)
+
+
+def test_criteria_hypothesis_confirmed_written_with_q() -> None:
+    disc = Disc()
+    ask = _asker("да", "да")
+    agent = _agent(_fr(FR_HYP), _nfr(NFR_HYP, Q_ITEM))
+    _crit(CRIT_FINDINGS, ask, agent, disc)
+    assert ask.asked[0] == (
+        f"«{FR1['body']}»: проверка — {FR_HYP}. Так? («да» — записать; иначе "
+        "скажите своими словами, что имелось в виду; «пропустить»)"
+    )
+    assert "Как проверить" not in "".join(ask.asked)
+    # агенту — пункт и слова держащего ответа
+    assert FR1["body"] in agent.prompts[0] and FUNCS_TEXT in agent.prompts[0]
+    (q1, funcs), (q2, nfr) = disc.resent
+    assert (q1, q2) == (FUNCS_QID, NFR_QID)
+    assert funcs["entries"] == [{**FR1, "Acceptance": FR_HYP}]
+    assert funcs["text"].startswith(FUNCS_TEXT + "\n\n")
+    acc = NFR_HYP.replace("q-1", "Q-01")
+    assert nfr["entries"] == [
+        {**NFR1, "Acceptance": acc},
+        {"id": "Q-01", "body": Q_ITEM["body"], "owner_role": "analyst",
+         "blocking": False},
+    ]  # fmt: skip
+
+
+def test_criteria_agent_cannot_touch_preference_body_or_priority() -> None:
+    disc = Disc()
+    proposal = _fr(FR_HYP, preference="выдумано", priority="Could")
+    proposal["items"][0]["body"] = "Другая формулировка"
+    _crit(CRIT_FINDINGS[:1], _asker("да"), _agent(proposal), disc)
+    [(_qid, funcs)] = disc.resent
+    assert funcs["entries"] == [{**FR1, "Acceptance": FR_HYP}]
+
+
+def test_criteria_correction_becomes_preference_and_reproposed(capsys) -> None:
+    """«нет, имелось в виду …» → слова в Preference (дописаны к прежним),
+    агент предлагает заново, итог записан без второго вопроса."""
+    disc = Disc()
+    fr_words = "нет, имелось в виду: без единого ручного шага"
+    nfr_words = "не терять введённое при переходе"
+    ask = _asker(fr_words, nfr_words)
+    fr2 = "Прогон без ручных действий между шагами"
+    nfr2 = "Введённые данные сохраняются при переходе между шагами"
+    agent = _agent(_fr(FR_HYP), _fr(fr2), _nfr(NFR_HYP, Q_ITEM), _nfr(nfr2))
+    _crit(CRIT_FINDINGS, ask, agent, disc)
+    assert len(ask.asked) == 2  # без второго подтверждения
+    assert fr_words in agent.prompts[1] and nfr_words in agent.prompts[3]
+    (_q1, funcs), (_q2, nfr) = disc.resent
+    assert funcs["entries"] == [{**FR1, "Preference": fr_words, "Acceptance": fr2}]
+    assert nfr["entries"] == [
+        {**NFR1, "Preference": f"{NFR_TEXT}; {nfr_words}", "Acceptance": nfr2}
+    ]
+    assert fr_words in funcs["text"]
+    out = capsys.readouterr().out
+    assert fr2 in out and gr.GATE_LEFT.split(":")[0] not in out
+
+
+def test_criteria_skip_not_fixed(capsys) -> None:
+    disc = Disc()
+    _crit(CRIT_FINDINGS, _asker(None, "да"), _agent(_fr(FR_HYP), _nfr("ок")), disc)
+    [(qid, _payload)] = disc.resent
+    assert qid == NFR_QID
+    assert gr.GATE_LEFT.format(n=1) in capsys.readouterr().out
+
+
+def test_criteria_agent_down_no_how_to_check_question(capsys) -> None:
+    disc = Disc()
+    ask = _asker()
+    _crit(CRIT_FINDINGS, ask, _agent("DOWN", "DOWN"), disc)
+    out = capsys.readouterr().out
+    assert ask.asked == [] and disc.resent == []
+    assert "нет сети" in out and "Как проверить" not in out
+    assert gr.GATE_LEFT.format(n=2) in out
+
+
+def test_criteria_malformed_or_dangling_q_not_fixed(capsys) -> None:
+    disc = Disc()
+    dangling = _nfr("не дольше значения из Q-07")
+    _crit(CRIT_FINDINGS, _asker(), _agent("не JSON", dangling), disc)
+    assert disc.resent == []
+    assert gr.GATE_LEFT.format(n=2) in capsys.readouterr().out
+
+
+def test_criteria_other_entries_rejected(capsys) -> None:
+    """Агент чинит только свой пункт; новые не-Q пункты — отказ формы."""
+    disc = Disc()
+    extra = _fr(FR_HYP)
+    extra["items"].append({"prefix": "FR", "body": "Ещё функция"})
+    _crit(CRIT_FINDINGS[:1], _asker(), _agent(extra), disc)
+    assert disc.resent == []
+    assert gr.GATE_LEFT.format(n=1) in capsys.readouterr().out
+
+
+def test_criteria_reproposal_down_writes_nothing(capsys) -> None:
+    disc = Disc()
+    _crit(CRIT_FINDINGS[:1], _asker("иначе"), _agent(_fr(FR_HYP), "DOWN"), disc)
+    assert disc.resent == []
+    assert gr.GATE_LEFT.format(n=1) in capsys.readouterr().out

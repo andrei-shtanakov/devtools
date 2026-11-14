@@ -3,8 +3,10 @@
 Интервью кончилось, темы покрыты, а проверка брифа не прошла — `dfl` чинит
 то, что можно спросить у человека или вывести из уже записанного:
 
-- GC-08 «нет Acceptance» (FR, NFR) — вопрос «как проверить?», ответ
-  дословно в `Acceptance` пункта (devtools#753);
+- GC-08 «нет Acceptance» (FR, NFR) — гипотезу критерия (и `Q` исследования
+  для недостающего числа) предлагает агент, человек подтверждает; иные слова
+  человека — в `Preference` пункта, гипотеза по ним записывается без второго
+  вопроса (контракт брифа v1.2; было — ответ дословно, devtools#753);
 - GC-13 (IF без связи с системой S, AP без связи с S/CON) — связи
   предлагает агент по записанным пунктам, человек подтверждает (#755);
 - GC-05 (Must-FR customer-брифа без вердикта реализуемости) — вопрос по
@@ -27,7 +29,16 @@ from governance import interview as iv
 from governance.discovery_contract import gate_check
 from lite.interview_state import SessionView
 from lite.output import say
-from lite.structure import Agent, AgentUnavailable, FormError, first_json_object
+from lite.structure import (
+    Agent,
+    AgentUnavailable,
+    FormError,
+    criterion_errors,
+    first_json_object,
+    form_errors,
+    parse_items,
+    to_payload,
+)
 
 Ask = Callable[[str], str | None]  # ответ человека; `None` — пропуск
 Send = Callable[[str, str], iv.DiscoveryReply]
@@ -43,11 +54,11 @@ FEASIBILITY_KEY = "feasibility_review"
 
 CRITERIA_INTRO = (
     "интервью окончено, но бриф не прошёл проверку: у пунктов ниже нет "
-    "способа проверить, что они выполнены"
+    "способа проверить, что они выполнены — предлагаю, как проверять"
 )
-CRITERIA_HINT = (
-    "что проверить или какое значение приемлемо, хоть грубо "
-    "(«пропустить» — оставить так)"
+CRITERIA_CONFIRM = (
+    "«{body}»: проверка — {hypothesis}. Так? («да» — записать; иначе скажите "
+    "своими словами, что имелось в виду; «пропустить»)"
 )
 TRACES_INTRO = (
     "бриф не прошёл проверку: интерфейсы и архитектурные предпочтения должны "
@@ -79,7 +90,9 @@ def repair(
 ) -> None:
     """Починить по находкам `findings` всё, что умеем; итог — человеку."""
     lines = [str(f) for f in findings]
-    left = _fill_criteria(_ids(NO_CRITERION_RE, lines), session, ask, resend, load)
+    left = _fill_criteria(
+        _ids(NO_CRITERION_RE, lines), session, ask, agent, resend, load
+    )
     left += _fill_traces(_ids(NO_SYSTEM_RE, lines), session, ask, agent, resend, load)
     left += _fill_verdicts(
         _ids(NO_VERDICT_RE, lines), session, ask, resend, load, upstream
@@ -129,30 +142,141 @@ def _resent(
 
 
 def _fill_criteria(
-    eids: list[str], session: str, ask: Ask, resend: Send, load: Load
+    eids: list[str], session: str, ask: Ask, agent: Agent, resend: Send, load: Load
 ) -> int:
-    """Пункты без критерия: вопрос по каждому, ответ дословно в `Acceptance`.
+    """Пункты без критерия: гипотезу предлагает агент, человек подтверждает.
     Возвращает число неисправленных."""
     if not eids:
         return 0
     say(CRITERIA_INTRO)
-    left = 0
-    for eid in eids:
-        view = load(session)
-        qid = view.holders.get(eid)
-        if qid is None:
-            left += 1
-            continue
-        record = view.entry_record(eid)
-        text = ask(f"Как проверить «{record['body']}»? {CRITERIA_HINT}")
-        if text is None:
-            left += 1
-            continue
-        note = f"Критерий для «{record['body']}»: {text}"
-        entry = {**record, "Acceptance": text}
-        if not _resent(qid, note, [entry], view, resend):
-            left += 1
-    return left
+    fixed = [_fill_criterion(eid, load(session), ask, agent, resend) for eid in eids]
+    return fixed.count(False)
+
+
+def _fill_criterion(
+    eid: str, view: SessionView, ask: Ask, agent: Agent, resend: Send
+) -> bool:
+    """Один пункт: «да» — гипотеза записана; иные слова — в `Preference`,
+    гипотеза по ним записана без второго вопроса; пропуск или сбой агента —
+    не исправлен (вопроса «как проверить» нет: критерий — перевод агента)."""
+    qid = view.holders.get(eid)
+    if qid is None:
+        return False
+    body = view.entry_record(eid)["body"]
+    proposed = _proposed_criterion(eid, qid, view, agent, None)
+    if proposed is None:
+        return False
+    entries, hypothesis = proposed
+    answer = ask(CRITERIA_CONFIRM.format(body=body, hypothesis=hypothesis))
+    if answer is None:
+        return False
+    if answer.strip().casefold() in YES_WORDS:
+        note = f"Критерий для «{body}»: {hypothesis}"
+        return _resent(qid, note, entries, view, resend)
+    proposed = _proposed_criterion(eid, qid, view, agent, answer.strip())
+    if proposed is None:
+        return False
+    entries, hypothesis = proposed
+    if not _resent(qid, f"Уточнение к «{body}»: {answer}", entries, view, resend):
+        return False
+    say(f"записано: «{body}»: проверка — {hypothesis}")
+    return True
+
+
+def _proposed_criterion(
+    eid: str, qid: str, view: SessionView, agent: Agent, words: str | None
+) -> tuple[list[dict[str, Any]], str] | None:
+    """Гипотеза агента → (записи: пункт и новые `Q`, гипотеза для человека).
+    Слова человека `words` дописываются в `Preference` пункта. Сбой агента
+    или формы — причина человеку, `None`."""
+    record = view.entry_record(eid)
+    if words is not None:
+        record["Preference"] = "; ".join(
+            p for p in (record.get("Preference"), words) if p
+        )
+    said = view.held_answer(qid).get("text", "")
+    prompt = _criterion_prompt(record, view, said, words)
+    try:
+        items = _criterion_items(eid, record, view, agent(prompt))
+    except (AgentUnavailable, FormError) as exc:
+        say(f"критерий для «{record['body']}» не предложен: {exc}")
+        return None
+    own, *fresh = yaml.safe_load(to_payload("", items, view))["entries"]
+    if words is not None:
+        own["Preference"] = record["Preference"]
+    hypothesis = "; ".join(own[k] for k in ("Acceptance", "Target") if own.get(k))
+    for q in fresh:
+        say(f"  {q['id']} — найти: {q['body']}")
+    return [own, *fresh], hypothesis
+
+
+def _criterion_items(
+    eid: str, record: dict[str, Any], view: SessionView, raw: str
+) -> list[dict[str, Any]]:
+    """Ответ агента → пункты раскладки: обновление `eid` (только критерий;
+    body, важность, предпочтение — прежние) и новые `Q`. Иное — `FormError`."""
+    items, _ask = parse_items(raw)
+    own = [i for i in items if i.get("id") == eid]
+    fresh = [i for i in items if i.get("id") != eid]
+    if len(own) != 1 or any(i["prefix"] != "Q" or "id" in i for i in fresh):
+        raise FormError(f"нужен ровно пункт {eid} и, при нужде, новые Q")
+    kept = {k: own[0][k] for k in ("acceptance", "target") if k in own[0]}
+    item = {"id": eid, "prefix": own[0]["prefix"], "body": record["body"],
+            "traces": [], **kept}  # fmt: skip
+    errors = form_errors([item, *fresh], view) or criterion_errors([item], view)
+    if errors:
+        raise FormError("; ".join(errors))
+    return [item, *fresh]
+
+
+def _criterion_prompt(
+    record: dict[str, Any], view: SessionView, said: str, words: str | None
+) -> str:
+    """Промпт агента: пункт, слова держащего ответа и уточнение человека,
+    известные `Q`."""
+    eid = str(record["id"])
+    fields = "; ".join(
+        f"{k}: {v}" for k, v in record.items() if k not in ("id", "body")
+    )
+    redo = (
+        f"\nЧеловек отклонил прежнюю гипотезу и уточнил: «{words}» — переведи "
+        "именно это.\n"
+        if words
+        else ""
+    )
+    research = "\n".join(
+        f"- {e.id}: {e.body}" for e in view.entries if _prefix(e.id) == "Q"
+    )
+    field = "acceptance" if _prefix(eid) == "FR" else "acceptance или target"
+    return f"""\
+Ты аналитик-переводчик: у пункта брифа нет критерия проверки. Переведи
+предпочтение человека в проверяемое ограничение — гипотезу, которую человек
+подтвердит. Не выдумывай сути: только из пункта и слов человека.
+
+Пункт {eid}: {record["body"]}
+Поля пункта: {fields or "(нет)"}
+
+Слова человека (ответ, в котором записан пункт):
+<<<
+{said}
+>>>
+{redo}
+Правила:
+- верни пункт с "id": "{eid}", "prefix": "{_prefix(eid)}", его body и полем
+  {field} — твоей гипотезой (у человека не спрашивай);
+- если для гипотезы нужно число (порог, baseline), а человек его не назвал, —
+  не выдумывай: заведи в этом же ответе пункт Q (body — какое значение найти,
+  owner_role — analyst или engineer, "ref": "q-1") и сошлись на него в
+  критерии этим ref: «… не хуже значения из q-1»;
+- ссылаться на Q-NN можно только на уже записанные:
+{research or "- (нет)"}
+- других пунктов не возвращай.
+
+Верни только JSON, без пояснений:
+{{"items": [{{"id": "{eid}", "prefix": "{_prefix(eid)}", "body": "...",
+"acceptance": "..."}}, {{"prefix": "Q", "body": "...", "ref": "q-1",
+"owner_role": "analyst"}}]}}
+"""
 
 
 # --- GC-13: связи IF → S, AP → S/CON ---
