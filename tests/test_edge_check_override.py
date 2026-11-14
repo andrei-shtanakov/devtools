@@ -144,3 +144,36 @@ def test_overridable_matches_accepted(
     records = {(NODE, EDGE): record}
     assert override.overridable(records) is expected
     assert (override.accepted(records, {_digest()}) is not None) is expected
+
+
+@pytest.mark.parametrize(
+    ("record", "words"),
+    [
+        ({"criteria": [{"id": "R3", "status": "insufficient"}]},
+         ["не оценён", "повторите проверку"]),
+        ({"verdict": "N/A", "findings": []}, ["неприменимо", "поправьте узел"]),
+        ({"findings": []}, ["без блокирующих замечаний", "поправьте узел"]),
+        ({"verdict": "ERROR"}, ["ERROR", "повторите проверку"]),
+        ({"subject": []}, ["хэш"]),
+    ],
+)  # fmt: skip
+def test_non_overridable_reason_names_cause(record: dict, words: list[str]) -> None:
+    records = {(NODE, EDGE): {**_record(), **record}}
+    reason = override.non_overridable_reason(records)
+    assert reason is not None and EDGE in reason
+    assert all(w in reason for w in words)
+    if "повторите проверку" not in words:
+        assert "повторите проверку" not in reason
+    assert override.overridable(records) is False
+    assert override.non_overridable_reason({(NODE, EDGE): _record()}) is None
+
+
+def test_override_revoked_by_later_answer(tmp_path: Path) -> None:
+    """override(D), затем option(D): раннер/публикация не принимают — отзыв
+    один для dfl и гейта (recheck #762)."""
+    _journal(tmp_path, _row(2, "override", _digest()), _row(2, "option", _digest()))
+    digests = override.overridden(tmp_path, 2)
+    assert digests == set()
+    assert override.accepted({(NODE, EDGE): _record()}, digests) is None
+    _journal(tmp_path, _row(2, "option", _digest()), _row(2, "override", _digest()))
+    assert override.overridden(tmp_path, 2) == {_digest()}

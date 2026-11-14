@@ -19,6 +19,7 @@ from __future__ import annotations
 import enum
 import os
 import re
+import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -43,10 +44,9 @@ MAX_ROUNDS = 2
 FIXING = "исправлю сам: {n}; вопросов к вам: {m}"
 OVERRIDE_OFFER = "принять узел вопреки замечанию (запишется в журнал и в PR)"
 OVERRIDE_GROUP = (
-    "принять узел вопреки всем замечаниям правила {rule} — их {n} "
-    "(запишется в журнал и в PR)"
+    "принять узел вопреки всем {n} замечаниям правила {rule} "
+    "(перекрывает ответы по ним; запишется в журнал и в PR)"
 )
-NO_OVERRIDE = "принять вопреки нельзя: пункт правил не оценён — повторите проверку"
 NOT_COVERED = "принятие вопреки не покрывает все замечания уровня — разбор остановлен"
 REVIEW_STATUS = sf.EDGE
 REVISE_DIR = "edge-revise"
@@ -66,7 +66,6 @@ _STOP_KEY_RE = re.compile(r"^error EDGE-CHECK\(([^/)]+)/([^)]+)\): (R\d+) ")
 
 Key = tuple[str, str, str]
 Revise = Callable[..., LaunchOutcome]
-Unit = tuple[list[Item], bool]  # пункты одного вопроса; предлагать ли принятие
 
 
 class Outcome(enum.Enum):
@@ -135,7 +134,7 @@ def resolve(
         records = ej.level_records(run_dir, state.wave)
     except (OSError, ValueError, KeyError, TypeError):
         return Outcome.NOT_APPLICABLE
-    can_override = override.overridable(records)
+    refusal = override.non_overridable_reason(records)
     try:
         items = triage(
             findings, nodes, bases, prior, _counted(agent, calls), cache_dir=run_dir
@@ -145,22 +144,23 @@ def resolve(
         return Outcome.STOPPED
     notes: set[str] = set()
     visible = [_visible(i) for i in items]
-    chosen = _ask_all(state, visible, prior, read, round_no, can_override, notes)
+    chosen = _ask_all(state, visible, prior, read, round_no, refusal, notes)
     if chosen is None:
         return Outcome.STOPPED
-    overrides = ej.overridden_now(ej.load(run_dir, state.wave))
+    overrides = ej.overridden(run_dir, state.wave)
     if {f.digest for f in findings} <= overrides:
         if override.accepted(records, overrides) is not None:
             say("замечания приняты вопреки — записано в журнал; проверяю снова")
             return Outcome.OVERRIDDEN
-        _note(notes, NOT_COVERED if can_override else NO_OVERRIDE)
+        _note(notes, refusal or NOT_COVERED)
         return Outcome.STOPPED
     return _rewrite(state, findings, nodes, revise, round_no, calls, overrides)
 
 
 def override_offer(n: int, rule: str) -> str:
     """Вариант «принять вопреки»: одна находка — прежняя строка; несколько
-    находок одного правила на том же тексте (общий digest) — все сразу."""
+    находок одного правила на том же тексте (общий digest) — все сразу,
+    перекрывая ответы по ним."""
     return OVERRIDE_OFFER if n == 1 else OVERRIDE_GROUP.format(rule=rule, n=n)
 
 
@@ -294,7 +294,7 @@ def _ask_all(
     prior: list[ej.Decision],
     read: Read,
     round_no: int,
-    can_override: bool,
+    refusal: str | None,
     notes: set[str],
 ) -> list[ej.Decision] | None:
     """Вопросы по `decision` и по тем, что журнал велит спросить снова
@@ -302,10 +302,9 @@ def _ask_all(
     остановился — `None` (записанное остаётся).
 
     Принятие вопреки снимает блокирующий вердикт правила на тексте узла —
-    всю группу находок с общим digest; поэтому вопрос с этим вариантом
-    задаётся один на группу (и с её `fix`-пунктами), а ответ относится ко
-    всем её находкам. Уровень не `overridable` — варианта нет, причина
-    сказана один раз.
+    всю группу находок с общим digest: вариант добавляется к вопросу каждого
+    пункта группы, а выбранный — снимает остальные её вопросы. Уровень
+    нельзя принять (`refusal`) — варианта нет, причина сказана один раз.
     """
     memory = em.recall(
         prior,
@@ -313,60 +312,74 @@ def _ask_all(
         test=state.mode == "test",
         last_round=round_no == MAX_ROUNDS,
     )
-    units = _units(items, memory, can_override)
-    if not can_override and any(
-        memory[g[0].finding.key].offer_override for g, _ in units
+    questions = _questions(items, memory, refusal is None)
+    if refusal is not None and any(
+        memory[q.item.finding.key].offer_override for q in questions
     ):
-        _note(notes, NO_OVERRIDE)
-    asked = sum(len(group) for group, _ in units)
-    say(FIXING.format(n=len(items) - asked, m=len(units)))
+        _note(notes, refusal)
+    say(FIXING.format(n=len(items) - len(questions), m=len(questions)))
+    batch = uuid.uuid4().hex
+    accepted_groups: set[str] = set()
     chosen: list[ej.Decision] = []
-    for group, offer in units:
-        primary = next((i for i in group if i.kind == "decision"), group[0])
-        question = memory[primary.finding.key].question or primary.question
-        label = override_offer(len(group), primary.finding.rule_id) if offer else None
-        decision = _ask(group, primary, question, read, label, round_no)
+    for q in questions:
+        if q.group in accepted_groups:
+            continue
+        question = memory[q.item.finding.key].question or q.item.question
+        decision = _ask(q, question, read, round_no)
         if decision is None:
             say("разбор остановлен — продолжить: dfl run")
             return None
+        decision = replace(decision, batch=batch)
         ej.append(rs.run_dir(state.run_id), state.wave, decision)
         chosen.append(decision)
+        if decision.kind == "override":
+            accepted_groups.add(q.group)
     return chosen
 
 
-def _units(
+@dataclass(frozen=True)
+class _Question:
+    """Вопрос по пункту `item`; `listed` — `fix`-пункты группы, показанные
+    при нём; `offer` — вариант принятия группы `group` вопреки или `None`."""
+
+    item: Item
+    listed: list[Item]
+    offer: str | None
+    group: str
+
+
+def _questions(
     items: list[Item], memory: dict[Key, em.Recall], can_override: bool
-) -> list[Unit]:
-    """Вопросы круга: группа находок с общим digest — один вопрос, если в нём
-    предлагается принятие вопреки; иначе вопрос на каждый спрашиваемый пункт."""
+) -> list[_Question]:
+    """Вопрос на каждый спрашиваемый пункт; группа находок с общим digest
+    (одно правило на том же тексте) получает в каждом вопросе общий вариант
+    принятия, а её `fix`-пункты видны при первом вопросе."""
     groups: dict[str, list[Item]] = {}
     for no, item in enumerate(items):
         groups.setdefault(item.finding.digest or f"#{no}", []).append(item)
-    units: list[Unit] = []
-    for group in groups.values():
+    out: list[_Question] = []
+    for gid, group in groups.items():
         recall = memory[group[0].finding.key]  # ключ у группы общий
         asked = [i for i in group if i.kind == "decision" or recall.ask]
-        if not asked:
-            continue
-        if recall.offer_override and can_override:
-            units.append((group, True))
-        else:
-            units += [([i], False) for i in asked]
-    return units
+        offered = recall.offer_override and can_override and bool(asked)
+        offer = (
+            override_offer(len(group), group[0].finding.rule_id) if offered else None
+        )
+        fixes = [i for i in group if i.kind != "decision" and not recall.ask]
+        for no, item in enumerate(asked):
+            listed = fixes if offered and no == 0 else []
+            out.append(_Question(item, listed, offer, gid))
+    return out
 
 
-def _ask(
-    group: list[Item],
-    item: Item,
-    question: str,
-    read: Read,
-    offer: str | None,
-    round_no: int,
-) -> ej.Decision | None:
-    """Один вопрос по группе (`item` — пункт с вариантами); непонятый ответ —
-    переспросить один раз, затем стоп."""
-    for one in group:
-        say(f"замечание {_where(one.finding)}: {one.finding.statement}")
+def _ask(q: _Question, question: str, read: Read, round_no: int) -> ej.Decision | None:
+    """Один вопрос; непонятый ответ — переспросить один раз, затем стоп."""
+    item, offer = q.item, q.offer
+    say(f"замечание {_where(item.finding)}: {item.finding.statement}")
+    for one in q.listed:
+        say(
+            f"  то же правило, исправлю сам: {_where(one.finding)}: {one.finding.statement}"
+        )
     say(question)
     for no, option in enumerate(item.options, 1):
         say(f"  {no}. {_option_line(option)}")

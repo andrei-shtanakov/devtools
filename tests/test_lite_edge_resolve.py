@@ -784,7 +784,7 @@ def test_same_rule_findings_one_question_listing_all(world: World) -> None:
         ["3", ""], world.agent(items), world.revise(), er.MAX_ROUNDS
     )
     out = world.out()
-    assert er.FIXING.format(n=0, m=1) in out
+    assert er.FIXING.format(n=1, m=1) in out  # fix виден в вопросе группы
     assert "цель G-03 не покрыта" in out and "цель G-05 не покрыта" in out
     assert er.override_offer(2, "R1") in out
     assert outcome is er.Outcome.OVERRIDDEN and world.revisions == []
@@ -810,7 +810,8 @@ def test_mixed_rules_only_overridden_group_dropped(world: World) -> None:
         ["3", "", "1", ""], world.agent(items), world.revise(), er.MAX_ROUNDS
     )
     assert outcome is er.Outcome.REVISED
-    assert er.FIXING.format(n=0, m=2) in world.out()
+    assert er.FIXING.format(n=0, m=3) in world.out()  # R1-2 снят принятием
+    assert "цель G-05 не покрыта" not in world.out()
     findings = world.revisions[0]["findings"]
     assert "G-07" in findings
     assert "G-03" not in findings and "G-05" not in findings
@@ -840,6 +841,7 @@ INSUFFICIENT = [
     {"id": "R3", "status": "insufficient", "reason": ""},
 ]
 EXPLAINED = [{"id": "R1", "status": "fail", "reason": "цель не покрыта"}]
+UNRATED = f"принять вопреки нельзя: пункт правил ребра {EDGE} не оценён"
 
 
 def test_unrated_criterion_no_override_offered(world: World) -> None:
@@ -852,7 +854,7 @@ def test_unrated_criterion_no_override_offered(world: World) -> None:
     )
     out = world.out()
     assert er.OVERRIDE_OFFER not in out
-    assert out.count(er.NO_OVERRIDE) == 1
+    assert out.count(UNRATED) == 1
     assert outcome is er.Outcome.STOPPED
     assert ej.overridden(world.run_dir, 2) == set()
 
@@ -864,7 +866,7 @@ def test_unrated_criterion_recorded_override_not_overridden(world: World) -> Non
     ej.append(world.run_dir, 2, _override(DIGEST))
     outcome = world.resolve([], world.agent(FIX), world.revise())
     assert outcome is er.Outcome.STOPPED
-    assert world.out().count(er.NO_OVERRIDE) == 1
+    assert world.out().count(UNRATED) == 1
     assert world.revisions == []
 
 
@@ -875,3 +877,95 @@ def test_explained_fail_override_offered(world: World) -> None:
     )
     assert er.OVERRIDE_OFFER in world.out()
     assert outcome is er.Outcome.OVERRIDDEN
+
+
+# --- recheck #762: вопрос по каждому решению группы, причины отказа ---
+
+BOTH_APPLIED = "# Req\n\n#### FR-01: вход\n**Priority**: Should\ntext\n"
+
+
+def _choice(no: int, question: str, kind: str, target: str) -> dict:
+    """Пункт `decision` со своим вопросом; второй вариант — `kind`
+    (`removes`/`downgrades`) пункта `target`."""
+    effects = {"removes": [], "downgrades": [], kind: [target]}
+    return {
+        "finding": no,
+        "kind": "decision",
+        "question": question,
+        "options": [
+            {"label": "переписать", "recommended": True, "removes": [],
+             "downgrades": []},
+            {"label": f"снять {target}", "recommended": False, **effects},
+        ],
+    }  # fmt: skip
+
+
+TWO_CHOICES = [
+    _choice(1, "Цель G-03 — понизить FR-01?", "downgrades", "FR-01"),
+    _choice(2, "Цель G-05 — убрать FR-02?", "removes", "FR-02"),
+]
+
+
+def test_group_decisions_each_asked_permissions_united(world: World) -> None:
+    world.findings(_goal("G-03"), _goal("G-05"))
+    outcome = world.resolve(
+        ["2", "", "2", ""],
+        world.agent(TWO_CHOICES),
+        world.revise(BOTH_APPLIED),
+        er.MAX_ROUNDS,
+    )
+    out = world.out()
+    assert "Цель G-03 — понизить FR-01?" in out and "Цель G-05 — убрать FR-02?" in out
+    assert out.count(er.override_offer(2, "R1")) == 2
+    assert outcome is er.Outcome.REVISED
+    assert world.node.read_text(encoding="utf-8") == BOTH_APPLIED
+    answers = [d.answer for d in ej.load(world.run_dir, 2)]
+    assert answers == ["снять FR-01", "снять FR-02"]
+
+
+def test_group_override_on_second_question_supersedes_first(world: World) -> None:
+    world.findings(_goal("G-03"), _goal("G-05"))
+    outcome = world.resolve(
+        ["1", "", "3", ""], world.agent(TWO_CHOICES), world.revise(), er.MAX_ROUNDS
+    )
+    assert outcome is er.Outcome.OVERRIDDEN and world.revisions == []
+    assert ej.overridden(world.run_dir, 2) == {DIGEST}
+    assert [d.kind for d in ej.load(world.run_dir, 2)] == ["option", "override"]
+
+
+def test_group_override_on_first_question_skips_rest(world: World) -> None:
+    world.findings(_goal("G-03"), _goal("G-05"))
+    outcome = world.resolve(
+        ["3", ""], world.agent(TWO_CHOICES), world.revise(), er.MAX_ROUNDS
+    )
+    assert outcome is er.Outcome.OVERRIDDEN
+    assert "Цель G-05 — убрать FR-02?" not in world.out()
+
+
+def test_neighbour_not_applicable_reason_named(world: World) -> None:
+    """Соседнее ребро N/A: принять нельзя, и повтор проверки не советуется."""
+    world.findings(_finding())
+    out_dir = world.run_dir / "edge-check" / "w2"
+    other = "requirements-vs-engineer-brief"
+    (out_dir / f"{NODE}--{other}.json").write_text(
+        json.dumps(
+            {
+                "node": NODE,
+                "edge": other,
+                "verdict": "N/A",
+                "findings": [],
+                "subject": SUBJECT,
+            }
+        ),  # fmt: skip
+        encoding="utf-8",
+    )
+    outcome = world.resolve(
+        ["3", "", "3", ""],
+        world.agent(_decision_item()),
+        world.revise(),
+        er.MAX_ROUNDS,
+    )
+    out = world.out()
+    assert f"ребро {other} неприменимо — поправьте узел по замечаниям" in out
+    assert "повторите проверку" not in out and er.OVERRIDE_OFFER not in out
+    assert outcome is er.Outcome.STOPPED

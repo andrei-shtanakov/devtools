@@ -51,6 +51,7 @@ class Decision:
     allows: dict[str, list[str]] = field(default_factory=dict)
     digest: str = ""  # находка, к которой относится решение (override сверяет)
     subject: list[str] = field(default_factory=list)  # хэши subject ребра
+    batch: str = ""  # ответы одного разбора (вызова `dfl run`); "" — старые строки
 
 
 def _finding(node: str, edge: str, raw: dict, subject: list[str] | None) -> Finding:
@@ -126,13 +127,6 @@ def load(run_dir: Path, wave: int) -> list[Decision]:
 
 
 def overridden(run_dir: Path, wave: int) -> set[str]:
-    """Digest'ы находок с решением `override` (делегирует governance)."""
+    """Digest'ы, чьё последнее решение — `override` (делегирует governance:
+    отзыв принятия один для `dfl`, раннера и публикации)."""
     return override.overridden(run_dir, wave)
-
-
-def overridden_now(decisions: list[Decision]) -> set[str]:
-    """Digest'ы, чьё ПОСЛЕДНЕЕ решение — принятие вопреки: группа правила
-    (одинаковый digest) снимается с переписывания, только пока человек не
-    выбрал по ней иное."""
-    latest = {d.digest: d.kind for d in decisions if d.digest}
-    return {digest for digest, kind in latest.items() if kind == "override"}
