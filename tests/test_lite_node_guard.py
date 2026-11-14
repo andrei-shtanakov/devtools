@@ -51,3 +51,51 @@ def test_node_without_priority_checked_by_ids_only() -> None:
 def test_priority_does_not_leak_to_next_heading() -> None:
     text = "#### FR-01\nno prio\n#### FR-02\n**Priority**: Must\n"
     assert node_items(text) == {"FR-01": None, "FR-02": "Must"}
+
+
+def test_duplicate_heading_is_ambiguous() -> None:
+    before = "#### FR-01\n**Priority**: Must\n"
+    after = before + "#### FR-01\ntext\n"
+    assert weakened(before, after, set(), set()) == ["FR-01"]
+    assert node_items(after) == {"FR-01": "Must"}
+
+
+def test_two_priority_lines_are_ambiguous() -> None:
+    before = "#### FR-01\n**Priority**: Must\n"
+    after = "#### FR-01\n**Priority**: Must\n**Priority**: Could\n"
+    assert weakened(before, after, set(), set()) == ["FR-01"]
+
+
+def test_priority_format_variants() -> None:
+    text = (
+        "#### A-1\n- **Priority**: must\n"
+        "#### A-2\nPriority: **Must**\n"
+        "#### A-3\n* Priority: Should\n"
+    )
+    assert node_items(text) == {"A-1": "Must", "A-2": "Must", "A-3": "Should"}
+    assert weakened(text, text, set(), set()) == []
+
+
+def test_unreadable_priority_counts_as_downgrade() -> None:
+    before = "#### FR-01\n**Priority**: Must\n"
+    after = "#### FR-01\nPriority: \n"
+    assert weakened(before, after, set(), set()) == ["FR-01"]
+    assert weakened(before, after, set(), {"FR-01"}) == []
+    assert weakened(before, "#### FR-01\ntext\n", set(), set()) == ["FR-01"]
+
+
+def test_fenced_blocks_and_comments_are_skipped() -> None:
+    before = "#### FR-01\n**Priority**: Must\n"
+    after = (
+        "#### FR-01\n**Priority**: Must\n"
+        "```\n#### FR-01\n**Priority**: Could\n```\n"
+        "<!--\n#### FR-01\n-->\n"
+    )
+    assert weakened(before, after, set(), set()) == []
+    assert node_items("```\n#### FR-09\n```\n<!-- #### FR-08 -->\n") == {}
+
+
+def test_id_boundary() -> None:
+    assert node_items("#### FR-01-A\n**Priority**: Must\n") == {}
+    assert node_items("#### FR-01.\n") == {"FR-01": None}
+    assert node_items("#### FR-01: t\n") == {"FR-01": None}
