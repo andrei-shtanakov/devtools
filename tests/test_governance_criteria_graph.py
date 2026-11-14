@@ -160,3 +160,21 @@ def test_should_test_ac_outside_threshold_is_automatic_and_non_blocking():
         ACC_S.replace("b · verification: test", "b · verification: manual"),
     )
     assert cgr.human_criteria(manual) == 1
+
+
+REQ_D = REQ_S + "#### FR-03: C\n**Priority**: Won't\n"
+BEH_D = BEH_S + (
+    "#### BEH-03: c\n`traces: [FR-03]`\n"
+    "- **checked_by**: `status: planned` `kind: unit` `owner: qa`\n"
+)
+
+
+def test_deferred_wont_scenario_needs_no_ac_and_should_ac_passes_coverage():
+    """Ревью #763: сценарий отложенного (Won't) требования не сирота и без AC;
+    отдельный Should-AC с трассой на FR (не OUT-…) проходит покрытие гейта."""
+    g = cgr.build_graph(REQ_D, BEH_D, ACC_S)
+    assert g.behs["BEH-03"].priority == "Won't"
+    assert g.errors == [] and cgr.orphan_findings(g) == []
+    assert ag.coverage_findings(REQ_D, BEH_D, ACC_S) == []
+    out_traced = ACC_S.replace("traces: [FR-02]", "traces: [OUT-01]")
+    assert any("OUT-01" in f for f in ag.coverage_findings(REQ_D, BEH_D, out_traced))

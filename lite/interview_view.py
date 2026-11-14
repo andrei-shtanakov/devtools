@@ -27,7 +27,8 @@ Load = Callable[[str], SessionView]
 NOT_UNDERSTOOD = "не понял, что исправить — переформулируйте поправку"
 NO_QUESTION = "вопросов больше нет"
 _FIELD_LABELS = {"Priority": "Priority", "Acceptance": "Acceptance",
-                 "Target": "Target", "traces": "Связь"}  # fmt: skip
+                 "Target": "Target", "Preference": "Preference",
+                 "traces": "Связь"}  # fmt: skip
 _TOPIC_RE = re.compile(r"required topic '(.+)' is not covered")
 _TRACE_RE = re.compile(r"(\S+) has no trace to an existing G/J entry")
 _BLOCKING_RE = re.compile(r"(\S+) is a blocking open question")
@@ -84,13 +85,16 @@ def _topic_entries(view: SessionView, prefix: str | None) -> list[Entry]:
 
 
 def _entry_line(entry: Entry) -> str:
-    """`FR-01 тело — Must; критерий: …; → G-01` (отсутствующее опущено)."""
+    """`FR-01 тело — Must; критерий: …; предпочтение: …; → G-01`
+    (отсутствующее опущено)."""
     f = entry.fields
     parts = [str(f["Priority"])] if f.get("Priority") else []
     if f.get("Acceptance"):
         parts.append(f"критерий: {f['Acceptance']}")
     elif f.get("Target"):
         parts.append(f"цель: {f['Target']}")
+    if f.get("Preference"):
+        parts.append(f"предпочтение: {f['Preference']}")
     if f.get("traces"):
         parts.append("→ " + ", ".join(map(str, f["traces"])))
     tail = f" — {'; '.join(parts)}" if parts else ""

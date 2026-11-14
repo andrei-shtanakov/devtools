@@ -3072,7 +3072,11 @@ def test_acceptance_prompt_names_orphan_scenario_rule() -> None:
     # Q остаются в пороге; `test`, а не `manual` (manual — человеческий мерж
     # закрытия через criteria_graph.human_criteria)
     assert "Should- or Could-priority requirements" in prompt
-    assert "deferred (OUT-…)" in prompt
+    # трассы отдельного AC — только в грамматике узла: OUT-… не заголовок
+    # FR/NFR, coverage_findings и граф такую трассу отвергают (ревью #763)
+    assert "OUT-" not in prompt
+    assert "only Should/Could FR/NFR ids from 10-requirements.md" in prompt
+    assert "Won't" in prompt and "needs no AC" in prompt
     assert "Must requirements stay in the threshold" in prompt
     assert "MUST then enumerate its ACs" in prompt
     assert "`verification: manual` that is NOT listed" not in prompt

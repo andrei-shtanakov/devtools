@@ -153,8 +153,11 @@ def shown(stop: Stop) -> list[tuple[str, int]]:
     # отказ прибора — подробность для разработчиков, не задание человеку
     failed = [(f"  - {readable(f)}", 1) for f in stop.failures]
     rows = [(f"  - {readable(f)}", 0) for f in blocking + stop.unrated]
-    if not blocking:  # стоп не из-за них: «можно оставить» было бы неправдой
-        return rows + failed + [(f"  - {readable(f)}", 0) for f in advisory]
+    if not blocking and not stop.failures:
+        # стоп из-за неоценённого пункта: «можно оставить» было бы неправдой
+        return rows + [(f"  - {readable(f)}", 0) for f in advisory]
+    # стоп — блокирующие или сбой ревьюера: рекомендации под своим заголовком,
+    # иначе выглядят причиной стопа (живой прогон 14.11)
     rows += failed
     if advisory:
         rows.append((ADVISORY_HEAD, 0))

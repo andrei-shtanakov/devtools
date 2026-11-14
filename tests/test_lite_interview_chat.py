@@ -345,6 +345,24 @@ def test_render_view_no_current_question_and_nfr_target() -> None:
     assert "NFR-01 быстро — цель: до 2 с" in out
 
 
+def test_render_view_shows_preference() -> None:
+    """Ревью #763: записанные слова человека (`Preference`) видны в просмотре."""
+    view = _corr_view()
+    view.entries.append(
+        Entry("NFR-01", "быстро", {"Preference": "чтобы не ждать", "Target": "2 с"})
+    )
+    out = iview.render_view(view, None)
+    assert "NFR-01 быстро — цель: 2 с; предпочтение: чтобы не ждать" in out
+
+
+def test_correct_names_preference_only_change() -> None:
+    """Правка только `preference` — названа человеку, а не пустая строка."""
+    send = Sender()
+    item = _fr1_item(body="выгрузка раз в неделю", preference="без ручных шагов")
+    out = _correct(_agent({"items": [item], "ask": None}), send)
+    assert out == "FR-01 Preference: «» → «без ручных шагов»"
+
+
 def _fr1_item(**over: Any) -> dict[str, Any]:
     item = {
         "id": "FR-01",

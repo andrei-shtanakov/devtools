@@ -82,6 +82,16 @@ def test_failure_with_minor_is_failed_check(run) -> None:
     assert sf.summary(_edge()) == sf.FAILED_CHECK
 
 
+def test_failed_check_with_minor_labels_advisory(run) -> None:
+    """Сбой ревьюера рядом с minor (живой прогон 14.11): рекомендации — под
+    своим заголовком, иначе выглядят причиной стопа."""
+    _write("edge-findings.txt", MINOR, ERROR_EDGE)
+    texts = [t for t, _ in sf.shown(_edge())]
+    head = texts.index(sf.ADVISORY_HEAD)
+    assert texts[head + 1] == f"  - {sf.readable(MINOR)}"
+    assert texts.index(f"  - {sf.readable(ERROR_EDGE)}") < head
+
+
 def test_mixed_failures_shown_but_not_counted(run) -> None:
     _write("edge-findings.txt", MAJOR, ERROR_EDGE, NO_FINDINGS)
     stop = _edge()
