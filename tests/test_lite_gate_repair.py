@@ -455,6 +455,54 @@ def test_criteria_confirmation_normalised(yes: str) -> None:
     assert funcs["entries"] == [{**FR1, "Acceptance": FR_HYP}]
 
 
+@pytest.mark.parametrize(
+    "yes",
+    ["согласен", "Подходит.", "ага", "конечно!", "ок, давай", "да, всё верно",
+     "Верно", "yes", "OK", "согласна, так и запишите", "угу"],
+)  # fmt: skip
+def test_criteria_ordinary_agreement_records_hypothesis(yes: str) -> None:
+    """Обычное согласие — запись гипотезы, а не слова в `Preference` и
+    повторное предложение агента по одному слову (финальное ревью v1.2)."""
+    disc = Disc()
+    ask = _asker(yes)
+    agent = _agent(_fr(FR_HYP))
+    _crit(CRIT_FINDINGS[:1], ask, agent, disc)
+    assert len(agent.prompts) == 1 and len(ask.asked) == 1
+    [(_qid, funcs)] = disc.resent
+    assert funcs["entries"] == [{**FR1, "Acceptance": FR_HYP}]
+
+
+@pytest.mark.parametrize("no", ["?!", "...", "", "не так", "Нет, не то.", "не то"])
+def test_criteria_dismissal_asks_for_words_once(no: str) -> None:
+    """Ответ без букв или голое отрицание — как «нет»: один раз попросить
+    своих слов, в `Preference` сам ответ не пишется."""
+    disc = Disc()
+    ask = _asker(no, "без ручных шагов")
+    agent = _agent(_fr(FR_HYP), _fr("Без ручных действий"))
+    _crit(CRIT_FINDINGS[:1], ask, agent, disc)
+    assert ask.asked[1] == gr.WORDS_ASK
+    [(_qid, funcs)] = disc.resent
+    assert funcs["entries"][0]["Preference"] == "без ручных шагов"
+
+
+def test_criteria_dismissal_twice_not_written(capsys) -> None:
+    disc = Disc()
+    _crit(CRIT_FINDINGS[:1], _asker("?!", "не то"), _agent(_fr(FR_HYP)), disc)
+    assert disc.resent == []
+    assert gr.GATE_LEFT.format(n=1) in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("yes", ["согласен", "Да, всё верно."])
+def test_traces_and_verdicts_accept_ordinary_agreement(yes: str) -> None:
+    disc = Disc()
+    _repair(TRACE_FINDINGS, _asker(yes), _agent(TRACES), disc)
+    assert len(disc.resent) == 2
+    disc = Disc()
+    _repair(VERDICT_FINDINGS[:1], _asker(yes), _agent(), disc)
+    [(_qid, payload)] = disc.resent
+    assert payload["entries"][-1]["status"] == "resolved"
+
+
 def test_criteria_bare_no_asks_for_words_once() -> None:
     disc = Disc()
     ask = _asker("Нет.", "без ручных шагов")

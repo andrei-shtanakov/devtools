@@ -50,9 +50,21 @@ NO_SYSTEM_RE = re.compile(r"^GC-13 error \[((?:IF|AP)-\d+)\]")
 NO_VERDICT_RE = re.compile(
     r"^GC-05 error \[coverage\.feasibility_review\] Must-требование (FR-\d+)"
 )
-YES_WORDS = frozenset({"да", "ок", "ok", "y", "yes", "верно"})
-YES_TAIL = YES_WORDS | {"так", "всё", "все"}  # «да, так», «да, всё верно»
+# Согласие: первое слово — из YES_WORDS, остальные — из YES_TAIL («ок, давай»,
+# «да, всё верно», «согласна, так и запишите»); регистр, пунктуация и «ё» —
+# не важны. Иные слова — уточнение человека.
+YES_WORDS = frozenset({
+    "да", "ок", "окей", "ok", "okay", "y", "yes", "верно", "согласен",
+    "согласна", "согласны", "подходит", "годится", "ага", "угу", "конечно",
+    "хорошо", "точно", "именно",
+})  # fmt: skip
+YES_TAIL = YES_WORDS | {
+    "так", "все", "давай", "давайте", "и", "запиши", "запишите", "записывай",
+    "записывайте", "пиши", "пишите", "можно",
+}  # fmt: skip
+# Голое отрицание или отмахивание («нет», «не так», «нет, не то») — как «нет».
 NO_WORDS = frozenset({"нет", "не", "no", "n"})
+NO_TAIL = NO_WORDS | {"так", "то", "это"}
 Q_ID_RE = re.compile(r"\bQ-\d+\b")
 FEASIBILITY_KEY = "feasibility_review"
 
@@ -199,16 +211,28 @@ def _fill_criterion(
 def _confirmation(
     answer: str | None, ask: Ask, again: bool = True
 ) -> bool | str | None:
-    """Ответ на гипотезу: `True` — согласие («Да.», «да, так»), строка —
-    слова человека, `None` — пропуск. Голое «нет» — один раз попросить слов."""
+    """Ответ на гипотезу: `True` — согласие («Да.», «согласен», «ок, давай»),
+    строка — слова человека, `None` — пропуск. Голое «нет», «не так», ответ
+    без букв — один раз попросить слов (сам ответ в `Preference` не пишется)."""
     if answer is None:
         return None
-    tokens = re.findall(r"\w+", answer.casefold())
-    if tokens and tokens[0] in YES_WORDS and set(tokens) <= YES_TAIL:
+    if _agrees(answer):
         return True
-    if tokens and set(tokens) <= NO_WORDS:
+    tokens = _tokens(answer)
+    if not tokens or (tokens[0] in NO_WORDS and set(tokens) <= NO_TAIL):
         return _confirmation(ask(WORDS_ASK), ask, False) if again else None
     return answer.strip()
+
+
+def _tokens(answer: str) -> list[str]:
+    """Слова ответа: без регистра и пунктуации, «ё» как «е» (цифры — слова)."""
+    return re.findall(r"[^\W_]+", answer.casefold().replace("ё", "е"))
+
+
+def _agrees(answer: str) -> bool:
+    """Обычное согласие («да», «согласен», «ок, давай», «да, всё верно»)."""
+    tokens = _tokens(answer)
+    return bool(tokens) and tokens[0] in YES_WORDS and set(tokens) <= YES_TAIL
 
 
 def _without_ids(words: str, research: dict[str, str]) -> str:
@@ -367,7 +391,7 @@ def _fill_traces(
     for eid, traces in proposed.items():
         say(f"  «{bodies[eid]}» → " + ", ".join(f"«{bodies[t]}»" for t in traces))
     answer = ask(TRACES_CONFIRM)
-    if answer is None or answer.strip().casefold() not in YES_WORDS:
+    if answer is None or not _agrees(answer):
         return len(eids)
     left = len(eids) - len(proposed)
     for qid, group in _by_holder(proposed, view).items():
@@ -467,7 +491,7 @@ def _fill_verdicts(
         text = ask(f"{fr} «{label}» — {VERDICT_HINT}")
         if text is None:
             continue
-        ok = text.strip().casefold() in YES_WORDS
+        ok = _agrees(text)
         verdict = "реализуемо как есть" if ok else text
         entries.append({
             "id": f"X-{number:02d}",
