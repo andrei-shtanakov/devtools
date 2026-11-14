@@ -136,6 +136,26 @@ def test_cause_ignores_findings_after_stop_lifted(run) -> None:
 def test_blocking_matches_edge_rules_contract() -> None:
     """`BLOCKING` совпадает с `severity.blocking` каждого ребра контракта."""
     root = Path(__file__).resolve().parents[1] / "contracts/edge-check/v1/rules"
-    for path in sorted(root.glob("*.yaml")):
+    paths = sorted(root.glob("*.yaml"))
+    assert paths, f"правил рёбер нет в {root}"
+    for path in paths:
         rule = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert set(rule["severity"]["blocking"]) == sf.BLOCKING, path.name
+
+
+def test_stop_without_blocking_is_not_advisory(run) -> None:
+    """FAIL по статусу пункта при одних minor: не «можно оставить» и не
+    «поправьте файл» (ревью #759)."""
+    _write("edge-findings.txt", MINOR)
+    stop = _edge()
+    assert sf.summary(stop) == sf.UNBLOCKED_STOP
+    texts = [t for t, _ in sf.shown(stop)]
+    assert sf.ADVISORY_HEAD not in texts and len(texts) == 1
+    assert sf.edit_hint(run, stop) is None
+
+
+def test_edit_hint_names_only_blocking_files(run) -> None:
+    other = MINOR.replace("10-requirements.md", "15-behaviour-spec.md")
+    _write("edge-findings.txt", MAJOR, other)
+    hint = sf.edit_hint(run, _edge())
+    assert hint is not None and "15-behaviour-spec.md" not in hint
