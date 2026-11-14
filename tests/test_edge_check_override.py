@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from governance.edge_check import override
 
 FINDING = {
@@ -98,3 +100,27 @@ def test_accepted_row_without_digest_refused(tmp_path: Path) -> None:
     _journal(tmp_path, _row(1, "override"))
     records = {(NODE, EDGE): _record()}
     assert override.accepted(records, override.overridden(tmp_path, 1)) is None
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [None, [], [{"path": "10-requirements.md"}], [{"path": "a", "sha256": ""}]],
+    ids=["missing", "empty", "no-sha256", "blank-sha256"],
+)
+def test_accepted_without_subject_hashes_refused(subject: object) -> None:
+    """Без хэшей subject принятие не к чему привязать — fail-closed, даже
+    если в журнале ровно совпадающий digest."""
+    record = {"verdict": "FAIL", "subject": subject, "findings": [FINDING]}
+    shas = override.subject_shas(subject)
+    digest = override.finding_digest(NODE, EDGE, FINDING, shas)
+    assert override.accepted({(NODE, EDGE): record}, {digest}) is None
+
+
+def test_entries_without_sha256_do_not_share_acceptance() -> None:
+    """`[{path: a}]` и `[{path: b}]` не сводятся к одному `[""]`."""
+    first = {"verdict": "FAIL", "subject": [{"path": "a"}], "findings": [FINDING]}
+    second = {**first, "subject": [{"path": "b"}]}
+    digest = override.finding_digest(
+        NODE, EDGE, FINDING, override.subject_shas(first["subject"])
+    )
+    assert override.accepted({(NODE, EDGE): second}, {digest}) is None

@@ -16,6 +16,7 @@ def _write_record(run_dir: Path, wave: int) -> None:
         "node": "requirements",
         "edge": "requirements-vs-charter",
         "verdict": "FAIL",
+        "subject": [{"path": "10-requirements.md", "sha256": "s-req"}],
         "findings": [
             {
                 "rule_id": "R1",
@@ -73,7 +74,7 @@ def test_overridden_digests(tmp_path: Path) -> None:
     )
     ej.append(tmp_path, 2, _decision("R2"))
     ej.append(tmp_path, 2, _decision("R3", kind="override"))  # без digest
-    assert ej.overridden(tmp_path, 2) == {found.digest}
+    assert found.digest and ej.overridden(tmp_path, 2) == {found.digest}
     assert ej.load(tmp_path, 2)[0].digest == found.digest
 
 

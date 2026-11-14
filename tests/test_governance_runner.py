@@ -242,7 +242,13 @@ class FakeOps:
         records = {}
         for edge in co.edges_for_level(arts, wave - 1):
             verdict = self.edge_results.get(edge.node, "PASS")
-            record: dict = {"verdict": verdict, "findings": []}
+            record: dict = {
+                "verdict": verdict,
+                "findings": [],
+                # хэши входа subject — как у записи координатора (к ним
+                # привязывается принятие вопреки, `override.bound_subject`)
+                "subject": [{"path": f"{edge.node}.md", "sha256": f"sha-{edge.node}"}],
+            }
             if verdict == "FAIL":
                 record["findings"] = [
                     {
@@ -12322,8 +12328,8 @@ _OVR_KEYS = [
 ]
 
 
-#: Записи стенда (`FakeOps.edge_check_level`) хэшей subject не несут.
-_OVR_SUBJECT: list[dict] = []
+#: Subject записей стенда (`FakeOps.edge_check_level`) для узла charter.
+_OVR_SUBJECT: list[dict] = [{"path": "charter.md", "sha256": "sha-charter"}]
 
 
 def _ovr_finding(rule: str, statement: str = "не покрыто") -> dict:

@@ -53,7 +53,9 @@ class Decision:
     subject: list[str] = field(default_factory=list)  # хэши subject ребра
 
 
-def _finding(node: str, edge: str, raw: dict, subject: list[str]) -> Finding:
+def _finding(node: str, edge: str, raw: dict, subject: list[str] | None) -> Finding:
+    """Находка; без хэшей subject (`subject is None`) digest пуст — принять
+    её вопреки нельзя (`override.bound_subject`)."""
     loc = raw.get("location") or {}
     return Finding(
         node=node,
@@ -63,8 +65,10 @@ def _finding(node: str, edge: str, raw: dict, subject: list[str]) -> Finding:
         statement=str(raw.get("statement")),
         path=loc.get("path"),
         lines=str(loc.get("lines")),
-        digest=override.finding_digest(node, edge, raw, subject),
-        subject=tuple(subject),
+        digest=""
+        if subject is None
+        else override.finding_digest(node, edge, raw, subject),
+        subject=tuple(subject or ()),
     )
 
 
@@ -75,7 +79,7 @@ def blocking_findings(run_dir: Path, wave: int) -> list[Finding]:
         f
         for (node, edge), record in records.items()
         for f in (
-            _finding(node, edge, r, override.subject_shas(record.get("subject")))
+            _finding(node, edge, r, override.bound_subject(record.get("subject")))
             for r in record.get("findings", [])
         )
         if f.cls in BLOCKING

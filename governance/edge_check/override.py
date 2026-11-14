@@ -34,6 +34,19 @@ def subject_shas(subject: object) -> list[str]:
     return sorted(str(f.get("sha256", "")) for f in subject if isinstance(f, dict))
 
 
+def bound_subject(subject: object) -> list[str] | None:
+    """Хэши subject, к которым можно привязать принятие; иначе `None`.
+
+    Нет subject, пустой список или запись без `sha256` (пустой) — привязать
+    не к чему: иначе разные тексты сводились бы к одному `[""]`/`[]` и
+    принятие переносилось бы на них (fail-closed).
+    """
+    shas = subject_shas(subject)
+    if not shas or not all(s.strip() for s in shas):
+        return None
+    return shas
+
+
 def finding_digest(node: str, edge: str, finding: dict, subject: list[str]) -> str:
     """Отпечаток принятия: узел, ребро, правило, класс и хэши subject.
 
@@ -92,7 +105,8 @@ def accepted(
     Принимается вопреки только FAIL, объяснённый блокирующими находками:
     ребро `ERROR` или с иным вердиктом, FAIL без блокирующих находок, пункт
     правил не `pass`, не покрытый находкой (`insufficient`, `fail` без
-    причины), и непринятая находка — `None` (прежний стоп).
+    причины), запись без хэшей subject (`bound_subject`) и непринятая
+    находка — `None` (прежний стоп).
     """
     found: set[Key] = set()
     for (node, edge), record in records.items():
@@ -102,7 +116,9 @@ def accepted(
         blocking = _blocking(record)
         if verdict != "FAIL" or not blocking or not _explained(record):
             return None
-        subject = subject_shas(record.get("subject"))
+        subject = bound_subject(record.get("subject"))
+        if subject is None:
+            return None
         for f in blocking:
             if finding_digest(node, edge, f, subject) not in digests:
                 return None

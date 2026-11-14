@@ -269,7 +269,12 @@ def _ask_all(
     say(FIXING.format(n=len(items) - len(asked), m=len(asked)))
     chosen: list[ej.Decision] = []
     for item in asked:
-        allow = test and (item.finding.key in disagreed or round_no == MAX_ROUNDS)
+        # Без digest (нет хэшей subject) принятие не к чему привязать.
+        allow = (
+            test
+            and bool(item.finding.digest)
+            and (item.finding.key in disagreed or round_no == MAX_ROUNDS)
+        )
         decision = _ask(item, read, allow, round_no)
         if decision is None:
             say("разбор остановлен — продолжить: dfl run")

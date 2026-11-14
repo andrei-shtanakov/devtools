@@ -39,6 +39,7 @@ text
 FIXED = BEFORE + "\nG-03: явно отклонена — вне объёма\n"
 WITHOUT_FR02 = BEFORE.replace("#### FR-02: выход\n**Priority**: Should\ntext\n", "")
 CHARTER = "# Charter\nG-01 G-03\n"
+SUBJECT = [{"path": FILE, "sha256": "s-node"}]
 
 
 def _finding(rule: str = "R1", path: str | None = FILE, cls: str = "major") -> dict:
@@ -68,12 +69,18 @@ class World:
     def node(self) -> Path:
         return self.tmp / "target" / BUNDLE / FILE
 
-    def findings(self, *findings: dict, node: str = NODE, edge: str = EDGE) -> None:
+    def findings(
+        self,
+        *findings: dict,
+        node: str = NODE,
+        edge: str = EDGE,
+        subject: list[dict] | None = SUBJECT,
+    ) -> None:
         """Запись ребра на диске и те же находки в файле стопа раннера."""
         out = self.run_dir / "edge-check" / f"w{self.state.wave}"
         out.mkdir(parents=True, exist_ok=True)
         record = {"node": node, "edge": edge, "verdict": "FAIL",
-                  "findings": list(findings)}  # fmt: skip
+                  "findings": list(findings), "subject": subject}  # fmt: skip
         (out / f"{node}--{edge}.json").write_text(
             json.dumps(record, ensure_ascii=False), encoding="utf-8"
         )
@@ -332,7 +339,7 @@ def test_repeat_after_disagree_offers_override(world: World) -> None:
     assert outcome is er.Outcome.OVERRIDDEN
     assert er.OVERRIDE_OFFER in world.out()
     # решение привязано к самой находке — тот же digest, что считает раннер
-    digest = override.finding_digest(NODE, EDGE, _finding(), [])
+    digest = override.finding_digest(NODE, EDGE, _finding(), ["s-node"])
     assert ej.overridden(world.run_dir, 2) == {digest}
     assert world.revisions == []
 
@@ -578,3 +585,19 @@ def test_unrated_stop_line_not_applicable(world: World) -> None:
     world.stop_file("\n".join([*world.stop_lines, unrated]))
     assert world.resolve([], agent, world.revise()) is er.Outcome.NOT_APPLICABLE
     assert world.prompts == [] and world.revisions == []
+
+
+def test_override_not_offered_without_subject_hashes(world: World) -> None:
+    """Запись без хэшей subject: принятию не к чему привязаться — вопрос
+    после несогласия задаётся без варианта «принять вопреки», строки нет."""
+    world.findings(_finding(), subject=None)
+    ej.append(
+        world.run_dir,
+        2,
+        ej.Decision((NODE, EDGE, "R1"), "Цель G-03?", "вне объёма", "disagree", 1),
+    )
+    outcome = world.resolve(["2", "", "2", ""], world.agent(FIX), world.revise())
+    assert er.OVERRIDE_OFFER not in world.out()
+    assert outcome is er.Outcome.STOPPED
+    assert ej.overridden(world.run_dir, 2) == set()
+    assert all(d.kind != "override" for d in ej.load(world.run_dir, 2))
