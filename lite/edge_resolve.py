@@ -41,7 +41,7 @@ from lite.output import say
 from lite.structure import Agent, AgentUnavailable, FormError
 
 MAX_ROUNDS = 2
-FIXING = "исправлю сам: {n}; вопросов к вам: {m}"
+FIXING = "исправлю сам: {n}; вопросов к вам: до {m}"
 OVERRIDE_OFFER = "принять узел вопреки замечанию (запишется в журнал и в PR)"
 OVERRIDE_GROUP = (
     "принять узел вопреки всем {n} замечаниям правила {rule} "

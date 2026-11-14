@@ -151,7 +151,6 @@ def test_overridable_matches_accepted(
     [
         ({"criteria": [{"id": "R3", "status": "insufficient"}]},
          ["не оценён", "повторите проверку"]),
-        ({"verdict": "N/A", "findings": []}, ["неприменимо", "поправьте узел"]),
         ({"findings": []}, ["без блокирующих замечаний", "поправьте узел"]),
         ({"verdict": "ERROR"}, ["ERROR", "повторите проверку"]),
         ({"subject": []}, ["хэш"]),
@@ -177,3 +176,18 @@ def test_override_revoked_by_later_answer(tmp_path: Path) -> None:
     assert override.accepted({(NODE, EDGE): _record()}, digests) is None
     _journal(tmp_path, _row(2, "option", _digest()), _row(2, "override", _digest()))
     assert override.overridden(tmp_path, 2) == {_digest()}
+
+
+def test_na_neighbour_does_not_block_override() -> None:
+    """N/A засчитывается уровню как пройденное (coordinator.run_level): соседнее
+    неприменимое ребро не мешает принять объяснённый FAIL (ревью #762)."""
+    explained = {
+        **_record(),
+        "criteria": [{"id": "R1", "status": "fail", "reason": "x"}],
+    }
+    records = {
+        (NODE, EDGE): explained,
+        (NODE, "requirements-vs-engineer-brief"): {"verdict": "N/A", "findings": []},
+    }
+    assert override.non_overridable_reason(records) is None
+    assert override.accepted(records, {_digest()}) is not None

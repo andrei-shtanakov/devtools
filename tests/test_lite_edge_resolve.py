@@ -942,8 +942,9 @@ def test_group_override_on_first_question_skips_rest(world: World) -> None:
     assert "Цель G-05 — убрать FR-02?" not in world.out()
 
 
-def test_neighbour_not_applicable_reason_named(world: World) -> None:
-    """Соседнее ребро N/A: принять нельзя, и повтор проверки не советуется."""
+def test_neighbour_not_applicable_does_not_block_override(world: World) -> None:
+    """Соседнее ребро N/A засчитано как пройденное: принятие вопреки
+    предлагается и действует (ревью #762, круг 3)."""
     world.findings(_finding())
     out_dir = world.run_dir / "edge-check" / "w2"
     other = "requirements-vs-engineer-brief"
@@ -966,6 +967,5 @@ def test_neighbour_not_applicable_reason_named(world: World) -> None:
         er.MAX_ROUNDS,
     )
     out = world.out()
-    assert f"ребро {other} неприменимо — поправьте узел по замечаниям" in out
-    assert "повторите проверку" not in out and er.OVERRIDE_OFFER not in out
-    assert outcome is er.Outcome.STOPPED
+    assert "неприменимо" not in out and "приняты вопреки" in out
+    assert outcome is er.Outcome.OVERRIDDEN

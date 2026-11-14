@@ -113,8 +113,11 @@ def non_overridable_reason(records: dict[tuple[str, str], dict]) -> str | None:
     пункт правил покрыт находкой с причиной и хэши subject. Повтор проверки
     советуется только там, где он может помочь (пункт не оценён, ошибка).
     """
+    # N/A засчитывается уровню как пройденное (coordinator.run_level)
     failing = [
-        (edge, r) for (_node, edge), r in records.items() if r.get("verdict") != "PASS"
+        (edge, r)
+        for (_node, edge), r in records.items()
+        if r.get("verdict") not in ("PASS", "N/A")
     ]
     if not failing:
         return f"{_NO} на уровне нет FAIL"
@@ -131,8 +134,6 @@ _FIX_NODE = "поправьте узел по замечаниям"
 
 def _record_reason(edge: str, record: dict) -> str | None:
     verdict = record.get("verdict")
-    if verdict == "N/A":
-        return f"ребро {edge} неприменимо — {_FIX_NODE}"
     if verdict != "FAIL":
         return f"проверка ребра {edge} не состоялась ({verdict}) — повторите проверку"
     if not _blocking(record):
