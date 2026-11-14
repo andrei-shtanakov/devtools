@@ -1,6 +1,6 @@
-"""gate_check — линтер discovery-brief по контракту DISCOVERY-BRIEF-CONTRACT.md (v1.1).
+"""gate_check — линтер discovery-brief по контракту DISCOVERY-BRIEF-CONTRACT.md (v1.2).
 
-Правила GC-01…GC-16 — нормативный реестр в контракте §5. Каждое finding несёт ID
+Правила GC-01…GC-17 — нормативный реестр в контракте §5. Каждое finding несёт ID
 правила; выход 1, если есть хотя бы одна ошибка.
 
 Запуск: uv run gate_check.py <brief.md> [<brief2.md> ...]
@@ -51,6 +51,7 @@ PRIORITY_RE = re.compile(r"\b(Must|Should|Could|Won't)\b", re.IGNORECASE)
 _DEF_RE = re.compile(r"^(?:-\s+\*\*|#{2,6}\s+)([A-Z]+-\d+)")
 _HEADING_RE = re.compile(r"^#{1,6}\s")
 _ID_LIST_RE = re.compile(r"[A-Z]+-\d+")
+_Q_REF_RE = re.compile(r"\bQ-\d+\b")
 
 
 @dataclass
@@ -200,7 +201,7 @@ def _type_msg(expected: str, value: object) -> str:
 
 
 def check(text: str, base_dir: Path | None = None) -> list[Finding]:
-    """Прогнать все правила GC-01…GC-16; вернуть findings (errors + warnings)."""
+    """Прогнать все правила GC-01…GC-17; вернуть findings (errors + warnings)."""
     findings: list[Finding] = []
 
     def err(rule: str, ref: str, msg: str) -> None:
@@ -404,6 +405,17 @@ def check(text: str, base_dir: Path | None = None) -> list[Finding]:
         for prefix in ("S", "IF", "AP"):
             for entry in brief.by_prefix(prefix):
                 warn("GC-14", entry.eid, "solution-space запись в customer-брифе")
+
+    # GC-17 число как исследование: ссылка на Q-NN из FR/NFR/M разрешается в Q брифа
+    questions = {e.eid: e for e in brief.by_prefix("Q")}
+    for entry in (*brief.by_prefix("FR"), *brief.by_prefix("NFR"), *brief.by_prefix("M")):
+        for ref in dict.fromkeys(_Q_REF_RE.findall(entry.text)):
+            target = questions.get(ref)
+            if target is None:
+                err("GC-17", entry.eid, f"ссылка на {ref}, но такой записи Q нет")
+            elif target.resolved():
+                warn("GC-17", entry.eid,
+                     f"{ref} закрыт — подставьте найденное значение вместо ссылки")
 
     # GC-15 validation зеркалит фактический результат линтера (считается последним)
     declared_validation = meta.get("validation")
