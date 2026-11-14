@@ -124,3 +124,29 @@ def test_id_boundary() -> None:
     assert node_items("#### FR-01-A\n**Priority**: Must\n") == {}
     assert node_items("#### FR-01 .\n") == {"FR-01": None}
     assert node_items("#### FR-01: t\n") == {"FR-01": None}
+
+
+def test_loose_heading_boundary_is_not_dropped() -> None:
+    text = "#### FR-01\n**Priority**: Must\n#### FR-01.\n**Priority**: Could\n"
+    assert weakened(text, text, set(), set()) == ["FR-01"]
+
+
+def test_heading_forms_parity_with_counter() -> None:
+    base = "#### FR-01\n**Priority**: Must\n"
+    forms = {
+        "#### FR-01": True,
+        "#### FR-01: t": True,
+        "#### FR-01.": False,
+        "#### FR-01,": False,
+        "#### FR-01)": False,
+        "#### FR-01-A": None,
+    }
+    for heading, counted in forms.items():
+        text = f"{base}{heading}\n**Priority**: Could\n"
+        flagged = weakened(base, text, set(), set()) == ["FR-01"]
+        if counted is None:
+            # не id вовсе: счётчик и разделитель оба его игнорируют
+            assert node_items(text) == {"FR-01": "Must"}, heading
+            continue
+        # и счётный дубль, и расхождение границ обязаны быть замечены
+        assert flagged, heading

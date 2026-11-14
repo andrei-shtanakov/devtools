@@ -11,6 +11,7 @@ HTML-комментарии НЕ вырезаются: строка Priority и�
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 
 from governance.decomposition_guard import node_id_counts
@@ -55,7 +56,12 @@ def _parse(text: str) -> _Parsed:
     counts = node_id_counts(text)
     parsed = _Parsed(ambiguous={item for item, n in counts.items() if n > 1})
     parsed.items = dict.fromkeys(counts)
-    for item, values in _sections(text):
+    sections = _sections(text)
+    seen = Counter(item for item, _ in sections if item is not None)
+    # Граница заголовка у разделителя шире счётчика (`#### FR-01.`): любое
+    # расхождение числа секций с кратностью счётчика — неоднозначность.
+    parsed.ambiguous |= {i for i in seen if seen[i] != counts.get(i, 0)}
+    for item, values in sections:
         if item is None or item not in counts:
             continue
         if len(values) > 1:
