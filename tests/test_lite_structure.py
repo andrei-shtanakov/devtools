@@ -653,3 +653,17 @@ def test_prompt_labels_existing_q_as_research() -> None:
     )
     prompt = sx.build_prompt(NFRQ, "ответ", view)
     assert "Q-01 (исследование): Порог?" in prompt and "тема ?" not in prompt
+
+
+# --- fix round 2: висячая ссылка — только грамматика ref ---
+
+
+@pytest.mark.parametrize("token", ["utf-8", "iso-8601", "sha-256", "covid-19"])
+def test_plain_word_number_tokens_are_not_refs(token: str) -> None:
+    items = [
+        {"prefix": "Q", "body": "Порог?", "ref": "q-1", "owner_role": "analyst"},
+        {"prefix": "NFR", "body": f"Экспорт в {token}",
+         "acceptance": f"Файл в {token}, отклик не хуже значения из q-1"},
+        {**FR_FULL, "body": f"Даты в {token}", "acceptance": f"Формат {token}"},
+    ]  # fmt: skip
+    assert sx.form_errors(items, _customer()) == []

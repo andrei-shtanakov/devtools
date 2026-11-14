@@ -59,7 +59,7 @@ RESEARCH_PREFIX = "Q"
 RESEARCH_ROLES = ("analyst", "engineer")
 _REFERRING = ("FR", "NFR", "M")  # GC-17: чьи ссылки на Q-NN проверяются
 _REF_TEXT = ("body", "acceptance", "target")  # где пишет агент (не preference)
-_REF_SHAPE = r"[a-z]+-\d+"  # ref нового пункта: «q-1», «new-1»
+_REF_SHAPE = r"q-\d+"  # грамматика ref нового Q из промпта: «q-1»
 
 
 class FormError(Exception):
@@ -380,7 +380,8 @@ def _research_errors(
 
 
 def _ref_pattern(refs: set[str]) -> re.Pattern[str]:
-    """Отдельно стоящий ref: форма `q-1` или любой ref этого ответа."""
+    """Отдельно стоящий ref: форма ref Q (`q-1`) или ровно ref пункта этого
+    ответа; прочие «слово-число» (utf-8, iso-8601) — обычный текст."""
     alts = [_REF_SHAPE, *map(re.escape, sorted(refs, key=len, reverse=True))]
     return re.compile(r"(?<![\w-])(" + "|".join(alts) + r")(?![\w-])")
 
