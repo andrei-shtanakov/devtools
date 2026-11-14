@@ -95,3 +95,19 @@ def test_priority_read_as_gate_reads_it() -> None:
 def test_preexisting_grammar_findings_are_not_new() -> None:
     text = "#### FR-01\n**Priority**: Must\n#### FR-02: t\n**Priority**: Bad\n"
     assert weakened(text, text, set(), set()) == []
+
+
+@pytest.mark.parametrize(
+    "before",
+    [
+        "#### FR-01\n**Priority**: Must\n",
+        "#### FR-01: t\n**Priority**: must\n",
+        "#### FR-01: t\n- **Priority**: Must\n",
+    ],
+)
+def test_must_downgrade_behind_old_grammar_finding_is_reported(before: str) -> None:
+    after = "#### FR-01: x\n**Priority**: Could\n"
+    assert weakened(before, after, set(), set()) == ["FR-01"]
+    assert weakened(before, after, set(), {"FR-01"}) == []
+    fixed = "#### FR-01: x\n**Priority**: Must\n"
+    assert weakened(before, fixed, set(), set()) == []
