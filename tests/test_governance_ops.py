@@ -3019,3 +3019,11 @@ def test_edit_pr_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
     with pytest.raises(RuntimeError, match="PATCH pulls/7 rc=1: boom"):
         RealOps().edit_pr("/t", "o/r", 7, "T", "B")
+
+
+def test_acceptance_prompt_names_orphan_scenario_rule() -> None:
+    """Автор приёмки знает правило гейта GC-ORPHAN (живой прогон sdd-runer W4)."""
+    from governance.ops import author_prompt
+
+    prompt = author_prompt("acceptance", "s", "b", None, "/o/25-acceptance.md")
+    assert "GC-ORPHAN" in prompt and "scenarios:" in prompt

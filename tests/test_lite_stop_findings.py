@@ -106,8 +106,8 @@ def test_edit_hint_names_bundle_file_target_and_branch(run) -> None:
     assert "ветка spec/w-behaviour-w2" in hint and "коммитить не нужно" in hint
 
 
-def test_gate_output_raw_not_counted_level_one(run) -> None:
-    _write("gate-findings.txt", "GC-01 error [FR-01] пусто", "not_evaluated: GC-X")
+def test_gate_output_without_errors_stays_level_one(run) -> None:
+    _write("gate-findings.txt", "GC-01 warning [FR-01] пусто", "not_evaluated: GC-X")
     stop = sf.load("R-1", sf.GATE)
     assert stop is not None
     assert sf.summary(stop).startswith("проверка бандла не прошла (вывод: ")
@@ -175,3 +175,29 @@ def test_unrated_fail_is_not_instrument_failure(run) -> None:
     assert sf.summary(stop) == sf.UNBLOCKED_STOP
     assert sf.shown(stop) == [(f"  - {sf.UNRATED_TEXT}", 0)]
     assert sf.edit_hint(run, stop) is None
+
+
+def test_gate_errors_on_level_zero(run) -> None:
+    """Ошибки гейта (`error GC-…`) — на экране без -v; прочее — на -v."""
+    _write(
+        "gate-findings.txt",
+        "error GC-ORPHAN: BEH-40: сирота",
+        "not_evaluated: GC-X",
+    )
+    stop = sf.load("R-1", sf.GATE)
+    assert stop is not None
+    assert sf.summary(stop).startswith("проверка бандла не прошла: ошибок 1 (вывод: ")
+    assert sf.shown(stop) == [
+        ("  - GC-ORPHAN: BEH-40: сирота", 0),
+        ("  not_evaluated: GC-X", 1),
+    ]
+
+
+def test_gate_check_format_errors_on_level_zero(run) -> None:
+    """Формат самого gate-check (`GC-NN error […]`) — тоже ошибка (ревью #761)."""
+    _write("gate-findings.txt", "GC-08 error [FR-01] нет критерия", "GC-05 warning x")
+    stop = sf.load("R-1", sf.GATE)
+    assert stop is not None
+    assert "ошибок 1" in sf.summary(stop)
+    assert sf.shown(stop)[0] == ("  - GC-08 error [FR-01] нет критерия", 0)
+    assert sf.shown(stop)[1][1] == 1
