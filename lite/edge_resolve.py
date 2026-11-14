@@ -26,6 +26,7 @@ from pathlib import Path
 from governance import run_state as rs
 from governance import safe_io
 from governance.author_launch import NODE_LIMIT, AuthorCall, LaunchOutcome
+from governance.edge_check import override
 from governance.edge_check.author_rules import DEFAULT_CONTRACTS
 from governance.edge_check.rules import EdgeCheckError, load_rules
 from governance.ops import _AUTHOR_FILENAMES
@@ -41,6 +42,12 @@ from lite.structure import Agent, AgentUnavailable, FormError
 MAX_ROUNDS = 2
 FIXING = "исправлю сам: {n}; вопросов к вам: {m}"
 OVERRIDE_OFFER = "принять узел вопреки замечанию (запишется в журнал и в PR)"
+OVERRIDE_GROUP = (
+    "принять узел вопреки всем замечаниям правила {rule} — их {n} "
+    "(запишется в журнал и в PR)"
+)
+NO_OVERRIDE = "принять вопреки нельзя: пункт правил не оценён — повторите проверку"
+NOT_COVERED = "принятие вопреки не покрывает все замечания уровня — разбор остановлен"
 REVIEW_STATUS = sf.EDGE
 REVISE_DIR = "edge-revise"
 OWN_PREFIX = "своё:"
@@ -59,6 +66,7 @@ _STOP_KEY_RE = re.compile(r"^error EDGE-CHECK\(([^/)]+)/([^)]+)\): (R\d+) ")
 
 Key = tuple[str, str, str]
 Revise = Callable[..., LaunchOutcome]
+Unit = tuple[list[Item], bool]  # пункты одного вопроса; предлагать ли принятие
 
 
 class Outcome(enum.Enum):
@@ -124,19 +132,43 @@ def resolve(
     run_dir = rs.run_dir(state.run_id)
     prior = ej.load(run_dir, state.wave)
     try:
+        records = ej.level_records(run_dir, state.wave)
+    except (OSError, ValueError, KeyError, TypeError):
+        return Outcome.NOT_APPLICABLE
+    can_override = override.overridable(records)
+    try:
         items = triage(
             findings, nodes, bases, prior, _counted(agent, calls), cache_dir=run_dir
         )
     except (FormError, AgentUnavailable) as exc:
         say(f"разбор замечаний не состоялся: {exc}")
         return Outcome.STOPPED
-    chosen = _ask_all(state, [_visible(i) for i in items], prior, read, round_no)
+    notes: set[str] = set()
+    visible = [_visible(i) for i in items]
+    chosen = _ask_all(state, visible, prior, read, round_no, can_override, notes)
     if chosen is None:
         return Outcome.STOPPED
-    if {f.digest for f in findings} <= ej.overridden(run_dir, state.wave):
-        say("замечания приняты вопреки — записано в журнал; проверяю снова")
-        return Outcome.OVERRIDDEN
-    return _rewrite(state, findings, nodes, revise, round_no, calls)
+    overrides = ej.overridden_now(ej.load(run_dir, state.wave))
+    if {f.digest for f in findings} <= overrides:
+        if override.accepted(records, overrides) is not None:
+            say("замечания приняты вопреки — записано в журнал; проверяю снова")
+            return Outcome.OVERRIDDEN
+        _note(notes, NOT_COVERED if can_override else NO_OVERRIDE)
+        return Outcome.STOPPED
+    return _rewrite(state, findings, nodes, revise, round_no, calls, overrides)
+
+
+def override_offer(n: int, rule: str) -> str:
+    """Вариант «принять вопреки»: одна находка — прежняя строка; несколько
+    находок одного правила на том же тексте (общий digest) — все сразу."""
+    return OVERRIDE_OFFER if n == 1 else OVERRIDE_GROUP.format(rule=rule, n=n)
+
+
+def _note(notes: set[str], text: str) -> None:
+    """Сказать один раз за круг."""
+    if text not in notes:
+        notes.add(text)
+        say(text)
 
 
 def applicable_findings(state: rs.RunState) -> list[ej.Finding] | None:
@@ -262,23 +294,38 @@ def _ask_all(
     prior: list[ej.Decision],
     read: Read,
     round_no: int,
+    can_override: bool,
+    notes: set[str],
 ) -> list[ej.Decision] | None:
     """Вопросы по `decision` и по тем, что журнал велит спросить снова
     (`edge_memory.recall`); каждое решение сразу в журнал. Человек
-    остановился — `None` (записанное остаётся)."""
+    остановился — `None` (записанное остаётся).
+
+    Принятие вопреки снимает блокирующий вердикт правила на тексте узла —
+    всю группу находок с общим digest; поэтому вопрос с этим вариантом
+    задаётся один на группу (и с её `fix`-пунктами), а ответ относится ко
+    всем её находкам. Уровень не `overridable` — варианта нет, причина
+    сказана один раз.
+    """
     memory = em.recall(
         prior,
         [i.finding for i in items],
         test=state.mode == "test",
         last_round=round_no == MAX_ROUNDS,
     )
-    asked = [i for i in items if i.kind == "decision" or memory[i.finding.key].ask]
-    say(FIXING.format(n=len(items) - len(asked), m=len(asked)))
+    units = _units(items, memory, can_override)
+    if not can_override and any(
+        memory[g[0].finding.key].offer_override for g, _ in units
+    ):
+        _note(notes, NO_OVERRIDE)
+    asked = sum(len(group) for group, _ in units)
+    say(FIXING.format(n=len(items) - asked, m=len(units)))
     chosen: list[ej.Decision] = []
-    for item in asked:
-        recall = memory[item.finding.key]
-        question = recall.question or item.question
-        decision = _ask(item, question, read, recall.offer_override, round_no)
+    for group, offer in units:
+        primary = next((i for i in group if i.kind == "decision"), group[0])
+        question = memory[primary.finding.key].question or primary.question
+        label = override_offer(len(group), primary.finding.rule_id) if offer else None
+        decision = _ask(group, primary, question, read, label, round_no)
         if decision is None:
             say("разбор остановлен — продолжить: dfl run")
             return None
@@ -287,22 +334,50 @@ def _ask_all(
     return chosen
 
 
+def _units(
+    items: list[Item], memory: dict[Key, em.Recall], can_override: bool
+) -> list[Unit]:
+    """Вопросы круга: группа находок с общим digest — один вопрос, если в нём
+    предлагается принятие вопреки; иначе вопрос на каждый спрашиваемый пункт."""
+    groups: dict[str, list[Item]] = {}
+    for no, item in enumerate(items):
+        groups.setdefault(item.finding.digest or f"#{no}", []).append(item)
+    units: list[Unit] = []
+    for group in groups.values():
+        recall = memory[group[0].finding.key]  # ключ у группы общий
+        asked = [i for i in group if i.kind == "decision" or recall.ask]
+        if not asked:
+            continue
+        if recall.offer_override and can_override:
+            units.append((group, True))
+        else:
+            units += [([i], False) for i in asked]
+    return units
+
+
 def _ask(
-    item: Item, question: str, read: Read, allow_override: bool, round_no: int
+    group: list[Item],
+    item: Item,
+    question: str,
+    read: Read,
+    offer: str | None,
+    round_no: int,
 ) -> ej.Decision | None:
-    """Один вопрос; непонятый ответ — переспросить один раз, затем стоп."""
-    say(f"замечание {_where(item.finding)}: {item.finding.statement}")
+    """Один вопрос по группе (`item` — пункт с вариантами); непонятый ответ —
+    переспросить один раз, затем стоп."""
+    for one in group:
+        say(f"замечание {_where(one.finding)}: {one.finding.statement}")
     say(question)
     for no, option in enumerate(item.options, 1):
         say(f"  {no}. {_option_line(option)}")
-    if allow_override:
-        say(f"  {len(item.options) + 1}. {OVERRIDE_OFFER}")
+    if offer is not None:
+        say(f"  {len(item.options) + 1}. {offer}")
     say(ANSWER_HELP)
     for attempt in range(2):
         text = read_answer(read)
         if text is None or is_skip(text):
             return None
-        decision = _parse(item, question, text, allow_override, round_no)
+        decision = _parse(item, question, text, offer, round_no)
         if decision is not None:
             return decision
         if attempt == 0:
@@ -320,7 +395,7 @@ def _option_line(o: Option) -> str:
 
 
 def _parse(
-    item: Item, question: str, text: str, allow_override: bool, round_no: int
+    item: Item, question: str, text: str, offer: str | None, round_no: int
 ) -> ej.Decision | None:
     """Ответ → решение; не разобран (или «не согласен» без причины) — `None`."""
     finding, text = item.finding, text.strip()
@@ -343,8 +418,8 @@ def _parse(
             o = item.options[no - 1]
             allows = {"removes": o.removes, "downgrades": o.downgrades}
             return made(o.label, "option", allows)
-        if allow_override and no == len(item.options) + 1:
-            return made(OVERRIDE_OFFER, "override", {})
+        if offer is not None and no == len(item.options) + 1:
+            return made(offer, "override", {})
         return None
     for prefix, kind in ((OWN_PREFIX, "own"), (DISAGREE_PREFIX, "disagree")):
         if _starts(text, prefix):
@@ -373,11 +448,12 @@ def _rewrite(
     revise: Revise,
     round_no: int,
     calls: PaidCalls,
+    skipped: set[str],
 ) -> Outcome:
-    """Переписать каждый файл с неснятыми находками; сбой, ослабление или
+    """Переписать каждый файл с неснятыми находками (`skipped` — digest'ы
+    групп, принятых вопреки последним решением); сбой, ослабление или
     прерывание — вернуть тексты всех файлов круга."""
     run_dir = rs.run_dir(state.run_id)
-    skipped = ej.overridden(run_dir, state.wave)
     todo = [f for f in findings if f.digest not in skipped]
     journal = ej.load(run_dir, state.wave)
     done: list[str] = []

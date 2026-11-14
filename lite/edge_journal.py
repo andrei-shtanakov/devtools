@@ -72,9 +72,14 @@ def _finding(node: str, edge: str, raw: dict, subject: list[str] | None) -> Find
     )
 
 
+def level_records(run_dir: Path, wave: int) -> dict[tuple[str, str], dict]:
+    """Записи рёбер волны — те же, что сверяет раннер (`override.accepted`)."""
+    return coordinator.load_level_records(run_dir, wave)
+
+
 def blocking_findings(run_dir: Path, wave: int) -> list[Finding]:
     """Блокирующие находки (`blocker`/`major`) рёбер волны."""
-    records = coordinator.load_level_records(run_dir, wave)
+    records = level_records(run_dir, wave)
     return [
         f
         for (node, edge), record in records.items()
@@ -123,3 +128,11 @@ def load(run_dir: Path, wave: int) -> list[Decision]:
 def overridden(run_dir: Path, wave: int) -> set[str]:
     """Digest'ы находок с решением `override` (делегирует governance)."""
     return override.overridden(run_dir, wave)
+
+
+def overridden_now(decisions: list[Decision]) -> set[str]:
+    """Digest'ы, чьё ПОСЛЕДНЕЕ решение — принятие вопреки: группа правила
+    (одинаковый digest) снимается с переписывания, только пока человек не
+    выбрал по ней иное."""
+    latest = {d.digest: d.kind for d in decisions if d.digest}
+    return {digest for digest, kind in latest.items() if kind == "override"}

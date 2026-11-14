@@ -124,3 +124,23 @@ def test_entries_without_sha256_do_not_share_acceptance() -> None:
         NODE, EDGE, FINDING, override.subject_shas(first["subject"])
     )
     assert override.accepted({(NODE, EDGE): second}, {digest}) is None
+
+
+@pytest.mark.parametrize(
+    ("criteria", "verdict", "expected"),
+    [
+        ([{"id": "R1", "status": "fail", "reason": "x"}], "FAIL", True),
+        ([{"id": "R3", "status": "insufficient", "reason": ""}], "FAIL", False),
+        ([{"id": "R1", "status": "fail", "reason": ""}], "FAIL", False),
+        ([], "ERROR", False),
+    ],
+)
+def test_overridable_matches_accepted(
+    criteria: list[dict], verdict: str, expected: bool
+) -> None:
+    """Один предикат: `accepted` не None ровно когда `overridable` и все
+    digest'ы приняты (ревью #762, находка B)."""
+    record = {**_record(), "verdict": verdict, "criteria": criteria}
+    records = {(NODE, EDGE): record}
+    assert override.overridable(records) is expected
+    assert (override.accepted(records, {_digest()}) is not None) is expected

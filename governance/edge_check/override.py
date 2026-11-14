@@ -96,30 +96,42 @@ def overridden(run_dir: Path, wave: int) -> set[str]:
     return digests
 
 
+def overridable(records: dict[tuple[str, str], dict]) -> bool:
+    """Можно ли принять уровень вопреки замечаниям — независимо от журнала.
+
+    Только FAIL, объяснённый блокирующими находками: есть не-PASS запись;
+    у каждой — вердикт `FAIL`, блокирующие находки, каждый не-`pass` пункт
+    правил покрыт находкой с причиной (`insufficient`, `fail` без причины —
+    нет) и хэши subject (`bound_subject`). Один предикат на `dfl` (что
+    предлагать) и раннер/публикацию (`accepted`).
+    """
+    failing = [r for r in records.values() if r.get("verdict") != "PASS"]
+    return bool(failing) and all(
+        r.get("verdict") == "FAIL"
+        and bool(_blocking(r))
+        and _explained(r)
+        and bound_subject(r.get("subject")) is not None
+        for r in failing
+    )
+
+
 def accepted(
     records: dict[tuple[str, str], dict], digests: set[str]
 ) -> set[Key] | None:
     """Ключи блокирующих находок уровня, если человек принял их ВСЕ (digest
     каждой — в `digests`, см. `finding_digest`); иначе `None`.
 
-    Принимается вопреки только FAIL, объяснённый блокирующими находками:
-    ребро `ERROR` или с иным вердиктом, FAIL без блокирующих находок, пункт
-    правил не `pass`, не покрытый находкой (`insufficient`, `fail` без
-    причины), запись без хэшей subject (`bound_subject`) и непринятая
-    находка — `None` (прежний стоп).
+    Уровень обязан быть `overridable`; иначе, как и при непринятой
+    находке, — `None` (прежний стоп).
     """
+    if not overridable(records):
+        return None
     found: set[Key] = set()
     for (node, edge), record in records.items():
-        verdict = record.get("verdict")
-        if verdict == "PASS":
+        if record.get("verdict") == "PASS":
             continue
-        blocking = _blocking(record)
-        if verdict != "FAIL" or not blocking or not _explained(record):
-            return None
-        subject = bound_subject(record.get("subject"))
-        if subject is None:
-            return None
-        for f in blocking:
+        subject = bound_subject(record.get("subject")) or []
+        for f in _blocking(record):
             if finding_digest(node, edge, f, subject) not in digests:
                 return None
             found.add((node, edge, str(f.get("rule_id"))))

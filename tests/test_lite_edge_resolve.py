@@ -76,12 +76,15 @@ class World:
         node: str = NODE,
         edge: str = EDGE,
         subject: list[dict] | None = SUBJECT,
+        criteria: list[dict] | None = None,
     ) -> None:
         """Запись ребра на диске и те же находки в файле стопа раннера."""
         out = self.run_dir / "edge-check" / f"w{self.state.wave}"
         out.mkdir(parents=True, exist_ok=True)
         record = {"node": node, "edge": edge, "verdict": "FAIL",
                   "findings": list(findings), "subject": subject}  # fmt: skip
+        if criteria is not None:
+            record["criteria"] = criteria
         (out / f"{node}--{edge}.json").write_text(
             json.dumps(record, ensure_ascii=False), encoding="utf-8"
         )
@@ -754,3 +757,121 @@ def test_removal_spent_after_text_changed(world: World) -> None:
     outcome = world.resolve([], world.agent(FIX), world.revise(WITHOUT_FR02))
     assert outcome is er.Outcome.STOPPED
     assert world.node.read_text(encoding="utf-8") == BEFORE
+
+
+# --- принятие вопреки: группа правила целиком (ревью #762, находка A) ---
+
+
+def _goal(goal: str, rule: str = "R1") -> dict:
+    """Находка правила `rule` про цель `goal` (тот же класс и текст узла)."""
+    return {**_finding(rule), "statement": f"цель {goal} не покрыта"}
+
+
+def _group_items(kinds: list[str]) -> list[dict]:
+    """Пункты сортировки: `decision` — вопрос с двумя вариантами, `fix`."""
+    return [
+        {**_decision_item()[0], "finding": no}
+        if kind == "decision"
+        else {"finding": no, "kind": "fix", "question": "", "options": []}
+        for no, kind in enumerate(kinds, 1)
+    ]
+
+
+def test_same_rule_findings_one_question_listing_all(world: World) -> None:
+    world.findings(_goal("G-03"), _goal("G-05"))
+    items = _group_items(["decision", "fix"])
+    outcome = world.resolve(
+        ["3", ""], world.agent(items), world.revise(), er.MAX_ROUNDS
+    )
+    out = world.out()
+    assert er.FIXING.format(n=0, m=1) in out
+    assert "цель G-03 не покрыта" in out and "цель G-05 не покрыта" in out
+    assert er.override_offer(2, "R1") in out
+    assert outcome is er.Outcome.OVERRIDDEN and world.revisions == []
+    [d] = ej.load(world.run_dir, 2)
+    assert d.kind == "override"
+
+
+def test_same_rule_option_keeps_both_in_rewrite(world: World) -> None:
+    world.findings(_goal("G-03"), _goal("G-05"))
+    items = _group_items(["decision", "fix"])
+    outcome = world.resolve(
+        ["1", ""], world.agent(items), world.revise(), er.MAX_ROUNDS
+    )
+    assert outcome is er.Outcome.REVISED
+    findings = world.revisions[0]["findings"]
+    assert "G-03" in findings and "G-05" in findings
+
+
+def test_mixed_rules_only_overridden_group_dropped(world: World) -> None:
+    world.findings(_goal("G-03"), _goal("G-05"), _goal("G-07", rule="R2"))
+    items = _group_items(["decision", "decision", "decision"])
+    outcome = world.resolve(
+        ["3", "", "1", ""], world.agent(items), world.revise(), er.MAX_ROUNDS
+    )
+    assert outcome is er.Outcome.REVISED
+    assert er.FIXING.format(n=0, m=2) in world.out()
+    findings = world.revisions[0]["findings"]
+    assert "G-07" in findings
+    assert "G-03" not in findings and "G-05" not in findings
+
+
+def test_latest_option_after_override_keeps_group(world: World) -> None:
+    """Журнал: принятие, затем выбор варианта по той же группе — действует
+    последнее решение, переписывание получает всю группу."""
+    world.findings(_goal("G-03"), _goal("G-05"))
+    ej.append(world.run_dir, 2, _override(DIGEST))
+    later = ej.Decision(
+        (NODE, EDGE, "R1"), "Цель?", "покрыть", "option", 2, digest=DIGEST
+    )
+    ej.append(world.run_dir, 2, later)
+    outcome = world.resolve(
+        [], world.agent(_group_items(["fix", "fix"])), world.revise()
+    )
+    assert outcome is er.Outcome.REVISED
+    findings = world.revisions[0]["findings"]
+    assert "G-03" in findings and "G-05" in findings
+
+
+# --- принятие вопреки: общий предикат с раннером (ревью #762, находка B) ---
+
+INSUFFICIENT = [
+    {"id": "R1", "status": "fail", "reason": "цель не покрыта"},
+    {"id": "R3", "status": "insufficient", "reason": ""},
+]
+EXPLAINED = [{"id": "R1", "status": "fail", "reason": "цель не покрыта"}]
+
+
+def test_unrated_criterion_no_override_offered(world: World) -> None:
+    world.findings(_finding(), criteria=INSUFFICIENT)
+    outcome = world.resolve(
+        ["3", "", "3", ""],
+        world.agent(_decision_item()),
+        world.revise(),
+        er.MAX_ROUNDS,
+    )
+    out = world.out()
+    assert er.OVERRIDE_OFFER not in out
+    assert out.count(er.NO_OVERRIDE) == 1
+    assert outcome is er.Outcome.STOPPED
+    assert ej.overridden(world.run_dir, 2) == set()
+
+
+def test_unrated_criterion_recorded_override_not_overridden(world: World) -> None:
+    """Принятие в журнале, но раннер его не примет (`insufficient`): не
+    OVERRIDDEN и не пустое «переписывание» — остановка с причиной."""
+    world.findings(_finding(), criteria=INSUFFICIENT)
+    ej.append(world.run_dir, 2, _override(DIGEST))
+    outcome = world.resolve([], world.agent(FIX), world.revise())
+    assert outcome is er.Outcome.STOPPED
+    assert world.out().count(er.NO_OVERRIDE) == 1
+    assert world.revisions == []
+
+
+def test_explained_fail_override_offered(world: World) -> None:
+    world.findings(_finding(), criteria=EXPLAINED)
+    outcome = world.resolve(
+        ["3", ""], world.agent(_decision_item()), world.revise(), er.MAX_ROUNDS
+    )
+    assert er.OVERRIDE_OFFER in world.out()
+    assert outcome is er.Outcome.OVERRIDDEN
