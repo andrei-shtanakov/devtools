@@ -7673,7 +7673,7 @@ def _fake_wave_adapters(monkeypatch, ops: FakeOps, *, code: int = 0) -> list[str
         al.record_head_sha(state, key, "c0ffee" * 6 + "abcd")
         return runner.an.ApprovalOutcome("ok", request=key)
 
-    def publish(state, ops_, key, records, *, legacy_bundle=None):
+    def publish(state, ops_, key, records, *, legacy_bundle=None, overridden=None):
         journal.append(f"publish:{key}:{sorted(records)}")
         ops.calls.append(("publish_wave", key))
         if code == 0:
@@ -12036,7 +12036,11 @@ def test_test_mode_edge_pass_on_other_head_does_not_merge(
     monkeypatch.setattr(
         runner.edge_publish,
         "edge_verdict",
-        lambda head, records: {"head": "b" * 40, "verdict": "PASS", "inputs": {}},
+        lambda head, records, overridden=None: {
+            "head": "b" * 40,
+            "verdict": "PASS",
+            "inputs": {},
+        },
     )
     calls = _fake_approve_node_waves(monkeypatch, ops)  # обход — до утверждения
     state = locked_runner.start(**_waves_kwargs(tmp_path, "r-3ch-edgehead", ops))
@@ -12308,3 +12312,110 @@ def test_quiet_hints_resets_after_exit() -> None:
     with runner.quiet_interview_hints():
         assert runner._QUIET_HINTS.get() is True
     assert runner._QUIET_HINTS.get() is False
+
+
+# --- Принятие узла вопреки замечаниям edge-check (OVERRIDE, только test) ------
+
+_OVR_KEYS = [
+    ("charter", "charter-vs-customer-brief", "R1"),
+    ("charter", "charter-vs-engineer-brief", "R1"),
+]
+
+
+def _override_journal(run_id: str, keys: list[tuple[str, str, str]]) -> None:
+    """Решения `override` человека в журнале `dfl` (волна 1)."""
+    path = rs.run_dir(run_id) / "edge-decisions.jsonl"
+    with path.open("a", encoding="utf-8") as fh:
+        for k in keys:
+            row = {"wave": 1, "kind": "override", "key": list(k)}
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _fail_records(monkeypatch) -> None:
+    """Записи уровня на диске — те же FAIL, что вернул стенд edge-check."""
+    records = {
+        (node, edge): {
+            "verdict": "FAIL",
+            "subject": [],
+            "bases": [],
+            "findings": [{"rule_id": rule, "class": "major", "statement": "x"}],
+        }
+        for node, edge, rule in _OVR_KEYS
+    }
+    monkeypatch.setattr(
+        runner.edge_coordinator, "load_level_records", lambda run_dir, wave: records
+    )
+
+
+def _override_run(
+    tmp_path: Path, monkeypatch, run_id: str, *, test: bool, **over: Any
+) -> tuple[Any, FakeOps, list[dict]]:
+    """Волна 1 встала на FAIL edge-check; журнал override; resume."""
+    if test:
+        _set_cfg_mode("test")
+    ops = _test_mode_ops(edge_results={"charter": "FAIL"}, **over)
+    _fake_wave_adapters(monkeypatch, ops)
+    _fail_records(monkeypatch)
+    published: list[dict] = []
+    fake_publish = runner.edge_publish.publish_wave
+
+    def publish(state, ops_, key, records, *, legacy_bundle=None, overridden=None):
+        published.append({"overridden": overridden})
+        return fake_publish(state, ops_, key, records, legacy_bundle=legacy_bundle)
+
+    monkeypatch.setattr(runner.edge_publish, "publish_wave", publish)
+    state = locked_runner.start(**_waves_kwargs(tmp_path, run_id, ops))
+    assert state.status == "stopped_review" and state.mode == (
+        "test" if test else "strict"
+    )
+    return state, ops, published
+
+
+def test_edge_fail_all_blocking_overridden_completes_in_test(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    _, ops, published = _override_run(
+        tmp_path, monkeypatch, "r-ovr-test", test=True, human_merge_code=3
+    )
+    _override_journal("r-ovr-test", _OVR_KEYS)
+    state = locked_runner.resume("r-ovr-test", ops)
+    edge = state.ops["edge-1"]
+    assert edge["status"] == "completed" and edge["verdict"] == "OVERRIDE"
+    assert edge["overridden"] == [list(k) for k in sorted(_OVR_KEYS)]
+    assert state.status != "stopped_review"
+    assert not (rs.run_dir("r-ovr-test") / "edge-findings.txt").exists()
+    assert published == [{"overridden": set(_OVR_KEYS)}]
+    assert state.ops["candidate-1"]["edge_verdict"]["verdict"] == "OVERRIDE"
+
+
+def test_override_ignored_in_strict(tmp_path: Path, runs_root, monkeypatch) -> None:
+    _, ops, published = _override_run(tmp_path, monkeypatch, "r-ovr-strict", test=False)
+    _override_journal("r-ovr-strict", _OVR_KEYS)
+    state = locked_runner.resume("r-ovr-strict", ops)
+    assert state.status == "stopped_review"
+    assert state.ops["edge-1"]["status"] == "started"
+    assert "candidate-1" not in state.ops and published == []
+    findings = (rs.run_dir("r-ovr-strict") / "edge-findings.txt").read_text()
+    assert "EDGE-CHECK(charter/" in findings
+
+
+def test_override_partial_still_fails(tmp_path: Path, runs_root, monkeypatch) -> None:
+    _, ops, published = _override_run(tmp_path, monkeypatch, "r-ovr-part", test=True)
+    _override_journal("r-ovr-part", _OVR_KEYS[:1])
+    state = locked_runner.resume("r-ovr-part", ops)
+    assert state.status == "stopped_review"
+    assert state.ops["edge-1"]["status"] == "started"
+    assert "candidate-1" not in state.ops and published == []
+
+
+def test_auto_merge_accepts_override_in_test(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    _, ops, _published = _override_run(tmp_path, monkeypatch, "r-ovr-merge", test=True)
+    calls = _fake_approve_node_waves(monkeypatch, ops)
+    _override_journal("r-ovr-merge", _OVR_KEYS)
+    state = locked_runner.resume("r-ovr-merge", ops)
+    merges = [c for c in ops.calls if c[0] == "human_merge"]
+    assert merges and merges[0] == ("human_merge", 777, WAVE_HEAD)
+    assert calls and calls[0] == (1, "charter")
+    assert state.ops["finalize-1"]["status"] == "completed"

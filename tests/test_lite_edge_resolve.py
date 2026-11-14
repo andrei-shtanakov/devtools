@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from governance import run_state as rs
+from governance import runner
 from governance.author_launch import AuthorCall, LaunchOutcome
 from lite import edge_journal as ej
 from lite import edge_resolve as er
@@ -561,3 +562,16 @@ def test_interrupt_restores_round_files(world: World) -> None:
     with pytest.raises(KeyboardInterrupt):
         world.resolve([], world.agent(FIX), world.revise(interrupt=True))
     assert world.node.read_text(encoding="utf-8") == BEFORE
+
+
+def test_unrated_stop_line_not_applicable(world: World) -> None:
+    """Строка раннера «FAIL без находок» в стопе — разбирать нечего, даже
+    рядом с записью FAIL прошлой попытки или с блокирующей находкой."""
+    world.findings(_finding())
+    unrated = f"error EDGE-CHECK(design/design-vs-x): {runner.EDGE_UNRATED}"
+    agent = world.agent(FIX)
+    world.stop_file(unrated)  # только строка раннера, запись — прошлая
+    assert world.resolve([], agent, world.revise()) is er.Outcome.NOT_APPLICABLE
+    world.stop_file("\n".join([*world.stop_lines, unrated]))
+    assert world.resolve([], agent, world.revise()) is er.Outcome.NOT_APPLICABLE
+    assert world.prompts == [] and world.revisions == []

@@ -58,6 +58,7 @@ from governance.act_request import ACT_REVIEW_V1
 from governance.act_time import OPS_FAILURES
 from governance.author_launch import AuthorCall, LaunchOutcome
 from governance.edge_check import coordinator as edge_coordinator
+from governance.edge_check import override as edge_override
 from governance.edge_check import publish as edge_publish
 from governance.edge_check.rules import EdgeCheckError
 from governance.facts import Outcome
@@ -1266,10 +1267,17 @@ def _stop_on_refusal(
         )
 
 
+def _override_verdict(state: RunState, verdict: dict) -> bool:
+    """`test`: edge-вердикт `OVERRIDE` — уровень, принятый человеком вопреки
+    замечаниям (спека edge-resolution §6 п.1); в `strict` не принимается."""
+    return state.mode == "test" and verdict.get("verdict") == edge_publish.OVERRIDE
+
+
 def _auto_merge_candidate(state: RunState, ops: Ops, request: str, pr: int) -> bool:
     """`test` (план 3c-2): раннер мержит candidate сам; `True` — вмержен.
 
-    Мерж — только при записанном edge-вердикте `PASS` на голове candidate
+    Мерж — только при записанном edge-вердикте `PASS` (в `test` и
+    `OVERRIDE` — принятие человеком вопреки замечаниям) на голове candidate
     (`edge_verdict` операции candidate == `head_sha` заявки), через
     `human-merge.sh` с пином этой головы. Код ≠ 0 (голова уехала, гвард) —
     `stopped_merge_refused` с кодом и командой повтора; finalize не
@@ -1280,7 +1288,7 @@ def _auto_merge_candidate(state: RunState, ops: Ops, request: str, pr: int) -> b
     verdict = state.ops.get(wave_key(state, "candidate"), {}).get("edge_verdict")
     if (
         not isinstance(verdict, dict)
-        or verdict.get("verdict") != "PASS"
+        or (verdict.get("verdict") != "PASS" and not _override_verdict(state, verdict))
         or not head
         or verdict.get("head") != head
     ):
@@ -4310,10 +4318,33 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
 EDGE_UNRATED = "FAIL по статусу пунктов без находок"
 
 
+def _overridden_level(
+    state: RunState, verdict: str, records: dict[tuple[str, str], dict]
+) -> set[edge_override.Key] | None:
+    """`test`: FAIL уровня, все блокирующие находки которого человек принял
+    вопреки замечаниям (журнал `dfl`, спека edge-resolution §6 п.1); ключи
+    принятых находок, иначе `None`. В `strict` — всегда `None`."""
+    if state.mode != "test" or verdict != "FAIL":
+        return None
+    keys = edge_override.overridden(run_dir(state.run_id), state.wave)
+    return edge_override.accepted(records, keys)
+
+
+def _edge_overridden(state: RunState) -> set[edge_override.Key] | None:
+    """Ключи, принятые шагом edge волны (`OVERRIDE`); только `test`."""
+    op = state.ops.get(wave_key(state, "edge"), {})
+    if state.mode != "test" or op.get("verdict") != edge_publish.OVERRIDE:
+        return None
+    return {(str(n), str(e), str(r)) for n, e, r in op.get("overridden") or []}
+
+
 def _step_edge(state: RunState, ops: Ops) -> bool:
     """Edge-check волны (S6, D4): обязателен, обхода нет; legacy — no-op.
 
-    `PASS` (включая `N/A` по applicability) — op завершён; `FAIL` —
+    `PASS` (включая `N/A` по applicability) — op завершён; в `test` FAIL,
+    все блокирующие находки которого человек принял вопреки замечаниям
+    (`edge-decisions.jsonl`), — op завершён с вердиктом `OVERRIDE` без
+    `edge-findings.txt`; иначе `FAIL` —
     `stopped_review` с находками в `edge-findings.txt` (файл снимается на
     входе — класс #338); `ERROR`/невозможность (нет ревьюера, неполный
     вход, набора правил нет) — `stopped_review` с `error_code`. Результаты
@@ -4341,12 +4372,18 @@ def _step_edge(state: RunState, ops: Ops) -> bool:
         return False
     records = getattr(result, "records", {})
     verdict = getattr(result, "verdict", "ERROR")
+    edges = {f"{n}--{e}": r["verdict"] for (n, e), r in records.items()}
     if verdict == "PASS":
+        op_complete(state, key, verdict=verdict, edges=edges)
+        return True
+    accepted = _overridden_level(state, verdict, records)
+    if accepted is not None:
         op_complete(
             state,
             key,
-            verdict=verdict,
-            edges={f"{n}--{e}": r["verdict"] for (n, e), r in records.items()},
+            verdict=edge_publish.OVERRIDE,
+            edges=edges,
+            overridden=[list(k) for k in sorted(accepted)],
         )
         return True
     lines: list[str] = []
@@ -4445,8 +4482,11 @@ def _step_candidate(state: RunState, ops: Ops) -> bool:
         op_start(state, key, request=outcome.request, source_sha=source_sha)
     request = state.ops[key]["request"]
     records = edge_coordinator.load_level_records(run_dir(state.run_id), state.wave)
+    overridden = _edge_overridden(state)
     try:
-        code = edge_publish.publish_wave(state, ops, request, records)
+        code = edge_publish.publish_wave(
+            state, ops, request, records, overridden=overridden
+        )
     except RuntimeError as exc:
         _stop_with_comment(
             state,
@@ -4482,7 +4522,9 @@ def _step_candidate(state: RunState, ops: Ops) -> bool:
         candidate_pr=pr,
         source_sha=state.ops[key].get("source_sha"),
         reapprove=bool(state.ops[key].get("reapprove", False)),
-        edge_verdict=edge_publish.edge_verdict(state.ops[request]["head_sha"], records),
+        edge_verdict=edge_publish.edge_verdict(
+            state.ops[request]["head_sha"], records, overridden
+        ),
     )
     head = (
         f"Волна {state.wave}/{bundle_dag.wave_count(_wave_dag())} прогона "

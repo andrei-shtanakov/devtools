@@ -21,6 +21,7 @@ from pathlib import Path
 
 from governance import run_state as rs
 from governance import runner
+from governance.edge_check import override
 
 EDGE = "stopped_review"
 GATE = "stopped_gate"
@@ -32,10 +33,10 @@ FINDING_RE = re.compile(
     re.DOTALL,
 )
 FAILURE_RE = re.compile(r"^error EDGE-CHECK\([^)]*\): (.*)$", re.DOTALL)
-# Классы, валящие проверку: `severity.blocking` правил ребра
-# (`contracts/edge-check/v1/rules/*.yaml`, у всех рёбер одинаков — сверяет
-# тест); остальные — рекомендации, итог не валят (`edge_check.check.decide`).
-BLOCKING = frozenset({"blocker", "major"})
+# Классы, валящие проверку: `severity.blocking` правил ребра — один на
+# раннер и `dfl` (`governance.edge_check.override.BLOCKING`, сверяет тест);
+# остальные — рекомендации, итог не валят (`edge_check.check.decide`).
+BLOCKING = override.BLOCKING
 ADVISORY_HEAD = "  рекомендации (проверку не валят, можно оставить):"
 # FAIL без блокирующих находок: пункт `insufficient`, `fail` без причины,
 # отказ ребра (`edge_check.check.decide`) — по находкам на экране не чинится

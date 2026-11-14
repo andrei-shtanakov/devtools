@@ -139,10 +139,10 @@ def applicable_findings(state: rs.RunState) -> list[ej.Finding] | None:
     """Блокирующие находки волны, если их можно разобрать; иначе `None`.
 
     Нечего разбирать: прогон не в `stopped_review`; в файле стопа нет
-    блокирующих находок или есть отказ прибора (`insufficient`, ошибка
-    ребра); записи не читаются; у находки нет файла или файл — не узел её
-    вида (§9 п.4). Из записей рёбер берутся только находки, чей ключ назван
-    в файле стопа: остальное — след прошлой попытки.
+    блокирующих находок, есть отказ прибора (ошибка ребра) или FAIL ребра
+    без находок (`insufficient`, `runner.EDGE_UNRATED`); записи не
+    читаются; у находки нет файла или файл — не узел её вида (§9 п.4).
+    Из записей рёбер берутся только находки, чей ключ назван в файле стопа: остальное — след прошлой попытки.
     """
     keys = stop_keys(state)
     if not keys:
@@ -164,7 +164,7 @@ def stop_keys(state: rs.RunState) -> set[Key]:
     if state.status != REVIEW_STATUS or not state.wave:
         return set()
     stop = sf.load(state.run_id, state.status)
-    if stop is None or stop.failures:
+    if stop is None or stop.failures or stop.unrated:
         return set()
     blocking, _advisory = sf.split(stop.findings)
     keys: set[Key] = set()

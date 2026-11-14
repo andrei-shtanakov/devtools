@@ -33,6 +33,7 @@ from governance import act_surface, bundle_dag
 from governance import approval_ledger as al
 from governance import approve_node as an
 from governance.act_request import ACT_REVIEW_V1
+from governance.edge_check import override as edge_override
 from governance.ops import Ops, review_login
 from governance.run_state import RunState
 
@@ -98,14 +99,30 @@ def surface_violations(
     )
 
 
-def level_verdict(records: dict[tuple[str, str], dict]) -> str:
+#: Вердикт уровня, принятого человеком вопреки замечаниям (только `test`).
+OVERRIDE = "OVERRIDE"
+OVERRIDE_TEXT = "принято человеком вопреки замечаниям"
+Overridden = set[edge_override.Key] | None
+
+
+def level_verdict(
+    records: dict[tuple[str, str], dict], overridden: Overridden = None
+) -> str:
+    """Вердикт уровня; `OVERRIDE` — FAIL, все блокирующие ключи которого
+    в `overridden` (`edge_override.accepted`)."""
     verdicts = {r.get("verdict") for r in records.values()}
     if "ERROR" in verdicts or not records:
         return "ERROR"
-    return "FAIL" if "FAIL" in verdicts else "PASS"
+    if "FAIL" not in verdicts:
+        return "PASS"
+    if overridden and edge_override.accepted(records, overridden) is not None:
+        return OVERRIDE
+    return "FAIL"
 
 
-def edge_verdict(head: str, records: dict[tuple[str, str], dict]) -> dict:
+def edge_verdict(
+    head: str, records: dict[tuple[str, str], dict], overridden: Overridden = None
+) -> dict:
     """Запись вердикта edge-check для операции candidate (план 3c-2).
 
     Голова candidate-PR, вердикт уровня и хэши входа по ребру (subject и
@@ -114,7 +131,7 @@ def edge_verdict(head: str, records: dict[tuple[str, str], dict]) -> dict:
     """
     return {
         "head": head,
-        "verdict": level_verdict(records),
+        "verdict": level_verdict(records, overridden),
         "inputs": {
             f"{node}--{edge}": sorted(
                 str(f.get("sha256", ""))
@@ -130,14 +147,24 @@ def checklist_body(
     head: str,
     records: dict[tuple[str, str], dict],
     act: str | None = None,
+    overridden: Overridden = None,
 ) -> str:
+    verdict = level_verdict(records, overridden)
     lines = [
         f"<!-- {EDGE_MARKER} head={head} -->",
-        (
-            f"Edge-check волны W{state.wave} прогона `{state.run_id}`: "
-            f"{level_verdict(records)}."
-        ),
+        f"Edge-check волны W{state.wave} прогона `{state.run_id}`: {verdict}.",
         "",
+    ]
+    if verdict == OVERRIDE and overridden:
+        keys = edge_override.accepted(records, overridden) or set()
+        lines += [
+            f"Узел {OVERRIDE_TEXT} (режим test, журнал "
+            f"`{edge_override.JOURNAL}` прогона): "
+            + ", ".join(f"`{n}/{e}/{r}`" for n, e, r in sorted(keys))
+            + ".",
+            "",
+        ]
+    lines += [
         "| узел | ребро | вердикт | check_identity | subject sha256 |",
         "|---|---|---|---|---|",
     ]
@@ -192,8 +219,14 @@ def publish_wave(
     records: dict[tuple[str, str], dict],
     *,
     legacy_bundle: int | None = None,
+    overridden: Overridden = None,
 ) -> int:
-    """Опубликовать candidate волны с evidence и одобряющим ревью; → код."""
+    """Опубликовать candidate волны с evidence и одобряющим ревью; → код.
+
+    `overridden` — ключи, принятые человеком вопреки замечаниям (раннер
+    передаёт их только при вердикте шага edge `OVERRIDE`); действуют лишь
+    в `test`, в `strict` FAIL остаётся FAIL.
+    """
     dag = bundle_dag.dag_for(legacy_bundle)
     op = state.ops[key]
     head = op.get("head_sha")
@@ -202,7 +235,9 @@ def publish_wave(
             f"заявка {key} без head_sha — ветка не приведена к снимку; "
             "сперва propose_from_source"
         )
-    if level_verdict(records) != "PASS":
+    if state.mode != "test":
+        overridden = None
+    if level_verdict(records, overridden) not in ("PASS", OVERRIDE):
         return CODE_CHANGES
     bad = surface_violations(state, ops, dag, op, key)
     if bad:
@@ -265,7 +300,7 @@ def publish_wave(
     latest = ops.latest_review_body(state.repo_slug, pr) or ""
     if marker_line in latest and effective.get(review_login()) == published:
         return CODE_OK
-    body = checklist_body(state, head, records, op.get("act"))
+    body = checklist_body(state, head, records, op.get("act"), overridden)
     if not ops.publish_review(
         state.repo_slug, pr, event=event, body=body, marker=EDGE_MARKER
     ):
