@@ -56,6 +56,7 @@ class World:
     prompts: list[str] = field(default_factory=list)
     revisions: list[dict[str, Any]] = field(default_factory=list)
     said: list[tuple[str, int]] = field(default_factory=list)
+    stop_lines: list[str] = field(default_factory=list)
 
     @property
     def run_dir(self) -> Path:
@@ -66,6 +67,7 @@ class World:
         return self.tmp / "target" / BUNDLE / FILE
 
     def findings(self, *findings: dict, node: str = NODE, edge: str = EDGE) -> None:
+        """Запись ребра на диске и те же находки в файле стопа раннера."""
         out = self.run_dir / "edge-check" / f"w{self.state.wave}"
         out.mkdir(parents=True, exist_ok=True)
         record = {"node": node, "edge": edge, "verdict": "FAIL",
@@ -73,6 +75,15 @@ class World:
         (out / f"{node}--{edge}.json").write_text(
             json.dumps(record, ensure_ascii=False), encoding="utf-8"
         )
+        self.stop_lines += [
+            f"error EDGE-CHECK({node}/{edge}): {f['rule_id']} {f['class']}: "
+            f"{f['statement']} @ {f['location'].get('path')}:[3, 5]"
+            for f in findings
+        ]
+        self.stop_file("\n".join(self.stop_lines))
+
+    def stop_file(self, text: str) -> None:
+        (self.run_dir / "edge-findings.txt").write_text(text + "\n", "utf-8")
 
     def agent(self, items: list[dict]) -> Any:
         def call(prompt: str) -> str:
@@ -81,7 +92,16 @@ class World:
 
         return call
 
-    def revise(self, new_text: str = FIXED, code: int = 0) -> Any:
+    def revise(
+        self,
+        new_text: str = FIXED,
+        code: int = 0,
+        per_file: dict[str, tuple[str, int]] | None = None,
+        interrupt: bool = False,
+    ) -> Any:
+        """Подмена `RealOps.revise`: пишет файл узла; `per_file` — имя файла →
+        (текст, код); `interrupt` — Ctrl-C после записи мусора."""
+
         def call(
             author: AuthorCall,
             kind: str,
@@ -97,18 +117,24 @@ class World:
                     "current": current,
                     "findings": findings,
                     "decisions": decisions,
-                }  # fmt: skip
+                }
             )
-            if code == 0:
-                self.node.write_text(new_text, encoding="utf-8")
-            else:
-                self.node.write_text("мусор", encoding="utf-8")
-            return LaunchOutcome(code, "граница отказала" if code else "")
+            text, rc = (per_file or {}).get(author.filename, (new_text, code))
+            path = self.tmp / "target" / BUNDLE / author.filename
+            path.write_text(text if rc == 0 else "мусор", encoding="utf-8")
+            if interrupt:
+                raise KeyboardInterrupt
+            return LaunchOutcome(rc, "граница отказала" if rc else "")
 
         return call
 
     def resolve(
-        self, answers: list[str | None], agent: Any, revise: Any, round_no: int = 1
+        self,
+        answers: list[str | None],
+        agent: Any,
+        revise: Any,
+        round_no: int = 1,
+        calls: er.PaidCalls | None = None,
     ) -> er.Outcome:
         feed = iter(answers)
         return er.resolve(
@@ -117,6 +143,7 @@ class World:
             agent=agent,
             revise=revise,
             round_no=round_no,
+            calls=calls,
         )
 
     def out(self) -> str:
@@ -346,3 +373,191 @@ def test_instrument_failure_not_applicable(world: World) -> None:
     world.findings(_finding())
     assert world.resolve([], agent, world.revise()) is er.Outcome.NOT_APPLICABLE
     assert world.prompts == []
+
+
+# --- круг исправлений 1 ---
+
+
+def test_stale_records_after_instrument_failure(world: World) -> None:
+    """Запись FAIL прошлой попытки на диске, а стоп — отказ прибора."""
+    world.findings(_finding())
+    world.stop_file("error EDGE-CHECK(no_edges): у волны нет рёбер")
+    agent = world.agent(FIX)
+    assert world.resolve([], agent, world.revise()) is er.Outcome.NOT_APPLICABLE
+    assert world.prompts == [] and world.revisions == []
+
+
+def test_failure_next_to_findings_not_applicable(world: World) -> None:
+    world.findings(_finding())
+    world.stop_lines.append("error EDGE-CHECK(design/x): отказ ребра")
+    world.stop_file("\n".join(world.stop_lines))
+    agent = world.agent(FIX)
+    assert world.resolve([], agent, world.revise()) is er.Outcome.NOT_APPLICABLE
+
+
+def test_record_findings_filtered_by_stop_file(world: World) -> None:
+    world.findings(_finding("R1"), _finding("R2"))
+    world.stop_lines = world.stop_lines[:1]  # в стопе только R1
+    world.stop_file("\n".join(world.stop_lines))
+    assert world.resolve([], world.agent(FIX), world.revise()) is er.Outcome.REVISED
+    findings = world.revisions[0]["findings"]
+    assert "R1: цель" in findings and "R2" not in findings
+
+
+def test_paid_calls_counted(world: World) -> None:
+    world.findings(_finding())
+    calls = er.PaidCalls()
+    world.resolve([], world.agent(FIX), world.revise(code=3), calls=calls)
+    # файл возвращён — вход тот же, сортировка из кэша и не платится
+    world.resolve([], world.agent(FIX), world.revise(code=3), calls=calls)
+    assert (calls.triage, calls.revise, calls.check) == (1, 2, 0)
+    assert calls.line() == "платных вызовов: сортировка 1, переписывание 2, проверка 0"
+
+
+def test_option_effects_shown_and_bounded(world: World) -> None:
+    world.findings(_finding())
+    items = _decision_item(removes=["FR-02", "FR-01"])
+    items[0]["options"][1]["downgrades"] = ["FR-01"]
+    outcome = world.resolve(["2", ""], world.agent(items), world.revise())
+    assert outcome is er.Outcome.REVISED
+    assert "  2. убрать FR-02, удалит: FR-02" in world.out()
+    assert "FR-01" not in world.out()  # человек его не видел — не разрешён
+    [d] = ej.load(world.run_dir, 2)
+    assert d.allows == {"removes": ["FR-02"], "downgrades": []}
+
+
+DESIGN = "#### D-1: модуль\ntext\n#### D-2: вход\ntext\n"
+ACCEPT = "#### AC-01: вход\ntext\n#### AC-02: выход\ntext\n"
+
+
+def _two_files(world: World) -> None:
+    """Волна W4: design и acceptance, по находке на файл."""
+    world.state.wave = 4
+    rs.save(world.state)
+    bundle = world.tmp / "target" / BUNDLE
+    (bundle / "20-design.md").write_text(DESIGN, encoding="utf-8")
+    (bundle / "25-acceptance.md").write_text(ACCEPT, encoding="utf-8")
+    world.findings(
+        _finding("R1", "20-design.md"),
+        node="design",
+        edge="design-vs-requirements-behaviour",
+    )
+    world.findings(
+        _finding("R2", "25-acceptance.md"),
+        node="acceptance",
+        edge="acceptance-vs-requirements-behaviour",
+    )
+
+
+def _fixes(n: int) -> list[dict]:
+    return [
+        {"finding": i, "kind": "fix", "question": "", "options": []}
+        for i in range(1, n + 1)
+    ]
+
+
+def test_allowances_scoped_per_file(world: World) -> None:
+    _two_files(world)
+    # находки по порядку записей рёбер: 1 — acceptance, 2 — design
+    items = [
+        _fixes(1)[0],
+        {
+            "finding": 2,
+            "kind": "decision",
+            "question": "Убрать AC-02?",
+            "options": [
+                {
+                    "label": "да, убрать AC-02",
+                    "recommended": True,
+                    "removes": ["AC-02"],
+                    "downgrades": [],
+                },  # fmt: skip
+                {"label": "нет", "recommended": False},
+            ],
+        },
+    ]
+    # решение по design разрешает удалить AC-02, но AC-02 — в acceptance
+    per_file = {
+        "20-design.md": (DESIGN + "\nправка\n", 0),
+        "25-acceptance.md": ("#### AC-01: вход\ntext\n", 0),
+    }
+    revise = world.revise(per_file=per_file)
+    outcome = world.resolve(["1", ""], world.agent(items), revise)
+    assert outcome is er.Outcome.STOPPED
+    assert "AC-02" in world.out()
+    bundle = world.tmp / "target" / BUNDLE
+    assert (bundle / "20-design.md").read_text(encoding="utf-8") == DESIGN
+    assert (bundle / "25-acceptance.md").read_text(encoding="utf-8") == ACCEPT
+
+
+def test_multi_file_restore(world: World) -> None:
+    _two_files(world)
+    # acceptance переписан первым, design отказал — acceptance возвращён
+    per_file = {
+        "25-acceptance.md": (ACCEPT + "\nправка\n", 0),
+        "20-design.md": (DESIGN, 3),
+    }
+    revise = world.revise(per_file=per_file)
+    outcome = world.resolve([], world.agent(_fixes(2)), revise)
+    assert outcome is er.Outcome.STOPPED
+    assert len(world.revisions) == 2
+    bundle = world.tmp / "target" / BUNDLE
+    assert (bundle / "20-design.md").read_text(encoding="utf-8") == DESIGN
+    assert (bundle / "25-acceptance.md").read_text(encoding="utf-8") == ACCEPT
+
+
+def test_symlinked_node_not_applicable(world: World) -> None:
+    world.findings(_finding())
+    real = world.tmp / "elsewhere.md"
+    real.write_text(BEFORE, encoding="utf-8")
+    world.node.unlink()
+    world.node.symlink_to(real)
+    agent = world.agent(FIX)
+    assert world.resolve([], agent, world.revise()) is er.Outcome.NOT_APPLICABLE
+    assert world.prompts == [] and FILE in world.out()
+
+
+def test_symlinked_basis_not_applicable(world: World) -> None:
+    world.findings(_finding())
+    charter = world.tmp / "target" / BUNDLE / "00-charter.md"
+    real = world.tmp / "charter-real.md"
+    real.write_text(CHARTER, encoding="utf-8")
+    charter.unlink()
+    charter.symlink_to(real)
+    agent = world.agent(FIX)
+    assert world.resolve([], agent, world.revise()) is er.Outcome.NOT_APPLICABLE
+    assert world.prompts == []
+
+
+def test_restore_failure_lists_files(world: World, monkeypatch) -> None:
+    world.findings(_finding())
+    real_publish = er.safe_io.publish
+
+    def publish(root: Path, rel: str, data: bytes) -> None:
+        if str(rel).startswith(BUNDLE + "/"):
+            raise er.safe_io.SafeIOError("запись запрещена")
+        real_publish(root, rel, data)
+
+    monkeypatch.setattr(er.safe_io, "publish", publish)
+    outcome = world.resolve([], world.agent(FIX), world.revise(code=3))
+    assert outcome is er.Outcome.STOPPED
+    assert f"не возвращены: {FILE}" in world.out()
+
+
+def test_yo_spelling_accepted(world: World) -> None:
+    world.findings(_finding())
+    item = _decision_item()
+    world.resolve(["Своё: покрыть FR-03", ""], world.agent(item), world.revise())
+    first = [(d.kind, d.answer) for d in ej.load(world.run_dir, 2)]
+    assert first == [("own", "покрыть FR-03")]
+    (world.run_dir / ej.JOURNAL).unlink()  # иначе вопрос не повторится
+    world.resolve(["свое: другое", ""], world.agent(item), world.revise())
+    got = [(d.kind, d.answer) for d in ej.load(world.run_dir, 2)]
+    assert got == [("own", "другое")]
+
+
+def test_interrupt_restores_round_files(world: World) -> None:
+    world.findings(_finding())
+    with pytest.raises(KeyboardInterrupt):
+        world.resolve([], world.agent(FIX), world.revise(interrupt=True))
+    assert world.node.read_text(encoding="utf-8") == BEFORE

@@ -7,23 +7,32 @@
 узла через границу `launch_author` (`ops.revise`), а `lite.node_guard`
 отклоняет переписывание, ослабившее узел. Повтор проверки — обычный шаг
 `dfl run` (resume), его делает вызывающий.
+
+Что разбирать, решает файл стопа раннера (`edge-findings.txt`): записи рёбер
+на диске после отказа прибора остаются от прошлой попытки. Файлы узлов и
+оснований читаются и пишутся только через `governance.safe_io` (без ссылок,
+только обычные файлы, с потолком размера).
 """
 
 from __future__ import annotations
 
 import enum
 import os
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from governance import run_state as rs
-from governance.author_launch import AuthorCall, LaunchOutcome
+from governance import safe_io
+from governance.author_launch import NODE_LIMIT, AuthorCall, LaunchOutcome
 from governance.edge_check.author_rules import DEFAULT_CONTRACTS
 from governance.edge_check.rules import EdgeCheckError, load_rules
 from governance.ops import _AUTHOR_FILENAMES
 from lite import edge_journal as ej
 from lite import node_guard
-from lite.edge_triage import Item, triage
+from lite import stop_findings as sf
+from lite.edge_triage import Item, Option, triage
 from lite.interview_chat import Read, is_skip, read_answer
 from lite.output import say
 from lite.structure import Agent, AgentUnavailable, FormError
@@ -31,7 +40,7 @@ from lite.structure import Agent, AgentUnavailable, FormError
 MAX_ROUNDS = 2
 FIXING = "исправлю сам: {n}; вопросов к вам: {m}"
 OVERRIDE_OFFER = "принять узел вопреки замечанию (запишется в журнал и в PR)"
-REVIEW_STATUS = "stopped_review"
+REVIEW_STATUS = sf.EDGE
 REVISE_DIR = "edge-revise"
 OWN_PREFIX = "своё:"
 DISAGREE_PREFIX = "не согласен:"
@@ -45,6 +54,8 @@ KIND_LABELS = {
     "disagree": DISAGREE_PREFIX + " ",
     "override": "",
 }
+# `error EDGE-CHECK(<узел>/<ребро>): R1 major: …` — ключ находки файла стопа
+_STOP_KEY_RE = re.compile(r"^error EDGE-CHECK\(([^/)]+)/([^)]+)\): (R\d+) ")
 
 Key = tuple[str, str, str]
 Revise = Callable[..., LaunchOutcome]
@@ -59,6 +70,27 @@ class Outcome(enum.Enum):
     NOT_APPLICABLE = "not_applicable"  # разбирать нечего — прежний стоп
 
 
+@dataclass
+class PaidCalls:
+    """Платные вызовы за `dfl run`: сортировка (без кэша), переписывание,
+    повторная проверка (считает вызывающий — по шагу после круга)."""
+
+    triage: int = 0
+    revise: int = 0
+    check: int = 0
+
+    def line(self) -> str:
+        """Строка для человека."""
+        return (
+            f"платных вызовов: сортировка {self.triage}, переписывание "
+            f"{self.revise}, проверка {self.check}"
+        )
+
+
+class _Unreadable(Exception):
+    """Файл узла или основания не прочитан безопасно; текст — причина."""
+
+
 def resolve(
     state: rs.RunState,
     *,
@@ -66,51 +98,60 @@ def resolve(
     agent: Agent,
     revise: Revise,
     round_no: int,
+    calls: PaidCalls | None = None,
 ) -> Outcome:
     """Один круг разбора замечаний волны: сортировка, вопросы, переписывание.
 
     `revise(call, kind, subject, current, findings, decisions)` — граница
     автора (`RealOps.revise`); `round_no` — номер круга в этом `dfl run`
-    (на `MAX_ROUNDS` в `test` предлагается принять узел вопреки замечанию).
+    (на `MAX_ROUNDS` в `test` предлагается принять узел вопреки замечанию);
+    `calls` — счётчик платных вызовов вызывающего.
     """
+    calls = calls if calls is not None else PaidCalls()
     findings = applicable_findings(state)
     if findings is None:
         return Outcome.NOT_APPLICABLE
-    run_dir = rs.run_dir(state.run_id)
-    nodes = _read_files(state, {f.path for f in findings if f.path})
-    if nodes is None:
+    try:
+        nodes = _read_files(state, dict.fromkeys(f.path for f in findings if f.path))
+        bases = _bases(state, findings)
+    except _Unreadable as exc:
+        say(f"разбор замечаний невозможен: {exc}")
         return Outcome.NOT_APPLICABLE
+    run_dir = rs.run_dir(state.run_id)
     prior = ej.load(run_dir, state.wave)
     try:
         items = triage(
-            findings, nodes, _bases(state, findings), prior, agent, cache_dir=run_dir
+            findings, nodes, bases, prior, _counted(agent, calls), cache_dir=run_dir
         )
     except (FormError, AgentUnavailable) as exc:
         say(f"разбор замечаний не состоялся: {exc}")
         return Outcome.STOPPED
-    chosen = _ask_all(state, items, prior, read, round_no)
+    chosen = _ask_all(state, [_visible(i) for i in items], prior, read, round_no)
     if chosen is None:
         return Outcome.STOPPED
-    keys = {f.key for f in findings}
-    if keys <= ej.overridden(run_dir, state.wave):
+    if {f.key for f in findings} <= ej.overridden(run_dir, state.wave):
         say("замечания приняты вопреки — записано в журнал; проверяю снова")
         return Outcome.OVERRIDDEN
-    return _rewrite(state, findings, nodes, chosen, revise, round_no)
+    return _rewrite(state, findings, nodes, chosen, revise, round_no, calls)
 
 
 def applicable_findings(state: rs.RunState) -> list[ej.Finding] | None:
     """Блокирующие находки волны, если их можно разобрать; иначе `None`.
 
-    Нечего разбирать: прогон не в `stopped_review`, нет блокирующих находок
-    (отказ прибора, `insufficient`), записи не читаются, у находки нет файла
-    или файл — не узел её вида (§9 п.4).
+    Нечего разбирать: прогон не в `stopped_review`; в файле стопа нет
+    блокирующих находок или есть отказ прибора (`insufficient`, ошибка
+    ребра); записи не читаются; у находки нет файла или файл — не узел её
+    вида (§9 п.4). Из записей рёбер берутся только находки, чей ключ назван
+    в файле стопа: остальное — след прошлой попытки.
     """
-    if state.status != REVIEW_STATUS or not state.wave:
+    keys = stop_keys(state)
+    if not keys:
         return None
     try:
-        findings = ej.blocking_findings(rs.run_dir(state.run_id), state.wave)
+        found = ej.blocking_findings(rs.run_dir(state.run_id), state.wave)
     except (OSError, ValueError, KeyError, TypeError):
         return None
+    findings = [f for f in found if f.key in keys]
     if not findings:
         return None
     if any(not f.path or f.path != _AUTHOR_FILENAMES.get(f.node) for f in findings):
@@ -118,22 +159,61 @@ def applicable_findings(state: rs.RunState) -> list[ej.Finding] | None:
     return findings
 
 
-def _node_path(state: rs.RunState, filename: str) -> Path:
-    return Path(state.target_dir) / state.bundle_dir / filename
+def stop_keys(state: rs.RunState) -> set[Key]:
+    """Ключи блокирующих находок файла стопа; стоп не разбираемый — пусто."""
+    if state.status != REVIEW_STATUS or not state.wave:
+        return set()
+    stop = sf.load(state.run_id, state.status)
+    if stop is None or stop.failures:
+        return set()
+    blocking, _advisory = sf.split(stop.findings)
+    keys: set[Key] = set()
+    for line in blocking:
+        m = _STOP_KEY_RE.match(line)
+        if m is None:
+            return set()  # строку не понять — не гадаем
+        keys.add((m.group(1), m.group(2), m.group(3)))
+    return keys
 
 
-def _read_files(state: rs.RunState, names: set[str]) -> dict[str, str] | None:
-    """Текущие тексты файлов узлов (с ручными правками); не читается — `None`."""
+def _counted(agent: Agent, calls: PaidCalls) -> Agent:
+    """Агент, считающий вызовы: попадание в кэш сортировки его не зовёт."""
+
+    def call(prompt: str) -> str:
+        calls.triage += 1
+        return agent(prompt)
+
+    return call
+
+
+def _target_root(state: rs.RunState) -> Path:
+    """Канонический корень чекаута цели (требование `safe_io`)."""
+    return Path(os.path.realpath(state.target_dir))
+
+
+def _rel(state: rs.RunState, name: str) -> str:
+    return f"{state.bundle_dir.strip('/')}/{name}"
+
+
+def _read_node(state: rs.RunState, name: str) -> str:
+    """Текст файла бандла через `safe_io`; отказ — `_Unreadable`."""
     try:
-        return {
-            n: _node_path(state, n).read_text(encoding="utf-8") for n in sorted(names)
-        }
-    except (OSError, UnicodeDecodeError):
-        return None
+        data = safe_io.read_regular(
+            _target_root(state), _rel(state, name), limit=NODE_LIMIT
+        )
+        return data.decode("utf-8")
+    except (safe_io.SafeIOError, UnicodeDecodeError) as exc:
+        raise _Unreadable(f"{name}: {exc}") from exc
+
+
+def _read_files(state: rs.RunState, names: Iterable[str]) -> dict[str, str]:
+    """Текущие тексты файлов узлов (с ручными правками)."""
+    return {n: _read_node(state, n) for n in names}
 
 
 def _bases(state: rs.RunState, findings: list[ej.Finding]) -> dict[str, str]:
-    """Тексты оснований рёбер (`basis_roles`); роли без файла пропускаются."""
+    """Тексты оснований рёбер (`basis_roles`); роли без файла и отсутствующие
+    файлы пропускаются, файл, который нельзя прочитать безопасно, — отказ."""
     out: dict[str, str] = {}
     for edge in dict.fromkeys(f.edge for f in findings):
         try:
@@ -144,11 +224,31 @@ def _bases(state: rs.RunState, findings: list[ej.Finding]) -> dict[str, str]:
             name = _AUTHOR_FILENAMES.get(role)
             if name is None or name in out:
                 continue
-            try:
-                out[name] = _node_path(state, name).read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
+            if not os.path.lexists(_target_root(state) / _rel(state, name)):
                 continue
+            out[name] = _read_node(state, name)
     return out
+
+
+def _visible(item: Item) -> Item:
+    """Эффекты вариантов — только id, которые человек видит (в тексте
+    находки, вопросе или самом варианте); прочие отбрасываются."""
+    if not item.options:
+        return item
+    shown = f"{item.finding.statement}\n{item.question}"
+    options = [
+        replace(
+            o,
+            removes=_mentioned(o.removes, f"{shown}\n{o.label}"),
+            downgrades=_mentioned(o.downgrades, f"{shown}\n{o.label}"),
+        )
+        for o in item.options
+    ]
+    return replace(item, options=options)
+
+
+def _mentioned(ids: list[str], text: str) -> list[str]:
+    return [i for i in ids if re.search(rf"(?<![\w-]){re.escape(i)}(?![\w-])", text)]
 
 
 def _ask_all(
@@ -187,13 +287,12 @@ def _ask(
 ) -> ej.Decision | None:
     """Один вопрос; непонятый ответ — переспросить один раз, затем стоп."""
     question = item.question or REPEAT_QUESTION
-    labels = [o.label for o in item.options]
     say(f"замечание {_where(item.finding)}: {item.finding.statement}")
     say(question)
     for no, option in enumerate(item.options, 1):
-        say(f"  {no}. {option.label}{' (рекомендую)' if option.recommended else ''}")
+        say(f"  {no}. {_option_line(option)}")
     if allow_override:
-        say(f"  {len(labels) + 1}. {OVERRIDE_OFFER}")
+        say(f"  {len(item.options) + 1}. {OVERRIDE_OFFER}")
     say(ANSWER_HELP)
     for attempt in range(2):
         text = read_answer(read)
@@ -203,8 +302,17 @@ def _ask(
         if decision is not None:
             return decision
         if attempt == 0:
-            say(NO_REASON if _is_disagree(text) else REASK)
+            say(NO_REASON if _starts(text, DISAGREE_PREFIX) else REASK)
     return None
+
+
+def _option_line(o: Option) -> str:
+    """Вариант с эффектами: что удалит и что понизит — видно до выбора."""
+    effects = ([f"удалит: {', '.join(o.removes)}"] if o.removes else []) + (
+        [f"понизит: {', '.join(o.downgrades)}"] if o.downgrades else []
+    )
+    tail = f", {'; '.join(effects)}" if effects else ""
+    return f"{o.label}{tail}{' (рекомендую)' if o.recommended else ''}"
 
 
 def _parse(
@@ -226,14 +334,19 @@ def _parse(
             return made(OVERRIDE_OFFER, "override", {})
         return None
     for prefix, kind in ((OWN_PREFIX, "own"), (DISAGREE_PREFIX, "disagree")):
-        if text.casefold().startswith(prefix):
+        if _starts(text, prefix):
             rest = text[len(prefix) :].strip()
             return made(rest, kind, {}) if rest else None
     return None
 
 
-def _is_disagree(text: str) -> bool:
-    return text.strip().casefold().startswith(DISAGREE_PREFIX)
+def _fold(text: str) -> str:
+    """Для сравнения: регистр не важен, «ё» = «е» (длина строки та же)."""
+    return text.casefold().replace("ё", "е")
+
+
+def _starts(text: str, prefix: str) -> bool:
+    return _fold(text.strip()).startswith(_fold(prefix))
 
 
 def _where(f: ej.Finding) -> str:
@@ -247,41 +360,70 @@ def _rewrite(
     chosen: list[ej.Decision],
     revise: Revise,
     round_no: int,
+    calls: PaidCalls,
 ) -> Outcome:
-    """Переписать каждый файл с неснятыми находками; сбой или ослабление —
-    вернуть копии всех файлов круга и стоп."""
+    """Переписать каждый файл с неснятыми находками; сбой, ослабление или
+    прерывание — вернуть тексты всех файлов круга."""
     run_dir = rs.run_dir(state.run_id)
     skipped = ej.overridden(run_dir, state.wave)
     todo = [f for f in findings if f.key not in skipped]
     journal = ej.load(run_dir, state.wave)
-    allows = (
-        {i for d in chosen for i in d.allows.get("removes", [])},
-        {i for d in chosen for i in d.allows.get("downgrades", [])},
-    )
     done: list[str] = []
-    for name in dict.fromkeys(f.path for f in todo if f.path):
-        mine = [f for f in todo if f.path == name]
-        _backup(run_dir, round_no, name, nodes[name])
-        done.append(name)
-        reason = _revise_file(state, name, nodes[name], mine, journal, revise)
-        if reason is None:
-            reason = _weakened(state, name, nodes[name], *allows)
-        if reason is not None:
-            for restored in done:
-                _node_path(state, restored).write_text(nodes[restored], "utf-8")
-            say(reason)
-            return Outcome.STOPPED
+    try:
+        for name in dict.fromkeys(f.path for f in todo if f.path):
+            mine = [f for f in todo if f.path == name]
+            _backup(run_dir, round_no, name, nodes[name])
+            done.append(name)
+            calls.revise += 1
+            reason = _revise_file(state, name, nodes[name], mine, journal, revise)
+            if reason is None:
+                reason = _weakened(state, name, nodes[name], _allows(chosen, mine))
+            if reason is not None:
+                say(reason)
+                _restore(state, nodes, done)
+                return Outcome.STOPPED
+    except BaseException:
+        _restore(state, nodes, done)
+        raise
     for f in todo:
         say(f"  исправлено: {_where(f)}: {f.statement}", 1)
     say(f"узел переписан ({', '.join(done)}): замечаний {len(todo)}; проверяю снова")
     return Outcome.REVISED
 
 
+def _allows(
+    chosen: list[ej.Decision], findings: list[ej.Finding]
+) -> tuple[set[str], set[str]]:
+    """Разрешённые удаления/понижения — только решения по находкам этого файла."""
+    keys = {f.key for f in findings}
+    mine = [d for d in chosen if d.key in keys]
+    return (
+        {i for d in mine for i in d.allows.get("removes", [])},
+        {i for d in mine for i in d.allows.get("downgrades", [])},
+    )
+
+
 def _backup(run_dir: Path, round_no: int, name: str, text: str) -> None:
     """Копия файла до переписывания: `edge-revise/<круг>/<файл>` (§9 п.5)."""
-    path = run_dir / REVISE_DIR / str(round_no) / name
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    root = Path(os.path.realpath(run_dir))
+    safe_io.publish(root, f"{REVISE_DIR}/{round_no}/{name}", text.encode("utf-8"))
+
+
+def _restore(state: rs.RunState, nodes: dict[str, str], names: list[str]) -> None:
+    """Вернуть тексты файлов круга; не вернувшиеся — назвать."""
+    failed: list[str] = []
+    for name in names:
+        try:
+            safe_io.publish(
+                _target_root(state), _rel(state, name), nodes[name].encode("utf-8")
+            )
+        except safe_io.SafeIOError:
+            failed.append(name)
+    if failed:
+        say(
+            f"файлы не возвращены: {', '.join(failed)} — копии в "
+            f"{rs.run_dir(state.run_id) / REVISE_DIR}"
+        )
 
 
 def _revise_file(
@@ -321,14 +463,14 @@ def _decision_line(d: ej.Decision) -> str:
 
 
 def _weakened(
-    state: rs.RunState, name: str, before: str, removes: set[str], downgrades: set[str]
+    state: rs.RunState, name: str, before: str, allows: tuple[set[str], set[str]]
 ) -> str | None:
     """Сверка до/после (§5); ослаблен или не читается — причина, иначе `None`."""
     try:
-        after = _node_path(state, name).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        return f"переписанный {name} не читается: {exc}"
-    bad = node_guard.weakened(before, after, removes, downgrades)
+        after = _read_node(state, name)
+    except _Unreadable as exc:
+        return f"переписанный файл не читается: {exc}"
+    bad = node_guard.weakened(before, after, *allows)
     if not bad:
         return None
     return (

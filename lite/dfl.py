@@ -35,7 +35,6 @@ from governance import interview as iv
 from governance import run_state as rs
 from governance.facts import Outcome
 from governance.ops import RealOps
-from lite import edge_journal as ej
 from lite import edge_resolve as er
 from lite import failure_log as fl
 from lite import interview_chat as ic
@@ -532,19 +531,26 @@ def _resolve_rounds(
     Разбор не начался или остановлен — прежняя подсказка «что править»
     (`_report_step` её отложил) и код шага."""
     seen: set[tuple[str, str, str]] = set()
+    calls = er.PaidCalls()
     rounds = 0
     while (state := _review_run(target.repo, subject)) is not None:
-        keys = _finding_keys(state)
-        if rounds == er.MAX_ROUNDS:
-            _say_not_converged(keys, seen)
+        keys = er.stop_keys(state)
+        if rounds == er.MAX_ROUNDS and keys:
+            _say_not_converged(keys, seen, calls)
             return code
-        rounds += 1
-        outcome = _resolve(state, rounds)
+        outcome = (
+            _resolve(state, rounds + 1, calls)
+            if rounds < er.MAX_ROUNDS
+            else er.Outcome.NOT_APPLICABLE
+        )
         if outcome not in (er.Outcome.REVISED, er.Outcome.OVERRIDDEN):
             _say_next(state)
             return code
+        rounds += 1
         seen |= keys
         code = _step(target, subject, role, chatting=True)
+        calls.check += 1
+        say(calls.line(), 1)
     return code
 
 
@@ -561,17 +567,10 @@ def _review_run(repo: str, subject: str | None) -> rs.RunState | None:
     return state if state.status == sf.EDGE else None
 
 
-def _finding_keys(state: rs.RunState) -> set[tuple[str, str, str]]:
-    """Ключи блокирующих находок волны; записи не читаются — пусто."""
-    try:
-        found = ej.blocking_findings(rs.run_dir(state.run_id), state.wave)
-    except (OSError, ValueError, KeyError, TypeError):
-        return set()
-    return {f.key for f in found}
-
-
 def _say_not_converged(
-    keys: set[tuple[str, str, str]], seen: set[tuple[str, str, str]]
+    keys: set[tuple[str, str, str]],
+    seen: set[tuple[str, str, str]],
+    calls: er.PaidCalls,
 ) -> None:
     """Сводка предела кругов: что осталось и повторяется ли (devtools#728)."""
     named = ", ".join("/".join(k) for k in sorted(keys)) or "—"
@@ -579,10 +578,11 @@ def _say_not_converged(
     if keys & seen:
         line += "; повторяются — признак devtools#728"
     say(line)
+    say(calls.line())
     say(NOT_CONVERGED_HINT)
 
 
-def _resolve(state: rs.RunState, round_no: int) -> er.Outcome:
+def _resolve(state: rs.RunState, round_no: int, calls: er.PaidCalls) -> er.Outcome:
     """Круг разбора с настоящими терминалом, агентом и границей автора."""
     return er.resolve(
         state,
@@ -590,6 +590,7 @@ def _resolve(state: rs.RunState, round_no: int) -> er.Outcome:
         agent=st.claude_agent(df_config.load().author_model),
         revise=RealOps().revise,
         round_no=round_no,
+        calls=calls,
     )
 
 

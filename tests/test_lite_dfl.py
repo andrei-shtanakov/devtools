@@ -21,6 +21,7 @@ from governance import run_state as rs
 from governance.brief_facts import BriefPrFacts
 from governance.facts import Fact, Outcome
 from lite import dfl, runlog
+from lite import edge_resolve as er
 from lite import failure_log as fl
 from lite.output import VERBOSITY_ENV, verbosity
 from tests.conftest import _STRICT_GH_DIRS
@@ -1660,9 +1661,11 @@ def _review_stop(run_id: str = "WS-1-a") -> None:
 
 
 def _resolver(outcome: str, rounds: list[int]):
-    def resolve(state: rs.RunState, round_no: int) -> object:
+    def resolve(state: rs.RunState, round_no: int, calls: er.PaidCalls) -> object:
         rounds.append(round_no)
-        return dfl.er.Outcome[outcome]
+        calls.triage += 1
+        calls.revise += 1
+        return er.Outcome[outcome]
 
     return resolve
 
@@ -1689,6 +1692,25 @@ def test_run_resolves_then_steps_again(env: Env, monkeypatch, capfd) -> None:
     out, _ = _read(capfd)
     assert "  - R1 major (10-requirements.md:[410, 439]): Цель G-03" in out
     assert "поправьте" not in out  # вместо подсказки — разбор
+
+
+def test_round_paid_calls_at_level1(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch)
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        if len(env.spec_calls) == 1:
+            _review_stop()
+            return 1
+        _run("WS-1-a", "WS-1", "customer", "running", subject="t")
+        return 0
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    monkeypatch.setattr(dfl, "_resolve", _resolver("REVISED", []))
+    assert env.run("run", "-v", "--subject", "t") == 0
+    out, _ = _read(capfd)
+    assert "платных вызовов: сортировка 1, переписывание 1, проверка 1" in out
 
 
 def test_resolution_stopped_prints_old_hint(env: Env, monkeypatch, capfd) -> None:
@@ -1719,7 +1741,7 @@ def test_no_tty_keeps_old_stop(env: Env, monkeypatch, capfd) -> None:
 
     monkeypatch.setattr(spec_loop, "main", spec_main)
     monkeypatch.setattr(
-        dfl, "_resolve", lambda state, round_no: pytest.fail("разбор без tty")
+        dfl, "_resolve", lambda state, round_no, calls: pytest.fail("без tty")
     )
     assert env.run("run", "--subject", "t") == 1
     assert len(env.spec_calls) == 1
@@ -1746,6 +1768,7 @@ def test_round_limit_summary(env: Env, monkeypatch, capfd) -> None:
         "не сошлось за 2 круга: requirements/requirements-vs-charter/R1; "
         "повторяются — признак devtools#728" in out
     )
+    assert "платных вызовов: сортировка 2, переписывание 2, проверка 2" in out
     assert "dfl abandon" in out
 
 
