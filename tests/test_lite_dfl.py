@@ -1623,8 +1623,8 @@ def test_edge_stop_prints_findings_and_what_to_edit(
     assert env.run("run", "--subject", "t") == 1
     out, _ = _read(capfd)
     assert (
-        "прогон WS-1-a остановлен: смысловая проверка узлов нашла замечаний: 1 "
-        "(major 1)\n" in out
+        "прогон WS-1-a остановлен: смысловая проверка узлов: блокирующих "
+        "замечаний 1\n" in out
     )
     assert "  - R1 major (10-requirements.md:[410, 439]): Цель G-03" in out
     assert "дальше: поправьте workstreams/WS-1/spec/10-requirements.md в /t" in out
