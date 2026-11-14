@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from governance import run_state as rs
 from lite import failure_log as fl
@@ -52,8 +53,10 @@ def _edge() -> sf.Stop:
 def test_summary_counts_findings_by_level(run) -> None:
     _write("edge-findings.txt", MAJOR, MINOR, MINOR)
     assert sf.summary(_edge()) == (
-        "смысловая проверка узлов нашла замечаний: 3 (major 1, minor 2)"
+        "смысловая проверка узлов: блокирующих замечаний 1, рекомендаций 2"
     )
+    texts = [t for t, _ in sf.shown(_edge())]
+    assert texts.index(sf.ADVISORY_HEAD) == 1  # major — до заголовка рекомендаций
 
 
 def test_multiline_statement_is_one_finding(run) -> None:
@@ -77,7 +80,7 @@ def test_failures_not_counted_and_no_edit_hint(run) -> None:
 def test_mixed_failures_shown_but_not_counted(run) -> None:
     _write("edge-findings.txt", MAJOR, ERROR_EDGE, NO_FINDINGS)
     stop = _edge()
-    assert sf.summary(stop).endswith("замечаний: 1 (major 1)")
+    assert sf.summary(stop).endswith("блокирующих замечаний 1")
     texts = [t for t, _ in sf.shown(stop)]
     assert "  - отказ проверки: reviewer_failed: ревьюер упал" in texts
     assert sf.edit_hint(run, stop) is not None
@@ -120,7 +123,7 @@ def test_cause_is_summary_not_exit_code(run) -> None:
     _write("edge-findings.txt", MAJOR)
     tail = ["шаг завершился с кодом 1", "дальше: разберите причину"]
     assert fl.cause_from(None, ["R-1"], tail).startswith(
-        "смысловая проверка узлов нашла замечаний: 1"
+        "смысловая проверка узлов: блокирующих замечаний 1"
     )
 
 
@@ -128,3 +131,11 @@ def test_cause_ignores_findings_after_stop_lifted(run) -> None:
     rs.run_dir("R-1").joinpath("run.json").write_text('{"status": "running"}', "utf-8")
     _write("edge-findings.txt", MAJOR)
     assert fl.cause_from(None, ["R-1"], ["x"]) == "x"
+
+
+def test_blocking_matches_edge_rules_contract() -> None:
+    """`BLOCKING` совпадает с `severity.blocking` каждого ребра контракта."""
+    root = Path(__file__).resolve().parents[1] / "contracts/edge-check/v1/rules"
+    for path in sorted(root.glob("*.yaml")):
+        rule = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert set(rule["severity"]["blocking"]) == sf.BLOCKING, path.name

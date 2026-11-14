@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import re
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,6 +31,11 @@ FINDING_RE = re.compile(
     re.DOTALL,
 )
 FAILURE_RE = re.compile(r"^error EDGE-CHECK\([^)]*\): (.*)$", re.DOTALL)
+# Классы, валящие проверку: `severity.blocking` правил ребра
+# (`contracts/edge-check/v1/rules/*.yaml`, у всех рёбер одинаков — сверяет
+# тест); остальные — рекомендации, итог не валят (`edge_check.check.decide`).
+BLOCKING = frozenset({"blocker", "major"})
+ADVISORY_HEAD = "  рекомендации (проверку не валят, можно оставить):"
 EDIT_HINT = (
     "поправьте {files} в {target} (ветка {branch}) — коммитить не нужно, "
     "раннер закоммитит сам; затем dfl run (повтор — новый платный вызов проверки)"
@@ -91,17 +95,28 @@ def summary(stop: Stop) -> str:
         first = FAILURE_RE.match(stop.failures[0])
         what = first.group(1) if first else stop.failures[0]
         return f"смысловая проверка узлов не состоялась: {what}"
-    levels = Counter(m.group(2) for m in map(FINDING_RE.match, stop.findings) if m)
-    tail = ", ".join(f"{k} {n}" for k, n in levels.items())
-    return f"смысловая проверка узлов нашла замечаний: {len(stop.findings)} ({tail})"
+    blocking, advisory = split(stop.findings)
+    out = f"смысловая проверка узлов: блокирующих замечаний {len(blocking)}"
+    return out + (f", рекомендаций {len(advisory)}" if advisory else "")
+
+
+def split(findings: list[str]) -> tuple[list[str], list[str]]:
+    """Находки → (блокирующие, рекомендации) по классу серьёзности."""
+    levels = [m.group(2) if (m := FINDING_RE.match(f)) else "" for f in findings]
+    blocking = [f for f, lv in zip(findings, levels, strict=True) if lv in BLOCKING]
+    return blocking, [f for f in findings if f not in blocking]
 
 
 def shown(stop: Stop) -> list[tuple[str, int]]:
     """Строки для экрана с уровнем: находки edge — 0; вывод гейта — 1."""
     if stop.status == GATE:
         return [(f"  {row}", 1) for row in stop.failures]
-    rows = [(f"  - {readable(f)}", 0) for f in stop.findings]
-    return rows + [(f"  - {readable(f)}", 0) for f in stop.failures]
+    blocking, advisory = split(stop.findings)
+    rows = [(f"  - {readable(f)}", 0) for f in blocking + stop.failures]
+    if advisory:
+        rows.append((ADVISORY_HEAD, 0))
+        rows += [(f"  - {readable(f)}", 0) for f in advisory]
+    return rows
 
 
 def readable(entry: str) -> str:
