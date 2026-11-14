@@ -5,6 +5,9 @@
 `{"items": [...], "ask": str|null}`. Скрипт проверяет форму (битая форма —
 один повтор агента с текстом ошибки), смысл по правилам брифа (дыра —
 уточнение у человека), назначает id и собирает YAML для `discovery answer`.
+Контракт брифа v1.2: слова человека — `Preference` дословно, критерий —
+гипотеза агента, недостающее число — открытый `Q` исследования того же ответа
+(числа у человека не спрашиваются).
 Пункт агента с `id` действующего пункта — обновление: его поля сливаются с
 прежней записью, id сохраняется, запись переобъявляется в текущем ответе
 (discovery записывает это как `replaces_entries`). Человек не видит ни JSON,
@@ -44,11 +47,18 @@ TOPIC_LABELS = {
     "arch_preferences": "архитектурные предпочтения",
     "feasibility_review": "оценка реализуемости",
 }
-_TEXT_FIELDS = ("priority", "acceptance", "target")
+_TEXT_FIELDS = ("priority", "preference", "acceptance", "target", "owner_role")
 # поле пункта → поле записи discovery (порядок — порядок в YAML)
-_ENTRY_FIELDS = (("priority", "Priority"), ("acceptance", "Acceptance"),
-                 ("target", "Target"))  # fmt: skip
+_ENTRY_FIELDS = (("priority", "Priority"), ("preference", "Preference"),
+                 ("acceptance", "Acceptance"), ("target", "Target"),
+                 ("owner_role", "owner_role"), ("blocking", "blocking"))  # fmt: skip
 _ID_RE = re.compile(r"^[A-Z]+-\d+$")
+_Q_REF_RE = re.compile(r"\bQ-\d+\b")  # как GC-17 в vendored gate_check
+# открытый вопрос исследования (v1.2): число ищет аналитик или инженер
+RESEARCH_PREFIX = "Q"
+RESEARCH_ROLES = ("analyst", "engineer")
+_REFERRING = ("FR", "NFR", "M")  # GC-17: чьи ссылки на Q-NN проверяются
+_REF_TEXT = ("body", "preference", "acceptance", "target")
 
 
 class FormError(Exception):
@@ -167,7 +177,10 @@ def build_prompt(q: Question, text: str, view: SessionView) -> str:
         for e in view.entries
     )
     return f"""\
-Ты раскладываешь ответ человека в интервью о требованиях на пункты.
+Ты аналитик-переводчик: раскладываешь ответ человека в интервью о требованиях
+на пункты. Человек говорит на простом языке (предпочтения), ты переводишь это
+на технический язык (ограничения). Числа у человека не спрашивай: это
+исследование, а не вопрос одному человеку.
 
 Вопрос (тема {q.coverage_key}): {q.text}
 {need}
@@ -188,7 +201,8 @@ def build_prompt(q: Question, text: str, view: SessionView) -> str:
 Допустимые префиксы пунктов (пункт может относиться к любой теме, не только
 к теме вопроса):
 {allowed}
-Служебные префиксы Q и X и любые другие не используй.
+Префикс Q — только открытый вопрос исследования (см. ниже). Служебный
+префикс X и любые другие не используй.
 
 Правила полей:
 - body — суть пункта одной-двумя фразами, словами человека.
@@ -196,7 +210,19 @@ def build_prompt(q: Question, text: str, view: SessionView) -> str:
   относится; priority — одно из Must, Should, Could, Won't; acceptance —
   как проверить, что функция работает.
 - NFR: acceptance (критерий) или target (целевое значение).
-- M (метрика): traces — список id целей G, которые она измеряет.
+- M (метрика): traces — список id целей G, которые она измеряет; target —
+  целевое значение.
+- FR, NFR, M: preference — слова человека дословно (цитата из ответа, без
+  пересказа), если он выразил предпочтение («чтобы было бесшовно»);
+  acceptance/target — твоя гипотеза-перевод этого предпочтения в проверяемое
+  ограничение: пиши её сам, у человека не спрашивай.
+- Если для гипотезы нужно число (порог, baseline, целевое значение), а
+  человек его не назвал, — не выдумывай и не спрашивай: заведи в этом же
+  ответе пункт Q (открытый вопрос исследования): body — какое значение
+  найти, owner_role — analyst (данные, бизнес) или engineer (техника), свой
+  "ref" (например "q-1"). В критерии сошлись на него этим ref:
+  «… не хуже значения из q-1» — скрипт подставит id. Ссылаться на Q-NN
+  можно только на уже записанные пункты Q из списка выше.
 - IF (интерфейс): traces — список id систем S, к которым он относится.
 - AP (архитектурное предпочтение): traces — список id систем S или
   ограничений CON, которые оно затрагивает.
@@ -206,15 +232,19 @@ def build_prompt(q: Question, text: str, view: SessionView) -> str:
   этот ref в traces другого пункта. Id новым пунктам не придумывай —
   их назначит скрипт.
 
-Главное правило: не выдумывай. Пиши пункты и значения полей только из
-сказанного человеком. Чего в ответе нет (критерия приёмки, важности, цели) —
+Главное правило: не выдумывай. body и preference — только из сказанного
+человеком; acceptance/target — перевод сказанного, неизвестное число —
+ссылка на Q. Чего в ответе нет по смыслу (важности, цели, кому это нужно) —
 оставь поле пустым (null) и задай человеку один короткий уточняющий вопрос в
-"ask" — простыми словами, без id, префиксов и терминов. Если всего хватает —
+"ask" — простыми словами, без id, префиксов и терминов. Не спрашивай чисел,
+порогов и того, как проверять: это твой перевод. Если всего хватает —
 "ask": null. Если человек говорит «не знаю» или «пропустить» — не спрашивай.
 
 Верни только JSON, без пояснений:
 {{"items": [{{"prefix": "FR", "body": "...", "ref": "new-1", "traces": ["G-01"],
-"priority": "Must", "acceptance": "...", "target": null}}], "ask": null}}
+"priority": "Must", "preference": "...", "acceptance": "...", "target": null}},
+{{"prefix": "Q", "body": "...", "ref": "q-1", "owner_role": "analyst"}}],
+"ask": null}}
 """
 
 
@@ -275,6 +305,8 @@ def _parse_item(item: Any, n: int) -> dict[str, Any]:
             out[key] = value.strip()
     if "priority" in out:
         out["priority"] = _canonical_priority(out["priority"], n)
+    if out["prefix"] == RESEARCH_PREFIX and "id" not in out:
+        out["blocking"] = False  # v1.2: Q исследования гейт не держит
     return out
 
 
@@ -287,8 +319,9 @@ def _canonical_priority(value: str, n: int) -> str:
 
 
 def form_errors(items: list[dict[str, Any]], view: SessionView) -> list[str]:
-    """Нарушения формы, которые исправляет агент: префикс, ref, traces, id."""
-    allowed = view.prefixes()
+    """Нарушения формы, которые исправляет агент: префикс, ref, traces, id,
+    роль и ссылки на `Q` (GC-09, GC-17)."""
+    allowed = {**view.prefixes(), RESEARCH_PREFIX: "open_questions"}
     known = {e.id for e in view.entries}
     refs = [i["ref"] for i in items if "ref" in i]
     errors = [f"ref «{r}» повторяется или похож на id" for r in _bad_refs(refs, known)]
@@ -304,7 +337,26 @@ def form_errors(items: list[dict[str, Any]], view: SessionView) -> list[str]:
             for t in item.get("traces", [])
             if t not in known and t not in refs
         ]
+        errors += _research_errors(item, n, known)
     return errors
+
+
+def _research_errors(item: dict[str, Any], n: int, known: set[str]) -> list[str]:
+    """Q — с ролью исследователя; ссылка FR/NFR/M на Q-NN — на записанный Q
+    (новый Q этого ответа указывается своим ref)."""
+    if item["prefix"] == RESEARCH_PREFIX:
+        if item.get("owner_role") in RESEARCH_ROLES:
+            return []
+        return [f"пункт {n}: у Q owner_role — одно из {', '.join(RESEARCH_ROLES)}"]
+    if item["prefix"] not in _REFERRING:
+        return []
+    text = " ".join(str(item.get(key, "")) for key in _REF_TEXT)
+    return [
+        f"пункт {n}: ссылка на {ref}, но такого Q нет — заведи Q в этом ответе "
+        "и сошлись на его ref"
+        for ref in dict.fromkeys(_Q_REF_RE.findall(text))
+        if ref not in known
+    ]
 
 
 def _id_errors(items: list[dict[str, Any]], known: set[str]) -> list[str]:
@@ -351,7 +403,10 @@ def validate(items: list[dict[str, Any]], q: Question, view: SessionView) -> lis
 
 
 def _item_gaps(item: dict[str, Any], traced: set[str]) -> list[str]:
-    """Недостающие обязательные поля пункта (GC-06…GC-08, GC-13)."""
+    """Недостающие по смыслу поля пункта (GC-06, GC-07, GC-13).
+
+    Критерий и значение (GC-08) у человека не спрашиваются: это перевод
+    агента, недостающее число — `Q` исследования (контракт v1.2)."""
     body, prefix = item["body"], item["prefix"]
     gaps = []
     if prefix == "FR":
@@ -362,10 +417,6 @@ def _item_gaps(item: dict[str, Any], traced: set[str]) -> list[str]:
                 f"Насколько важно «{body}»: обязательно, желательно, "
                 "можно позже или не делаем?"
             )
-        if "acceptance" not in item:
-            gaps.append(f"Как проверить, что «{body}» работает?")
-    elif prefix == "NFR" and not ({"acceptance", "target"} & item.keys()):
-        gaps.append(f"Как проверить «{body}» — какой критерий или целевое значение?")
     elif prefix == "M" and "G" not in traced:
         gaps.append(f"Какую цель измеряет «{body}»?")
     elif prefix == "IF" and "S" not in traced:
@@ -396,14 +447,34 @@ def to_payload(text: str, items: list[dict[str, Any]], view: SessionView) -> str
     """
     ids = _assign_ids(items, view)
     by_ref = {i["ref"]: ids[n] for n, i in enumerate(items) if "ref" in i}
+    q_refs = {r: eid for r, eid in by_ref.items() if _prefix_of(eid) == RESEARCH_PREFIX}
     entries = [
-        _entry(item, ids[n], by_ref, view.entry_record(ids[n]) if "id" in item else {})
+        _entry(
+            _with_q_ids(item, q_refs),
+            ids[n],
+            by_ref,
+            view.entry_record(ids[n]) if "id" in item else {},
+        )
         for n, item in enumerate(items)
     ]
     doc: dict[str, Any] = {"text": text}
     if entries:
         doc["entries"] = entries
     return yaml.safe_dump(doc, allow_unicode=True, sort_keys=False)
+
+
+def _with_q_ids(item: dict[str, Any], q_refs: dict[str, str]) -> dict[str, Any]:
+    """ref нового Q в критерии пункта → назначенный id (`q-1` → `Q-01`)."""
+    if not q_refs:
+        return item
+    pattern = re.compile(
+        r"(?<![\w-])(" + "|".join(map(re.escape, q_refs)) + r")(?![\w-])"
+    )
+    out = dict(item)
+    for key in ("acceptance", "target"):
+        if key in out:
+            out[key] = pattern.sub(lambda m: q_refs[m.group(1)], out[key])
+    return out
 
 
 def _assign_ids(items: list[dict[str, Any]], view: SessionView) -> list[str]:

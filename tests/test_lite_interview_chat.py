@@ -443,21 +443,27 @@ def test_correct_must_not_break_required_fields() -> None:
 
 def test_correct_refuses_gap_introduced_by_correction() -> None:
     old = dict(FR1)
-    new = {k: v for k, v in FR1.items() if k != "Acceptance"}
-    with pytest.raises(iview.CorrectError, match="проверить"):
+    new = {k: v for k, v in FR1.items() if k != "Priority"}
+    with pytest.raises(iview.CorrectError, match="важно"):
         iview._check_required([iview._Change(old, new)], _corr_view())
+
+
+def test_correct_dropped_criterion_is_not_asked_of_human() -> None:
+    """Контракт v1.2: критерий — перевод агента (GC-08 чинит gate_repair)."""
+    new = {k: v for k, v in FR1.items() if k != "Acceptance"}
+    iview._check_required([iview._Change(dict(FR1), new)], _corr_view())
 
 
 def test_correct_preexisting_gap_does_not_block_and_is_hinted() -> None:
     send = Sender()
     view = _corr_view()
-    view.answers["q-fn"]["entries"][0].pop("Acceptance")  # уже неполный пункт
-    agent = _agent({"items": [_fr1_item(acceptance=None)], "ask": None})
+    view.answers["q-fn"]["entries"][0].pop("Priority")  # уже неполный пункт
+    agent = _agent({"items": [_fr1_item(priority=None)], "ask": None})
     out = iview.correct(_state(), "x", agent=agent, load=lambda s: view, send=send)
     assert len(send.sent) == 1
     assert "FR-01: «выгрузка раз в неделю» → «выгрузка раз в месяц»" in out
     assert "у FR-01 по-прежнему нет:" in out
-    assert "проверить" in out and "dfl correct" in out
+    assert "важно" in out and "dfl correct" in out
 
 
 def test_correct_discovery_refusal_is_error() -> None:
