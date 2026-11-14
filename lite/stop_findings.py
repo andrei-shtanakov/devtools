@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from governance import run_state as rs
+from governance import runner
 
 EDGE = "stopped_review"
 GATE = "stopped_gate"
@@ -40,8 +41,8 @@ ADVISORY_HEAD = "  рекомендации (проверку не валят, �
 # отказ ребра (`edge_check.check.decide`) — по находкам на экране не чинится
 # строка раннера (`_step_edge`) при FAIL ребра без находок: пункт правил
 # `insufficient` или `fail` без причины — проверка штатная, не сбой прибора
-UNRATED = "FAIL по статусу пунктов без находок"
-UNRATED_TEXT = "ревьюер не оценил пункт правил (не хватило входа) — замечаний нет"
+UNRATED = runner.EDGE_UNRATED
+UNRATED_TEXT = "ревьюер не оценил пункт правил — замечаний к файлу нет"
 FAILED_CHECK = (
     "смысловая проверка узлов не состоялась — сбой ревьюера, ваш файл ни при "
     "чём; повторите dfl run, повторится — dfl report (подробно: dfl run -v)"
