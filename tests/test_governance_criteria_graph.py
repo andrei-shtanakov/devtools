@@ -123,3 +123,40 @@ def test_human_criteria_counts_graph_not_ac_status():
     g = cgr.build_graph(REQ_H, BEH_H, ACC_H)
     assert cgr.derive_ac(g.acs["AC-01"], g, {"BEH-01": "unconfirmed"}) == "unconfirmed"
     assert cgr.human_criteria(g) == 2
+
+
+REQ_S = "#### FR-01: A\n**Priority**: Must\n#### FR-02: B\n**Priority**: Should\n"
+BEH_S = (
+    "#### BEH-01: a\n`traces: [FR-01]`\n"
+    "- **checked_by**: `status: planned` `kind: unit` `owner: qa`\n"
+    "#### BEH-02: b\n`traces: [FR-02]`\n"
+    "- **checked_by**: `status: planned` `kind: unit` `owner: qa`\n"
+)
+ACC_S = (
+    "#### AC-01: a · verification: test\ntraces: [FR-01]\nscenarios: [BEH-01]\n"
+    "#### AC-02: b · verification: test\ntraces: [FR-02]\nscenarios: [BEH-02]\n"
+)
+
+
+def test_should_test_ac_outside_threshold_is_automatic_and_non_blocking():
+    """Правило DSL acceptance (dfl discovery v1.2, финальное ревью):
+    Should-сценарии — в отдельном AC с `verification: test`, вне порога.
+    Такой AC не человеческий критерий (закрытие без `human-merge-required`),
+    а незелёный Should-сценарий — строка, не стоп закрытия. С `manual` тот же
+    AC сделал бы закрытие человеческим."""
+    from governance import criteria_check as ck
+
+    g = cgr.build_graph(REQ_S, BEH_S, ACC_S)
+    assert g.errors == [] and cgr.orphan_findings(g) == []
+    assert g.acs["AC-02"].priority == "Should"
+    assert cgr.human_criteria(g) == 0
+    out = ck.outcome(g, {"BEH-01": "traced", "BEH-02": "unconfirmed"})
+    assert out.closure == "traced"
+    assert out.stop_reasons == []
+    assert out.report_rows == ["BEH-02 (Should): unconfirmed"]
+    manual = cgr.build_graph(
+        REQ_S,
+        BEH_S,
+        ACC_S.replace("b · verification: test", "b · verification: manual"),
+    )
+    assert cgr.human_criteria(manual) == 1
