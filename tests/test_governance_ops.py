@@ -3067,3 +3067,5 @@ def test_acceptance_prompt_names_orphan_scenario_rule() -> None:
 
     prompt = author_prompt("acceptance", "s", "b", None, "/o/25-acceptance.md")
     assert "GC-ORPHAN" in prompt and "scenarios:" in prompt
+    assert "NOT listed in «Порог приёмки»" in prompt
+    assert "Must requirements only" in prompt

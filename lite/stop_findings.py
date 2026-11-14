@@ -59,8 +59,10 @@ UNBLOCKED_STOP = (
 )
 EDIT_HINT = (
     "поправьте {files} в {target} (ветка {branch}) — коммитить не нужно, "
-    "раннер закоммитит сам; затем dfl run (повтор — новый платный вызов проверки)"
+    "раннер закоммитит сам; затем dfl run {repeat}"
 )
+EDGE_REPEAT = "(повтор — новый платный вызов проверки)"
+GATE_REPEAT = "(после гейта снова пойдёт платная смысловая проверка)"
 
 
 @dataclass(frozen=True)
@@ -191,4 +193,5 @@ def edit_hint(state: rs.RunState, stop: Stop) -> str | None:
         files=", ".join(named) if named else f"файлы {state.bundle_dir}",
         target=state.target_dir,
         branch=state.branch,
+        repeat=GATE_REPEAT if stop.status == GATE else EDGE_REPEAT,
     )
