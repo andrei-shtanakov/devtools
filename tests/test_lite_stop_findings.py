@@ -175,3 +175,19 @@ def test_unrated_fail_is_not_instrument_failure(run) -> None:
     assert sf.summary(stop) == sf.UNBLOCKED_STOP
     assert sf.shown(stop) == [(f"  - {sf.UNRATED_TEXT}", 0)]
     assert sf.edit_hint(run, stop) is None
+
+
+def test_gate_errors_on_level_zero(run) -> None:
+    """Ошибки гейта (`error GC-…`) — на экране без -v; прочее — на -v."""
+    _write(
+        "gate-findings.txt",
+        "error GC-ORPHAN: BEH-40: сирота",
+        "not_evaluated: GC-X",
+    )
+    stop = sf.load("R-1", sf.GATE)
+    assert stop is not None
+    assert sf.summary(stop).startswith("проверка бандла не прошла: ошибок 1 (вывод: ")
+    assert sf.shown(stop) == [
+        ("  - GC-ORPHAN: BEH-40: сирота", 0),
+        ("  not_evaluated: GC-X", 1),
+    ]

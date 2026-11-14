@@ -43,6 +43,7 @@ ADVISORY_HEAD = "  рекомендации (проверку не валят, �
 # `insufficient` или `fail` без причины — проверка штатная, не сбой прибора
 UNRATED = runner.EDGE_UNRATED
 UNRATED_TEXT = "ревьюер не оценил пункт правил — замечаний к файлу нет"
+GATE_SHOWN = 10  # строк ошибок гейта на уровне 0
 FAILED_CHECK = (
     "смысловая проверка узлов не состоялась — сбой ревьюера, ваш файл ни при "
     "чём; повторите dfl run, повторится — dfl report (подробно: dfl run -v)"
@@ -107,7 +108,13 @@ def _entries(text: str) -> list[str]:
 def summary(stop: Stop) -> str:
     """Причина стопа одной строкой."""
     if stop.status == GATE:
-        return f"проверка бандла не прошла (вывод: {stop.path})"
+        errors = [r for r in stop.failures if r.startswith("error ")]
+        head = (
+            f"проверка бандла не прошла: ошибок {len(errors)}"
+            if errors
+            else ("проверка бандла не прошла")
+        )
+        return f"{head} (вывод: {stop.path})"
     blocking, advisory = split(stop.findings)
     if not blocking:
         return FAILED_CHECK if stop.failures else UNBLOCKED_STOP
@@ -125,7 +132,16 @@ def split(findings: list[str]) -> tuple[list[str], list[str]]:
 def shown(stop: Stop) -> list[tuple[str, int]]:
     """Строки для экрана с уровнем: находки edge — 0; вывод гейта — 1."""
     if stop.status == GATE:
-        return [(f"  {row}", 1) for row in stop.failures]
+        # ошибки гейта — то, что править (уровень 0, не больше GATE_SHOWN);
+        # прочий вывод (`not_evaluated`, предупреждения) — подробность
+        errors = [r for r in stop.failures if r.startswith("error ")]
+        shown_errors = set(errors[:GATE_SHOWN])
+        return [
+            (f"  - {row.removeprefix('error ')}", 0)
+            if row in shown_errors
+            else (f"  {row}", 1)
+            for row in stop.failures
+        ]
     blocking, advisory = split(stop.findings)
     # отказ прибора — подробность для разработчиков, не задание человеку
     failed = [(f"  - {readable(f)}", 1) for f in stop.failures]
