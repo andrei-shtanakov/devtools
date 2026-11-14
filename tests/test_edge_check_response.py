@@ -80,6 +80,38 @@ def test_finding_outside_input_is_error() -> None:
     assert exc.value.code == "finding_outside_input"
 
 
+def test_finding_path_with_role_prefix_is_input_file() -> None:
+    """Модель скопировала заголовок входа `subject: <файл>` целиком."""
+    rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
+    found = [
+        {
+            "rule_id": "R1",
+            "class": "major",
+            "path": "subject: 15-behaviour-spec.md",
+            "lines": [1, 2],
+            "statement": "x",
+        }
+    ]
+    out = resp.parse_response(_envelope(_all_pass(rs), found), rs, _prepared())
+    assert out.findings[0].path == "15-behaviour-spec.md"
+
+
+def test_unknown_role_prefix_stays_outside_input() -> None:
+    rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
+    bad = [
+        {
+            "rule_id": "R1",
+            "class": "major",
+            "path": "charter: 15-behaviour-spec.md",
+            "lines": [1, 2],
+            "statement": "x",
+        }
+    ]
+    with pytest.raises(r.EdgeCheckError) as exc:
+        resp.parse_response(_envelope(_all_pass(rs), bad), rs, _prepared())
+    assert exc.value.code == "finding_outside_input"
+
+
 def test_line_range_beyond_file_is_error() -> None:
     rs = r.load_rules("behaviour-vs-requirements", CONTRACTS)
     bad = [

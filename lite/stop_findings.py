@@ -16,10 +16,11 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from governance import run_state as rs
+from governance import runner
 
 EDGE = "stopped_review"
 GATE = "stopped_gate"
@@ -38,6 +39,14 @@ BLOCKING = frozenset({"blocker", "major"})
 ADVISORY_HEAD = "  рекомендации (проверку не валят, можно оставить):"
 # FAIL без блокирующих находок: пункт `insufficient`, `fail` без причины,
 # отказ ребра (`edge_check.check.decide`) — по находкам на экране не чинится
+# строка раннера (`_step_edge`) при FAIL ребра без находок: пункт правил
+# `insufficient` или `fail` без причины — проверка штатная, не сбой прибора
+UNRATED = runner.EDGE_UNRATED
+UNRATED_TEXT = "ревьюер не оценил пункт правил — замечаний к файлу нет"
+FAILED_CHECK = (
+    "смысловая проверка узлов не состоялась — сбой ревьюера, ваш файл ни при "
+    "чём; повторите dfl run, повторится — dfl report (подробно: dfl run -v)"
+)
 UNBLOCKED_STOP = (
     "смысловая проверка узлов не прошла без блокирующих замечаний (пункт "
     "правил не оценён) — повторите dfl run; повторится — dfl report"
@@ -56,6 +65,7 @@ class Stop:
     path: Path
     findings: list[str]  # edge: находки с правилом и серьёзностью
     failures: list[str]  # edge: отказы прибора; гейт: весь вывод
+    unrated: list[str] = field(default_factory=list)  # edge: FAIL без находок
 
 
 def load(run_id: str, status: str) -> Stop | None:
@@ -75,8 +85,9 @@ def load(run_id: str, status: str) -> Stop | None:
     if not entries:
         return None
     findings = [e for e in entries if FINDING_RE.match(e)]
-    failures = [e for e in entries if not FINDING_RE.match(e)]
-    return Stop(status, path, findings, failures)
+    unrated = [e for e in entries if not FINDING_RE.match(e) and UNRATED in e]
+    failures = [e for e in entries if e not in findings and e not in unrated]
+    return Stop(status, path, findings, failures, unrated)
 
 
 def _entries(text: str) -> list[str]:
@@ -97,13 +108,9 @@ def summary(stop: Stop) -> str:
     """Причина стопа одной строкой."""
     if stop.status == GATE:
         return f"проверка бандла не прошла (вывод: {stop.path})"
-    if not stop.findings:
-        first = FAILURE_RE.match(stop.failures[0])
-        what = first.group(1) if first else stop.failures[0]
-        return f"смысловая проверка узлов не состоялась: {what}"
     blocking, advisory = split(stop.findings)
     if not blocking:
-        return UNBLOCKED_STOP
+        return FAILED_CHECK if stop.failures else UNBLOCKED_STOP
     out = f"смысловая проверка узлов: блокирующих замечаний {len(blocking)}"
     return out + (f", рекомендаций {len(advisory)}" if advisory else "")
 
@@ -120,9 +127,12 @@ def shown(stop: Stop) -> list[tuple[str, int]]:
     if stop.status == GATE:
         return [(f"  {row}", 1) for row in stop.failures]
     blocking, advisory = split(stop.findings)
-    rows = [(f"  - {readable(f)}", 0) for f in blocking + stop.failures]
+    # отказ прибора — подробность для разработчиков, не задание человеку
+    failed = [(f"  - {readable(f)}", 1) for f in stop.failures]
+    rows = [(f"  - {readable(f)}", 0) for f in blocking + stop.unrated]
     if not blocking:  # стоп не из-за них: «можно оставить» было бы неправдой
-        return rows + [(f"  - {readable(f)}", 0) for f in advisory]
+        return rows + failed + [(f"  - {readable(f)}", 0) for f in advisory]
+    rows += failed
     if advisory:
         rows.append((ADVISORY_HEAD, 0))
         rows += [(f"  - {readable(f)}", 0) for f in advisory]
@@ -132,6 +142,8 @@ def shown(stop: Stop) -> list[tuple[str, int]]:
 def readable(entry: str) -> str:
     """Запись для человека: `R1 major (файл:строки): текст`; отказ — текст."""
     m = FINDING_RE.match(entry)
+    if m is None and UNRATED in entry:
+        return UNRATED_TEXT
     if m is None:
         failure = FAILURE_RE.match(entry)
         return f"отказ проверки: {failure.group(1)}" if failure else entry

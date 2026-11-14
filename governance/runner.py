@@ -4305,6 +4305,11 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     return True
 
 
+#: Строка `edge-findings.txt` при FAIL ребра без находок; её узнаёт `dfl`
+#: (`lite.stop_findings`) — штатный исход проверки, не сбой прибора.
+EDGE_UNRATED = "FAIL по статусу пунктов без находок"
+
+
 def _step_edge(state: RunState, ops: Ops) -> bool:
     """Edge-check волны (S6, D4): обязателен, обхода нет; legacy — no-op.
 
@@ -4359,9 +4364,7 @@ def _step_edge(state: RunState, ops: Ops) -> bool:
                 f"@ {loc.get('path')}:{loc.get('lines')}"
             )
         if record["verdict"] == "FAIL" and not record.get("findings"):
-            lines.append(
-                f"error EDGE-CHECK({node}/{edge}): FAIL по статусу пунктов без находок"
-            )
+            lines.append(f"error EDGE-CHECK({node}/{edge}): {EDGE_UNRATED}")
     findings_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     state.status = "stopped_review"
     save(state)
