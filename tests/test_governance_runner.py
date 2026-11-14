@@ -12341,6 +12341,8 @@ def _override_journal(
     keys: list[tuple[str, str, str]],
     *,
     statement: str = "не покрыто",
+    subject: list[dict] | None = None,
+    rule: str | None = None,
     digest: bool = True,
 ) -> None:
     """Решения `override` человека в журнале `dfl` (волна 1): digest —
@@ -12349,14 +12351,14 @@ def _override_journal(
 
     path = rs.run_dir(run_id) / "edge-decisions.jsonl"
     with path.open("a", encoding="utf-8") as fh:
-        for node, edge, rule in keys:
-            row: dict = {"wave": 1, "kind": "override", "key": [node, edge, rule]}
+        for node, edge, key_rule in keys:
+            row: dict = {"wave": 1, "kind": "override", "key": [node, edge, key_rule]}
             if digest:
+                shas = override.subject_shas(
+                    _OVR_SUBJECT if subject is None else subject
+                )
                 row["digest"] = override.finding_digest(
-                    node,
-                    edge,
-                    _ovr_finding(rule, statement),
-                    override.subject_shas(_OVR_SUBJECT),
+                    node, edge, _ovr_finding(rule or key_rule, statement), shas
                 )
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
@@ -12454,17 +12456,35 @@ def test_auto_merge_accepts_override_in_test(
 
 @pytest.mark.parametrize(
     "journal",
-    [{"statement": "другая находка"}, {"digest": False}],
-    ids=["same-key-other-statement", "row-without-digest"],
+    [
+        {"subject": [{"path": "00-charter.md", "sha256": "old"}]},
+        {"rule": "R9"},
+        {"digest": False},
+    ],
+    ids=["changed-node-text", "other-rule", "row-without-digest"],
 )
 def test_override_stale_or_unbound_decision_still_fails(
     tmp_path: Path, runs_root, monkeypatch, journal: dict
 ) -> None:
-    """Принятие привязано к самой находке: тот же ключ с другой
-    формулировкой и строка журнала без digest — не принятие."""
+    """Принятие привязано к вердикту правила на этом тексте узла: другой
+    текст узла (subject), другое правило и строка без digest — не принятие."""
     _, ops, published = _override_run(tmp_path, monkeypatch, "r-ovr-stale", test=True)
     _override_journal("r-ovr-stale", _OVR_KEYS, **journal)
     state = locked_runner.resume("r-ovr-stale", ops)
     assert state.status == "stopped_review"
     assert state.ops["edge-1"]["status"] == "started"
     assert "candidate-1" not in state.ops and published == []
+
+
+def test_override_survives_rephrased_finding(
+    tmp_path: Path, runs_root, monkeypatch
+) -> None:
+    """Ревьюер недетерминирован (devtools#728): повторный шаг на неизменённом
+    узле переформулировал находку — принятие действует, человека не спрашивают."""
+    _, ops, published = _override_run(
+        tmp_path, monkeypatch, "r-ovr-reph", test=True, human_merge_code=3
+    )
+    _override_journal("r-ovr-reph", _OVR_KEYS, statement="та же мысль иначе")
+    state = locked_runner.resume("r-ovr-reph", ops)
+    assert state.ops["edge-1"]["verdict"] == "OVERRIDE"
+    assert state.status != "stopped_review" and len(published) == 1

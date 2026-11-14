@@ -306,15 +306,21 @@ def test_override_not_applied_unless_all_blocking_accepted(
 
 
 def test_publish_override_recomputes_digest(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Тот же ключ, другая формулировка находки — принятие не переносится."""
+    """Публикация пересчитывает digest по записям: изменённый текст узла
+    (subject) — принятие не переносится; переформулировка — переносится."""
     state = _wave_state("test", monkeypatch)
     forge = _Forge()
     changed = {
-        k: {**v, "findings": [{**OVR_FINDING, "statement": "другое"}]}
+        k: {**v, "subject": [{"path": "20-design.md", "sha256": "s2"}]}
         for k, v in FAIL_RECORDS.items()
     }
     code = publish.publish_wave(state, forge, KEY, changed, overridden={OVR_KEY})
     assert code == publish.CODE_CHANGES and forge.published == []
-    assert (
-        publish.edge_verdict(HEAD, changed, overridden={OVR_KEY})["verdict"] == "FAIL"
-    )
+    verdict = publish.edge_verdict(HEAD, changed, overridden={OVR_KEY})
+    assert verdict["verdict"] == "FAIL"
+    rephrased = {
+        k: {**v, "findings": [{**OVR_FINDING, "statement": "другое"}]}
+        for k, v in FAIL_RECORDS.items()
+    }
+    verdict = publish.edge_verdict(HEAD, rephrased, overridden={OVR_KEY})
+    assert verdict["verdict"] == "OVERRIDE"

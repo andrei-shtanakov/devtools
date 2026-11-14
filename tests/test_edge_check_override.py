@@ -1,8 +1,10 @@
 """Override-решения журнала `dfl` (governance/edge_check/override.py).
 
-Решение привязано к самой находке (`finding_digest`): тот же ключ
-(узел, ребро, правило) с другой формулировкой, местом или на изменённом
-тексте узла — другая находка, принятие на неё не переносится.
+Решение привязано к вердикту правила на этом тексте узла
+(`finding_digest`: узел, ребро, правило, класс, хэши subject). Другое
+правило, класс или изменённый текст узла — принятие не переносится;
+переформулировка той же находки ревьюером (недетерминизм, devtools#728) —
+переносится.
 """
 
 from __future__ import annotations
@@ -59,11 +61,12 @@ def test_overridden_missing_and_corrupt(tmp_path: Path) -> None:
     assert override.overridden(tmp_path, 1) == {"d"}
 
 
-def test_digest_binds_statement_location_and_subject() -> None:
+def test_digest_binds_rule_class_and_subject_not_wording() -> None:
     base = _digest()
     assert base == _digest(dict(FINDING))
-    assert base != _digest({**FINDING, "statement": "другое"})
-    assert base != _digest({**FINDING, "location": {"path": "x.md", "lines": [3, 5]}})
+    assert base == _digest({**FINDING, "statement": "другое"})
+    assert base == _digest({**FINDING, "location": {"path": "x.md", "lines": [9]}})
+    assert base != _digest({**FINDING, "rule_id": "R2"})
     assert base != _digest({**FINDING, "class": "blocker"})
     assert base != _digest(subject=[{"path": "10-requirements.md", "sha256": "s2"}])
 
@@ -73,8 +76,15 @@ def test_accepted_same_finding_unchanged() -> None:
     assert override.accepted(records, {_digest()}) == {(NODE, EDGE, "R1")}
 
 
-def test_accepted_same_key_different_statement_refused() -> None:
-    records = {(NODE, EDGE): _record({**FINDING, "statement": "другое"})}
+def test_accepted_rephrased_statement_same_subject() -> None:
+    """Ревьюер переформулировал ту же находку на неизменённом узле."""
+    rephrased = {**FINDING, "statement": "другое", "location": {"lines": [7, 8]}}
+    records = {(NODE, EDGE): _record(rephrased)}
+    assert override.accepted(records, {_digest()}) == {(NODE, EDGE, "R1")}
+
+
+def test_accepted_different_rule_refused() -> None:
+    records = {(NODE, EDGE): _record({**FINDING, "rule_id": "R2"})}
     assert override.accepted(records, {_digest()}) is None
 
 

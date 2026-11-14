@@ -4,7 +4,7 @@
 строкой JSON в `edge-decisions.jsonl` каталога прогона (поле `wave` отделяет
 волны). Override-решения читает и раннер — через
 `governance.edge_check.override` (lite → governance, не наоборот); решение
-привязано к самой находке её digest'ом (`override.finding_digest`).
+привязано к вердикту правила на тексте узла (`override.finding_digest`).
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ class Finding:
     statement: str
     path: str | None
     lines: str
-    digest: str = ""  # `override.finding_digest`: привязка решения к находке
+    digest: str = ""  # `override.finding_digest`: правило+класс+subject
     subject: tuple[str, ...] = ()  # хэши входа subject ребра
 
     @property
