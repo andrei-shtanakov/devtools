@@ -34,6 +34,9 @@ from governance import df_config, run_lock, runner, spec_loop, user_targets
 from governance import interview as iv
 from governance import run_state as rs
 from governance.facts import Outcome
+from governance.ops import RealOps
+from lite import edge_journal as ej
+from lite import edge_resolve as er
 from lite import failure_log as fl
 from lite import interview_chat as ic
 from lite import interview_view as iview
@@ -105,6 +108,9 @@ BRIEF_READY_HINT = "dfl run — откроет PR брифа (или покаж�
 # статусы, после которых конвейер стоит до действия человека (кроме URL
 # проверенного PR и остановленной цепочки — их узнают по `ops`)
 HUMAN_STEP_STATUSES = frozenset({"brief_ready", "waiting_human_merge"})
+NOT_CONVERGED_HINT = (
+    "дальше: dfl run — ещё круг (платные вызовы), правка файла руками или dfl abandon"
+)
 SCREEN_MARK = "уровень 3: вывод раннера шёл на экран"
 
 # лог текущего вызова; путь переживает закрытие лога — его читает `_record`,
@@ -514,7 +520,77 @@ def _run_chatting(
                 say(CHAT_STOPPED)
                 return 0
             code = _step(target, subject, role, chatting=True)
+    return _resolve_rounds(target, subject, role, code)
+
+
+def _resolve_rounds(
+    target: user_targets.UserTarget, subject: str | None, role: str, code: int
+) -> int:
+    """Стоп edge-check с находками — разбор разговором и снова шаг, не больше
+    `er.MAX_ROUNDS` кругов за вызов; не сошлось — сводка (спека Ц4).
+
+    Разбор не начался или остановлен — прежняя подсказка «что править»
+    (`_report_step` её отложил) и код шага."""
+    seen: set[tuple[str, str, str]] = set()
+    rounds = 0
+    while (state := _review_run(target.repo, subject)) is not None:
+        keys = _finding_keys(state)
+        if rounds == er.MAX_ROUNDS:
+            _say_not_converged(keys, seen)
+            return code
+        rounds += 1
+        outcome = _resolve(state, rounds)
+        if outcome not in (er.Outcome.REVISED, er.Outcome.OVERRIDDEN):
+            _say_next(state)
+            return code
+        seen |= keys
+        code = _step(target, subject, role, chatting=True)
     return code
+
+
+def _review_run(repo: str, subject: str | None) -> rs.RunState | None:
+    """Прогон конвейера (engineer, иначе customer) в `stopped_review` или `None`."""
+    runs, _ = _repo_runs(repo)
+    try:
+        cust = _select_customer(runs, subject)
+    except DflError:
+        return None
+    if cust is None:
+        return None
+    state = _engineer_of(cust, runs) or cust
+    return state if state.status == sf.EDGE else None
+
+
+def _finding_keys(state: rs.RunState) -> set[tuple[str, str, str]]:
+    """Ключи блокирующих находок волны; записи не читаются — пусто."""
+    try:
+        found = ej.blocking_findings(rs.run_dir(state.run_id), state.wave)
+    except (OSError, ValueError, KeyError, TypeError):
+        return set()
+    return {f.key for f in found}
+
+
+def _say_not_converged(
+    keys: set[tuple[str, str, str]], seen: set[tuple[str, str, str]]
+) -> None:
+    """Сводка предела кругов: что осталось и повторяется ли (devtools#728)."""
+    named = ", ".join("/".join(k) for k in sorted(keys)) or "—"
+    line = f"не сошлось за {er.MAX_ROUNDS} круга: {named}"
+    if keys & seen:
+        line += "; повторяются — признак devtools#728"
+    say(line)
+    say(NOT_CONVERGED_HINT)
+
+
+def _resolve(state: rs.RunState, round_no: int) -> er.Outcome:
+    """Круг разбора с настоящими терминалом, агентом и границей автора."""
+    return er.resolve(
+        state,
+        read=ic.stdin_read,
+        agent=st.claude_agent(df_config.load().author_model),
+        revise=RealOps().revise,
+        round_no=round_no,
+    )
 
 
 def _is_tty() -> bool:
@@ -703,6 +779,13 @@ def _report_step(
             say(text, 2)
     if state.status == WAITING:
         return  # как отвечать — уже сказано (вопрос) или скажет цикл
+    if chatting and state.status == sf.EDGE:
+        return  # вместо «поправьте» — разбор; не начнётся — скажет он
+    _say_next(state)
+
+
+def _say_next(state: rs.RunState) -> None:
+    """Следующий шаг: на уровне 0, если он — действие человека."""
     hint = _next_hint(state, _repo_runs(state.repo)[0])
     if hint:
         say(f"дальше: {hint}", 0 if _awaits_human(state) else 1)

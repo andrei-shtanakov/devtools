@@ -1631,6 +1631,124 @@ def test_edge_stop_prints_findings_and_what_to_edit(
     assert "шаг завершился с кодом" not in out
 
 
+_EDGE_LINE = (
+    "error EDGE-CHECK(requirements/requirements-vs-charter): R1 major: "
+    "Цель G-03 не покрыта @ 10-requirements.md:[410, 439]"
+)
+
+
+def _review_stop(run_id: str = "WS-1-a") -> None:
+    """Прогон в `stopped_review` волны 2 с одной блокирующей находкой."""
+    state = _run(run_id, "WS-1", "customer", "stopped_review", subject="t")
+    state.wave = 2
+    rs.save(state)
+    rd = rs.run_dir(run_id)
+    (rd / "edge-findings.txt").write_text(_EDGE_LINE + "\n", encoding="utf-8")
+    out = rd / "edge-check" / "w2"
+    out.mkdir(parents=True, exist_ok=True)
+    record = {
+        "node": "requirements",
+        "edge": "requirements-vs-charter",
+        "findings": [
+            {"rule_id": "R1", "class": "major", "statement": "Цель G-03",
+             "location": {"path": "10-requirements.md", "lines": [1, 2]}},
+        ],
+    }  # fmt: skip
+    (out / "requirements--requirements-vs-charter.json").write_text(
+        json.dumps(record, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def _resolver(outcome: str, rounds: list[int]):
+    def resolve(state: rs.RunState, round_no: int) -> object:
+        rounds.append(round_no)
+        return dfl.er.Outcome[outcome]
+
+    return resolve
+
+
+def test_run_resolves_then_steps_again(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch)
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        if len(env.spec_calls) == 1:
+            _review_stop()
+            return 1
+        _run("WS-1-a", "WS-1", "customer", "running", subject="t")
+        return 0
+
+    rounds: list[int] = []
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    monkeypatch.setattr(dfl, "_resolve", _resolver("REVISED", rounds))
+    assert env.run("run", "--subject", "t") == 0
+    assert rounds == [1]
+    assert env.spec_calls[1] == ["--subject", "t", "--repo", REPO,
+                                 "--run-id", "WS-1-a"]  # fmt: skip
+    out, _ = _read(capfd)
+    assert "  - R1 major (10-requirements.md:[410, 439]): Цель G-03" in out
+    assert "поправьте" not in out  # вместо подсказки — разбор
+
+
+def test_resolution_stopped_prints_old_hint(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch)
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        _review_stop()
+        return 1
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    monkeypatch.setattr(dfl, "_resolve", _resolver("NOT_APPLICABLE", []))
+    assert env.run("run", "--subject", "t") == 1
+    assert len(env.spec_calls) == 1
+    out, _ = _read(capfd)
+    assert "дальше: поправьте workstreams/WS-1/spec/10-requirements.md" in out
+
+
+def test_no_tty_keeps_old_stop(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch, False)
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        _review_stop()
+        return 1
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    monkeypatch.setattr(
+        dfl, "_resolve", lambda state, round_no: pytest.fail("разбор без tty")
+    )
+    assert env.run("run", "--subject", "t") == 1
+    assert len(env.spec_calls) == 1
+    out, _ = _read(capfd)
+    assert "дальше: поправьте workstreams/WS-1/spec/10-requirements.md" in out
+
+
+def test_round_limit_summary(env: Env, monkeypatch, capfd) -> None:
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch)
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        _review_stop()
+        return 1
+
+    rounds: list[int] = []
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    monkeypatch.setattr(dfl, "_resolve", _resolver("REVISED", rounds))
+    assert env.run("run", "--subject", "t") == 1
+    assert rounds == [1, 2] and len(env.spec_calls) == 3
+    out, _ = _read(capfd)
+    assert (
+        "не сошлось за 2 круга: requirements/requirements-vs-charter/R1; "
+        "повторяются — признак devtools#728" in out
+    )
+    assert "dfl abandon" in out
+
+
 def test_stopped_run_nonzero_code_one_log_hint(env: Env, monkeypatch, capfd) -> None:
     _bind_streams(monkeypatch)
 
