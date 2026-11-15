@@ -749,3 +749,24 @@ def test_closed_spec_pr_mentions_abandon(run, monkeypatch) -> None:
     monkeypatch.setattr(ops, "pr_facts", lambda slug, pr: {"state": "CLOSED"})
     assert _advance(run, ops) == 1
     assert "закрыт без мержа" in run.stop_reason and flow.ABANDON in run.stop_reason
+
+
+def test_design_rewrite_dropping_decision_restored(run, capsys) -> None:
+    """Регрессия ревью #774: переписывание дизайна, удалившее D-02 без
+    решения человека, отклоняется node_guard'ом, файл возвращается."""
+    design = NODE_TEXT["20-design.md"]
+    cut = design.split("#### D-02")[0]
+    author = _reviser(cut)
+    fix = [{"finding": 1, "kind": "fix", "question": "", "options": []}]
+    rc = flow.advance(
+        run,
+        FakeOps(run),
+        read=lambda: None,
+        agent=lambda p: json.dumps({"items": fix}),
+        launch=author,
+        check=checker("FAIL", "PASS"),
+    )
+    assert rc == 1 and run.step == "design"
+    assert [p for p in author.prompts if "## Режим правки" in p]
+    assert (_bundle(run) / "20-design.md").read_text(encoding="utf-8") == design
+    assert "D-02" in capsys.readouterr().out

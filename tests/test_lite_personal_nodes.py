@@ -199,3 +199,18 @@ def test_rules_forbid_declining_fr_and_define_criterion_ref() -> None:
     assert "k — номер пункта" in texts[0]
     assert any("только на существующие FR-NN/k" in t for t in texts)
     assert any("не вводит обязательств" in t for t in texts)
+
+
+def test_design_decisions_visible_to_node_guard() -> None:
+    """Регрессия ревью #774: id решений дизайна — `#### D-NN`, их видит
+    `node_guard` — удалённое решение переписыванием = ослабление."""
+    from lite import node_guard
+
+    text = (FIXTURES / "20-design.md").read_text(encoding="utf-8")
+    assert list(node_guard.node_items(text)) == ["D-01", "D-02"]
+    cut = text.split("#### D-02")[0]
+    assert node_guard.weakened(text, cut, set(), set()) == ["D-02"]
+    assert node_guard.weakened(text, cut, {"D-02"}, set()) == []
+    prompt = (nodes.PROMPTS / "design.md").read_text(encoding="utf-8")
+    assert "`#### D-NN: <решение>`" in prompt
+    assert "### D-NN" not in prompt.replace("#### D-NN", "")
