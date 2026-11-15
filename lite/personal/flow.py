@@ -658,7 +658,8 @@ def _step_code_pr(ctx: _Ctx) -> bool:
         run.step = "done"
         say(f"integration-PR #{pr} вмержен — конвейер закончен")
         return True
-    say(f"смержите {facts.get('url') or f'PR #{pr}'} — затем dfl run")
+    # `pr_facts` не отдаёт url — ссылка строится из слага и номера
+    say(f"смержите https://github.com/{run.repo_slug}/pull/{pr} — затем dfl run")
     return False
 
 

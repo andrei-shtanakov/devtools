@@ -128,8 +128,8 @@ class FakeOps:
     def pr_facts(self, repo_slug: str, pr: int) -> dict:
         self.calls.append(("pr_facts", repo_slug, pr))
         if pr == SPEC_PR:
-            return {"headRefOid": HEAD, "state": "OPEN", "url": "u/41"}
-        return {"headRefOid": "h2", "state": self.code_state, "url": "u/77"}
+            return {"headRefOid": HEAD, "state": "OPEN"}
+        return {"headRefOid": "h2", "state": self.code_state}
 
     def human_merge(self, repo_name, pr, sha, *, target_dir=None) -> int:
         self.calls.append(("human_merge", repo_name, pr, sha))
@@ -267,7 +267,10 @@ def test_happy_path_to_code_pr(run, capsys) -> None:
         assert (_bundle(run) / name).is_file()
     assert (Path(target) / tasks_path).is_file()
     out = capsys.readouterr().out
-    assert "spec-runner tui" in out and "смержите u/77" in out
+    assert (
+        "spec-runner tui" in out
+        and "смержите https://github.com/o/repo/pull/77 — затем dfl run" in out
+    )
 
 
 @pytest.mark.parametrize("step", state.STEPS[:-1])
