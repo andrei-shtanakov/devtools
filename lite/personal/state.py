@@ -42,6 +42,10 @@ class PersonalRun:
     spec_pr: int | None = None
     code_pr: int | None = None
     stop_reason: str = ""
+    #: `code-run`: открытые `spec-runner/run-*` PR до запуска раннера
+    #: (`None` — запуск не начинался) и наблюдённый код выхода (write-ahead).
+    before_prs: list[int] | None = None
+    run_exit: int | None = None
 
 
 def _ws_id(subject: str, today: date) -> str:

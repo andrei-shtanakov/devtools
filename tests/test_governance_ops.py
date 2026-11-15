@@ -1046,6 +1046,24 @@ def test_is_dirty_tracked_spec_gitignore_change_is_dirty(monkeypatch):
     assert RealOps().is_dirty("/tmp/devtools") is True
 
 
+def test_dirty_paths_lists_each_untracked_and_skips_harness(monkeypatch):
+    out = "?? spec/.gitignore\0?? ws/a.md\0 M foo.py\0R  new.py\0old.py\0"
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout=out)
+    assert RealOps().dirty_paths("/tmp/devtools") == ["ws/a.md", "foo.py", "new.py"]
+    assert calls[0].argv == [
+        "git",
+        "status",
+        "--porcelain",
+        "-z",
+        "--untracked-files=all",
+    ]
+
+
+def test_dirty_paths_empty_on_clean_tree(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=0, stdout="")
+    assert RealOps().dirty_paths("/tmp/devtools") == []
+
+
 # --- Кейс 11: checkout_and_pull — S8 на default-ветке (круг 5) -------------
 
 
