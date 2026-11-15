@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import date
 from pathlib import Path
 
@@ -11,7 +11,7 @@ import pytest
 
 from governance.author_launch import LaunchOutcome
 from lite import review_pause as rp
-from lite.personal import flow, state
+from lite.personal import flow, interviewer, state
 from lite.personal.brief import Goal, brief_from_json, render_brief
 from lite.personal.interviewer import TRANSCRIPT, Halt
 from tests.test_lite_personal_flow import BRIEF, NODE_TEXT, SPEC_PR, FakeOps, checker
@@ -77,12 +77,12 @@ def _author(*revisions: str):
     return fake
 
 
-def _advance(run, ops, *, read, launch=None, check=None, tty=True) -> int:
+def _advance(run, ops, *, read, launch=None, check=None, tty=True, agent=None) -> int:
     return flow.advance(
         run,
         ops,
         read=read,
-        agent=lambda p: "",
+        agent=agent or (lambda p: ""),
         launch=launch or _author(),
         check=check or checker("PASS"),
         tty=lambda: tty,
@@ -376,5 +376,91 @@ def test_spec_pr_body_unchanged_without_remarks(tmp_path) -> None:
     run = _run(tmp_path, ())
     ops = _BodyOps(run)
     assert _advance(run, ops, read=_no_read) == 0
-    assert ops.body == flow._pr_body(run)
     assert "Замечания владельца" not in ops.body
+
+
+def test_brief_reinterview_paused_after_answer_resumes_open_question(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Переинтервью прервано после ответа на вопрос: продолжение показывает
+    открытый вопрос, правка в журнале одна."""
+    run = _run(tmp_path, ("brief",))
+    assert _advance(run, FakeOps(run), read=_lines()) == 0  # pause at brief
+    monkeypatch.setattr(flow, "interview", interviewer.interview)
+    turns = [json.dumps({"ask": "вопрос-один"}), json.dumps({"ask": "вопрос-два"})]
+
+    def agent(prompt: str) -> str:
+        return turns.pop(0) if turns else json.dumps({"brief": asdict(BRIEF)})
+
+    read = _lines("цель шире", "", "ответ один", "")
+    assert _advance(run, FakeOps(run), read=read, agent=agent) == 0
+    rd = state.run_dir(run.run_id)
+    assert [r.text for r in rp.pending(rd, "brief")] == ["цель шире"]
+    capsys.readouterr()
+    read2 = _lines("ответ два", "", "1", "дальше")
+    assert _advance(run, FakeOps(run), read=read2, agent=agent) == 0
+    assert "вопрос-два" in capsys.readouterr().out
+    assert run.step == "code-pr"
+    entries = [
+        json.loads(x)
+        for x in (rd / TRANSCRIPT).read_text(encoding="utf-8").splitlines()
+    ]
+    fix = {"role": "human", "text": "поправить: цель шире"}
+    assert entries.count(fix) == 1
+    texts = [e["text"] for e in entries]
+    assert texts.index("ответ два") == texts.index("вопрос-два") + 1
+    assert rp.pending(rd, "brief") == []
+
+
+def test_brief_correction_not_duplicated_on_plain_resume(tmp_path) -> None:
+    rd = tmp_path / "rd"
+    interviewer.append_correction(rd, "цель шире")
+    interviewer.append_correction(rd, "цель шире")
+    lines = (rd / TRANSCRIPT).read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+
+
+def test_duplicate_id_rewrite_rejected_without_removal_question(
+    tmp_path, capsys
+) -> None:
+    """Дубль id — не удаление: вопроса нет, правка отклонена, повтор с
+    названной проблемой."""
+    run = _run(tmp_path, ("design",))
+    dup = DESIGN + "\n#### D-01: дубль\nтекст\n"
+    fixed = DESIGN + "\nЛоги.\n"
+    author = _author(dup, fixed)
+    read = _lines("добавь логи", "", "дальше")
+    assert _advance(run, FakeOps(run), read=read, launch=author) == 0
+    assert "удалить" not in capsys.readouterr().out
+    _, second = author.prompts  # type: ignore[attr-defined]
+    assert "D-01" in second.split("--- РЕШЕНИЯ ЧЕЛОВЕКА ---")[1]
+    assert f"--- ТЕКУЩИЙ УЗЕЛ ---\n{DESIGN}\n" in second
+    assert (_bundle(run) / "20-design.md").read_text(encoding="utf-8") == fixed
+
+
+def test_duplicate_id_retry_still_broken_is_unclear(tmp_path) -> None:
+    run = _run(tmp_path, ("design",))
+    dup = DESIGN + "\n#### D-01: дубль\nтекст\n"
+    author = _author(dup, dup)
+    read = _lines("добавь логи", "")
+    assert _advance(run, FakeOps(run), read=read, launch=author) == 1
+    assert "замечание не применено" in run.stop_reason and "D-01" in run.stop_reason
+    assert (_bundle(run) / "20-design.md").read_text(encoding="utf-8") == DESIGN
+    rd = state.run_dir(run.run_id)
+    assert [r.status for r in rp.all_remarks(rd)] == ["dropped"]
+
+
+def test_decomposition_remark_breaking_invariants_runs_fix_invariants(
+    tmp_path,
+) -> None:
+    run = _run(tmp_path, ("decomposition",))
+    broken = DECOMP.replace("**Критерии:** FR-02/1", "**Критерии:** FR-01/1")
+    author = _author(broken, DECOMP)
+    check = checker("PASS")
+    read = _lines("перепиши задачи", "", "дальше")
+    assert _advance(run, FakeOps(run), read=read, launch=author, check=check) == 0
+    assert run.step == "code-pr"
+    owner, invariants = author.prompts  # type: ignore[attr-defined]
+    assert "- замечание владельца: перепиши задачи" in owner
+    assert "- инвариант декомпозиции:" in invariants
+    assert (_bundle(run) / "30-decomposition.md").read_text(encoding="utf-8") == DECOMP

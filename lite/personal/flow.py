@@ -36,9 +36,7 @@ from lite.interview_chat import Read
 from lite.output import say
 from lite.personal.brief import Brief, brief_from_json, render_brief
 from lite.personal.check import WAVES, NodeCheck, check_node, decomposition_problems
-
-# `_Log` — журнал интервью и его запись (одна реализация на оба места).
-from lite.personal.interviewer import TRANSCRIPT, Halt, _Log, interview
+from lite.personal.interviewer import Halt, append_correction, interview
 from lite.personal.nodes import FILENAMES, Launch, author_node, revise_node
 from lite.personal.state import PersonalRun, run_dir, save
 from lite.personal.tasks import TASKS_PATH, render_personal_tasks
@@ -75,7 +73,8 @@ NO_TTY = (
 
 
 def _stdin_is_tty() -> bool:
-    """stdin — терминал (как `lite.dfl._is_tty`; подменяется в тестах)."""
+    """stdin — терминал (как `lite.dfl._is_tty`): умолчание `advance(tty=…)`,
+    связано при определении — тесты передают свой `tty`, а не подменяют её."""
     return sys.stdin.isatty()
 
 
@@ -498,11 +497,7 @@ def _brief_by_owner(ctx: _Ctx, batch: list[rp.Remark]) -> bool:
     """Замечание к брифу — правка интервьюеру («поправить: …» в журнал
     интервью), бриф пересобирается и снова подтверждается «Верно?»."""
     rd = run_dir(ctx.run.run_id)
-    fix = "поправить: " + "\n".join(r.text for r in batch)
-    log = _Log(rd / TRANSCRIPT)
-    humans = [e for e in log.entries if e.get("role") == "human"]
-    if not humans or humans[-1].get("text") != fix:  # повтор после паузы — без дубля
-        log.append({"role": "human", "text": fix})
+    append_correction(rd, "\n".join(r.text for r in batch))
     return _interview(ctx, rd)
 
 
@@ -535,8 +530,10 @@ def _revise_by_owner(ctx: _Ctx, stage: str, batch: list[rp.Remark]) -> bool:
 
 
 def _owner_round(ctx: _Ctx, kind: str, before: str, decisions: str) -> tuple[str, str]:
-    """RF-2: удалённые/ослабленные id — вопрос по каждому; «нет» — файл
-    возвращается и один повтор с «<id> не удалять».
+    """RF-2: вопрос «удалить <id>?» — только об удалённых/пониженных id; «нет»
+    — файл возвращается и один повтор с «<id> не удалять». Сломанные id
+    (дубли, новые находки гейта, `<grammar>`) — правка отклоняется без
+    вопроса, один повтор с названной проблемой.
 
     Итог `(исход, подробность)`: `_ACCEPTED`; `_PAUSED` (`/стоп` на вопросе,
     без платного повтора); `_UNCLEAR` (повтор снова ослабляет; подробность —
@@ -545,18 +542,30 @@ def _owner_round(ctx: _Ctx, kind: str, before: str, decisions: str) -> tuple[str
     failed = _owner_revise(ctx, kind, before, decisions)
     if failed:
         return _FAILED, failed
-    bad = node_guard.weakened(before, path.read_text(encoding="utf-8"), set(), set())
+    after = path.read_text(encoding="utf-8")
+    bad = node_guard.weakened(before, after, set(), set())
     if not bad:
         return _ACCEPTED, ""
-    allowed = rp.confirm_removals(bad, read=ctx.read)
-    if allowed is None:
-        return _PAUSED, ""
-    kept = [item for item in bad if item not in allowed]
-    if not kept:
-        return _ACCEPTED, ""
+    olds = set(node_guard.node_items(before))
+    broken = node_guard.weakened(before, after, olds, olds)
+    allowed: set[str] = set()
+    if broken:
+        extra = [
+            (
+                f"- не ломать пункты {', '.join(broken)}: без дублей id и в "
+                "формате узла (прошлая правка их сломала)"
+            )
+        ]
+    else:
+        answer = rp.confirm_removals(bad, read=ctx.read)
+        if answer is None:
+            return _PAUSED, ""
+        allowed = answer
+        extra = [f"- {item} не удалять" for item in bad if item not in allowed]
+        if not extra:
+            return _ACCEPTED, ""
     path.write_text(before, encoding="utf-8")
-    keep = "\n".join(f"- {item} не удалять" for item in kept)
-    failed = _owner_revise(ctx, kind, before, f"{decisions}\n{keep}")
+    failed = _owner_revise(ctx, kind, before, "\n".join([decisions, *extra]))
     if failed:
         return _FAILED, failed
     after = path.read_text(encoding="utf-8")

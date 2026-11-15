@@ -173,6 +173,20 @@ def interview(run_dir: Path, subject: str, *, read: Read, agent: Agent) -> Brief
         say(PAID_CALLS.format(n=calls))
 
 
+def append_correction(run_dir: Path, text: str) -> None:
+    """Правка владельца к подтверждённому брифу — реплика человека
+    «поправить: <text>» в журнал интервью (следующий `interview` пересоберёт
+    бриф). Та же правка уже есть после последней сводки — не дублируется:
+    продолжение прерванного переинтервью идёт с открытого вопроса."""
+    log = _Log(run_dir / TRANSCRIPT)
+    fix = f"поправить: {text}"
+    summaries = [i for i, e in enumerate(log.entries) if e.get("kind") == "summary"]
+    tail = log.entries[summaries[-1] + 1 :] if summaries else log.entries
+    if any(e.get("role") == "human" and e.get("text") == fix for e in tail):
+        return
+    log.append({"role": "human", "text": fix})
+
+
 def _converse(log: _Log, subject: str, read: Read, agent: Agent) -> Brief:
     """Цикл разговора до подтверждённого брифа (остановка — `_Stop`)."""
     while True:
