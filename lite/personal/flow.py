@@ -288,6 +288,9 @@ def _node(ctx: _Ctx, kind: str) -> bool:
             return True
         if not result.findings:  # разбирать нечего: resolve_scope — NOT_APPLICABLE
             return ctx.stop(_no_findings_reason(name, result))
+        foreign = [f for f in result.findings if f.path != name]
+        if foreign:  # разбор правит только узел — разбирать нечего
+            return ctx.stop(_foreign_findings_reason(name, foreign))
         if round_no == MAX_ROUNDS:
             return ctx.stop(
                 f"замечания edge-check к {name} не сошлись за {MAX_ROUNDS} "
@@ -318,6 +321,24 @@ def _no_findings_reason(name: str, result: NodeCheck) -> str:
         f"edge-check {name}: вердикт {result.verdict} без блокирующих находок — "
         f"не пройдены критерии: {unmet}. Поправьте {name} по этим причинам и "
         f"повторите dfl run (повтор платный; {ABANDON})"
+    )
+
+
+def _foreign_findings_reason(name: str, foreign: list[ej.Finding]) -> str:
+    """Стоп по находкам не на узле (на основании, обычно `00-brief.md`):
+    разбор переписывает только `name`, поэтому называем файл, замечание и
+    честный выход."""
+    shown = "; ".join(
+        f"{f.rule_id} {f.cls} ({f.path or 'без файла'}:{f.lines}): {f.statement}"
+        for f in foreign
+    )
+    files = ", ".join(sorted({f.path or "без файла" for f in foreign}))
+    return (
+        f"edge-check {name}: замечания указывают не на {name}, а на {files} — "
+        f"{shown}. Разбор правит только {name}. Если замечание на деле о "
+        f"дизайне — поправьте {name} вручную и повторите dfl run (повтор "
+        f"платный); бриф подтверждён в разговоре и меняется только новым "
+        f"интервью — {ABANDON}"
     )
 
 

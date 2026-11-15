@@ -188,6 +188,12 @@ FINDING = {
 }
 
 
+def _on_node(edge_id: str) -> dict:
+    """FINDING, локализованная на файле узла ребра (как у настоящего ревьюера)."""
+    name = "30-decomposition.md" if "decomposition" in edge_id else "20-design.md"
+    return {**FINDING, "location": {"path": name, "lines": "1"}}
+
+
 def checker(*verdicts: str):
     """Fake edge-check: verdicts in order (last one repeats)."""
     seq = list(verdicts)
@@ -199,7 +205,7 @@ def checker(*verdicts: str):
         return {
             "edge": edge_id,
             "verdict": verdict,
-            "findings": [FINDING] if verdict == "FAIL" else [],
+            "findings": [_on_node(edge_id)] if verdict == "FAIL" else [],
             "subject": [],
             "error_code": "reviewer_failed",
             "reason": "прибор упал",
@@ -887,3 +893,28 @@ def test_paid_calls_count_recheck_and_revision(run, monkeypatch) -> None:
     [calls] = seen
     # дизайн на диске (не автор), декомпозиция: автор 1, правка 1, проверки 2
     assert (calls.author, calls.revise, calls.check) == (1, 1, 2)
+
+
+def test_finding_on_basis_file_names_file_and_action(run, monkeypatch) -> None:
+    """Регрессия ревью #774: находка на основании (00-brief.md) — стоп,
+    который называет файл, замечание и что делать; без «not_applicable» и
+    без платного разбора."""
+
+    def no_resolve(*a, **k):
+        raise AssertionError("resolution must not be called")
+
+    def fake(edge_id, bundle, subject, bases, **kw):
+        on_brief = {**FINDING, "location": {"path": "00-brief.md", "lines": "3"}}
+        return {
+            "edge": edge_id,
+            "verdict": "FAIL",
+            "findings": [FINDING, on_brief],
+            "subject": [],
+        }
+
+    monkeypatch.setattr(flow, "resolve_scope", no_resolve)
+    assert _advance(run, FakeOps(run), fake) == 1
+    reason = run.stop_reason
+    assert run.step == "design" and "not_applicable" not in reason
+    assert "00-brief.md:3" in reason and "R1 major" in reason and "плохо" in reason
+    assert "dfl abandon" in reason and "20-design.md" in reason
