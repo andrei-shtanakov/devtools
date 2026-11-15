@@ -465,3 +465,37 @@ def test_decomposition_remark_breaking_invariants_runs_fix_invariants(
     assert "- замечание владельца: перепиши задачи" in owner
     assert "- инвариант декомпозиции:" in invariants
     assert (_bundle(run) / "30-decomposition.md").read_text(encoding="utf-8") == DECOMP
+
+
+def test_manual_edit_on_pause_rechecked_before_done(tmp_path, capsys) -> None:
+    """Final review I1: ручная правка файла на экране паузы + «дальше» — узел
+    проверяется заново и пауза показывается снова, а не уходит без проверки."""
+    run = _run(tmp_path, ("design",))
+    path = _bundle(run) / "20-design.md"
+    edited = DESIGN + "\nПравка владельца руками.\n"
+    queue = ["дальше", "дальше"]
+
+    def read(prompt: str) -> str | None:
+        if len(queue) == 2:
+            path.write_text(edited, encoding="utf-8")
+        return queue.pop(0) if queue else None
+
+    check = checker("PASS")
+    assert _advance(run, FakeOps(run), read=read, check=check) == 0
+    assert run.step == "code-pr"
+    assert check.calls == [  # type: ignore[attr-defined]
+        DESIGN_EDGE,
+        DESIGN_EDGE,
+        DECOMP_EDGE,
+    ]
+    assert path.read_text(encoding="utf-8") == edited
+    assert capsys.readouterr().out.count(PAUSE_HEAD.format("дизайн")) == 2
+
+
+def test_paid_calls_line_printed_once(tmp_path, capsys) -> None:
+    """Final review minor: строка платных вызовов — одна, в конце `advance`."""
+    run = _run(tmp_path, ("design",))
+    author = _author(DESIGN + "\nЛоги пишутся в stderr.\n")
+    read = _lines("добавь логи", "", "дальше")
+    assert _advance(run, FakeOps(run), read=read, launch=author) == 0
+    assert capsys.readouterr().out.count("платных вызовов:") == 1

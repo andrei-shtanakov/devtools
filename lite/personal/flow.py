@@ -442,6 +442,8 @@ def _review(ctx: _Ctx, stage: str, files: list[str]) -> bool:
     Круг: недоигранные замечания (RF-1: применяются без вопроса) или новые
     с экрана паузы → правка (бриф — интервьюером, узел — автором с гвардом
     удалений) → «применено» → для узла проверка заново → снова пауза.
+    «Дальше» после ручной правки файла на экране — тоже проверка заново
+    и снова пауза (файл сверяется с хэшем, снятым при показе).
     `/стоп`/EOF — пауза (код 0); без терминала — тоже пауза (код 0)
     с подсказкой-ссылкой: ждёт человека, не сбой.
     """
@@ -457,25 +459,27 @@ def _review(ctx: _Ctx, stage: str, files: list[str]) -> bool:
     round_no = 0
     while True:
         batch = rp.pending(rd, stage)
-        if not batch:
+        if batch:
+            round_no += 1
+            say(f"замечания к этапу «{label}» — правка, круг {round_no}")
+            if not _apply_remarks(ctx, stage, batch):
+                return False
+            rp.mark_applied(rd, stage, len(batch))
+        else:
             answer = rp.ask(label, paths, read=ctx.read)
             if answer is None:
                 ctx.run.stop_reason = REVIEW_PAUSED.format(label=label)
                 say(ctx.run.stop_reason)
                 return False
-            if not answer:
+            if answer:
+                rp.record(rd, stage, answer)
+                continue
+            if not _edited_on_pause(ctx, stage):
                 return True
-            rp.record(rd, stage, answer)
-            continue
-        round_no += 1
-        say(f"замечания к этапу «{label}» — правка, круг {round_no}")
-        if not _apply_remarks(ctx, stage, batch):
-            return False
-        rp.mark_applied(rd, stage, len(batch))
+            # «дальше» после ручной правки на экране — как правленный узел
         if stage in _STAGE_KINDS and not _recheck(ctx, stage):
             return False
         _remember_checked(ctx, stage)
-        say(ctx.calls.line())
 
 
 def _recheck(ctx: _Ctx, stage: str) -> bool:
@@ -563,6 +567,15 @@ def _remember_checked(ctx: _Ctx, stage: str) -> None:
     marks[stage] = _node_digest(ctx, stage)
     path = run_dir(ctx.run.run_id) / REVIEW_PASSED
     path.write_text(json.dumps(marks, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _edited_on_pause(ctx: _Ctx, stage: str) -> bool:
+    """Файл этапа изменён с показа паузы (хэш ≠ отметки `_remember_checked`):
+    ручная правка владельца — проверяется заново, пауза показывается снова."""
+    try:
+        return _passed_marks(ctx).get(stage) != _node_digest(ctx, stage)
+    except OSError:
+        return True
 
 
 def _checked_before(ctx: _Ctx, stage: str) -> bool:
