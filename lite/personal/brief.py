@@ -224,11 +224,14 @@ def brief_problems(b: Brief) -> list[str]:
 
 
 def demote_uncovered(b: Brief) -> Brief:
-    """Move FRs without criteria into `open_items` (they stay for the owner)."""
+    """Move FRs without criteria into `open_items` (they stay for the owner).
+
+    The note names the function by title only: kept FRs are renumbered, so
+    the old id may now denote another function."""
     bare = [f for f in b.functions if not _has_criteria(f)]
     if not bare:
         return b
-    notes = tuple(f"{f.id} {f.title}: нет критерия приёмки" for f in bare)
+    notes = tuple(f"{f.title}: нет критерия приёмки" for f in bare)
     kept = [f for f in b.functions if _has_criteria(f)]
     return replace(
         b,

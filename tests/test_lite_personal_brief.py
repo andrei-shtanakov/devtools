@@ -193,7 +193,7 @@ def test_demote_uncovered() -> None:
     bare = Function("FR-02", "голая", ("G-01",), (), "w")
     out = demote_uncovered(make_brief(functions=(covered, bare)))
     assert out.functions == (covered,)
-    assert out.open_items == ("FR-02 голая: нет критерия приёмки",)
+    assert out.open_items == ("голая: нет критерия приёмки",)
 
 
 def test_demote_then_problems_has_no_order_issue() -> None:
@@ -205,5 +205,7 @@ def test_demote_then_problems_has_no_order_issue() -> None:
     out = demote_uncovered(make_brief(functions=fs))
     assert [f.id for f in out.functions] == ["FR-01", "FR-02"]
     assert out.functions[1].title == "c"
-    assert out.open_items == ("FR-02 b: нет критерия приёмки",)
+    # заметка — по названию: FR-02 теперь значит «c» (регрессия ревью #774)
+    assert out.open_items == ("b: нет критерия приёмки",)
+    assert not any("FR-" in note for note in out.open_items)
     assert brief_problems(out) == []
