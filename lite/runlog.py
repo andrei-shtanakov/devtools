@@ -18,6 +18,10 @@ KEEP = 20
 EXIT_PREFIX = "# код выхода: "
 QUIET_ENV = {"GH_PROMPT_DISABLED": "1", "GIT_TERMINAL_PROMPT": "0"}
 PASSTHROUGH_LEVEL = 3
+#: номер fd с экраном на время перехвата: строка, которую оператор должен
+#: увидеть сразу (подсказка `spec-runner tui`), пишется и туда, и в лог
+#: (читатель — `governance.auto_tasks.notice`; имя дублировано там)
+SCREEN_FD_ENV = "DFL_SCREEN_FD"
 _NAME = re.compile(r"^\d{8}T\d{12}Z(?:-\d+)?-(?P<command>.+)\.log$")
 
 
@@ -103,13 +107,14 @@ def captured(log: RunLog | None, level: int) -> Iterator[None]:
         return
     _flush_all(log)
     saved: list[int] = []
-    old_env = {k: os.environ.get(k) for k in QUIET_ENV}
+    old_env = {k: os.environ.get(k) for k in (*QUIET_ENV, SCREEN_FD_ENV)}
     try:
         saved.append(os.dup(1))
         saved.append(os.dup(2))
         os.dup2(log.fh.fileno(), 1)
         os.dup2(log.fh.fileno(), 2)
         os.environ.update(QUIET_ENV)
+        os.environ[SCREEN_FD_ENV] = str(saved[0])
         yield
     finally:
         try:
