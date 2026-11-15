@@ -216,6 +216,8 @@ def _node(ctx: _Ctx, kind: str) -> bool:
             return ctx.stop(f"проверка ребра не состоялась: {result.failure}")
         if _passed(ctx.run, kind, result):
             return True
+        if not result.findings:  # разбирать нечего: resolve_scope — NOT_APPLICABLE
+            return ctx.stop(_no_findings_reason(name, result))
         if round_no == MAX_ROUNDS:
             return ctx.stop(
                 f"замечания edge-check к {name} не сошлись за {MAX_ROUNDS} "
@@ -237,6 +239,16 @@ def _node(ctx: _Ctx, kind: str) -> bool:
             )
         ctx.calls.check += 1
         result = check_node(ctx.run, kind, check=ctx.check)
+
+
+def _no_findings_reason(name: str, result: NodeCheck) -> str:
+    """Стоп по вердикту без блокирующих находок: что не прошло и что делать."""
+    unmet = "; ".join(result.unmet) or "критерии в записи не названы"
+    return (
+        f"edge-check {name}: вердикт {result.verdict} без блокирующих находок — "
+        f"не пройдены критерии: {unmet}. Поправьте {name} по этим причинам и "
+        f"повторите dfl run (повтор платный; бросить прогон — dfl abandon)"
+    )
 
 
 def _scope(run: PersonalRun, kind: str) -> Scope:

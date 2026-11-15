@@ -642,3 +642,26 @@ def test_dirty_tree_stops_before_authoring(run) -> None:
         check=checker("PASS"),
     )
     assert rc == 1 and "src/app.py" in run.stop_reason and run.step == "design"
+
+
+def test_fail_without_findings_names_criteria(run, monkeypatch) -> None:
+    """FAIL без блокирующих находок — стоп с критериями, без разбора."""
+
+    def no_resolve(*a, **k):
+        raise AssertionError("resolution must not be called")
+
+    def fake(edge_id, bundle, subject, bases, **kw):
+        return {
+            "edge": edge_id,
+            "verdict": "FAIL",
+            "findings": [],
+            "subject": [],
+            "criteria": [{"id": "C2", "status": "fail", "reason": "нет модулей"}],
+        }
+
+    monkeypatch.setattr(flow, "resolve_scope", no_resolve)
+    assert _advance(run, FakeOps(run), fake) == 1
+    assert run.step == "design"
+    assert "C2 (fail): нет модулей" in run.stop_reason
+    assert "not_applicable" not in run.stop_reason
+    assert "20-design.md" in run.stop_reason

@@ -126,3 +126,24 @@ def test_cited_accepts_semicolons() -> None:
         "FR-02/1",
         "FR-03/2",
     }
+
+
+def test_unmet_criteria_from_record(tmp_path: Path) -> None:
+    """FAIL без блокирующих находок: непройденные критерии записи — в `unmet`."""
+    run = _run(tmp_path)
+
+    def fake(edge_id, bundle, subject, bases, **kw):
+        return {
+            "edge": edge_id,
+            "verdict": "FAIL",
+            "findings": [],
+            "subject": [],
+            "criteria": [
+                {"id": "C1", "status": "pass", "reason": "ок"},
+                {"id": "C2", "status": "fail", "reason": "нет модулей"},
+            ],
+        }
+
+    res = check.check_node(run, "personal-design", check=fake)
+    assert res.verdict == "FAIL" and res.findings == []
+    assert res.unmet == ("C2 (fail): нет модулей",)

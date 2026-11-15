@@ -32,11 +32,16 @@ _CHECKS = re.compile(r"^## Проверки\s*$(.*?)(?=^## |\Z)", re.MULTILINE |
 
 @dataclass(frozen=True)
 class NodeCheck:
-    """Итог проверки узла; `failure` непуст при `ERROR`/сбое прибора."""
+    """Итог проверки узла; `failure` непуст при `ERROR`/сбое прибора.
+
+    `unmet` — непройденные критерии записи (`criteria[]`) строками
+    «id (status): reason»: причина FAIL, у которого нет блокирующих находок.
+    """
 
     verdict: str
     findings: list[ej.Finding]
     failure: str
+    unmet: tuple[str, ...] = ()
 
 
 def check_node(
@@ -71,7 +76,18 @@ def check_node(
         reason = f"{result.get('error_code', '')}: {result.get('reason', '')}"
         return NodeCheck(verdict, [], reason.strip(": ") or "ERROR")
     findings = ej.blocking_findings(run_dir(run.run_id), wave)
-    return NodeCheck(verdict, findings, "")
+    return NodeCheck(verdict, findings, "", _unmet(result.get("criteria")))
+
+
+def _unmet(criteria: object) -> tuple[str, ...]:
+    """Критерии записи со статусом не `pass` — «id (status): reason»."""
+    if not isinstance(criteria, list):
+        return ()
+    return tuple(
+        f"{c.get('id')} ({c.get('status')}): {c.get('reason') or 'без причины'}"
+        for c in criteria
+        if isinstance(c, dict) and c.get("status") != "pass"
+    )
 
 
 def split_decomposition(text: str) -> tuple[str, str]:
