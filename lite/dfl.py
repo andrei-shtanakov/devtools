@@ -1279,9 +1279,10 @@ def _report_step(
     """Итог шага по уровням для прогона `state`: строка итога `line`, вопрос,
     состояние, следующий шаг (на уровне 0, если он — действие человека).
 
-    Пауза просмотра в разговоре (`chatting`) — без строки итога и следующего
-    шага: экран паузы `_owner_review_rounds` идёт сразу за шагом."""
-    screen = _owner_screen_next(state, code, chatting=chatting)
+    Пауза просмотра — без строки итога и следующего шага: за шагом идёт
+    экран паузы `_owner_review_rounds` (разговор) или строка со ссылками
+    `_say_owner_review_wait` (без терминала, автор не claude)."""
+    screen = _owner_pause_next(state, code)
     if line is not None and not screen:
         say(line)
     stop = sf.load(state.run_id, state.status)
@@ -1303,11 +1304,11 @@ def _report_step(
     _say_next(state)
 
 
-def _owner_screen_next(state: rs.RunState, code: int, *, chatting: bool) -> bool:
-    """За шагом в этом же `dfl run` последует экран паузы просмотра."""
+def _owner_pause_next(state: rs.RunState, code: int) -> bool:
+    """За шагом в этом же `dfl run` последует экран паузы просмотра или
+    строка ожидания со ссылками (`run` печатает её после шага без разговора)."""
     return (
-        chatting
-        and code == 0
+        code == 0
         and state.status == runner.WAITING_OWNER_REVIEW
         and not runner.review_pause_passed(state)
     )

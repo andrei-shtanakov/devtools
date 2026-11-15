@@ -443,3 +443,15 @@ def test_manual_edit_after_no_tty_hint_marks_revised(
     _lines(monkeypatch, "дальше", "дальше")
     assert env.run("run", "--subject", "t") == 0
     assert seen == [{"status": "completed", "revised": True}]
+
+
+def test_no_tty_only_links_line(env: Env, monkeypatch, capfd) -> None:  # noqa: F811
+    """Final review #768 minor 5: без терминала — одна строка ожидания (со
+    ссылками), без «ждёт просмотра этапа: dfl run» перед ней."""
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch, False)
+    _steps(env, monkeypatch)
+    assert env.run("run", "--subject", "t") == 0
+    out, _ = _read(capfd)
+    assert "ждёт просмотра этапа: dfl run" not in out
+    assert out.count("ждёт просмотра этапа «дизайн, приёмка» — откройте") == 1
