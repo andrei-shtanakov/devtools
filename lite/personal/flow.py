@@ -11,9 +11,11 @@ spec-runner → integration-PR, который мержит человек. По
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 import os
 import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -28,12 +30,15 @@ from governance.facts import Outcome as FactOutcome
 from governance.ops import Ops
 from lite import edge_journal as ej
 from lite import node_guard
+from lite import review_pause as rp
 from lite.edge_resolve import MAX_ROUNDS, Outcome, PaidCalls, Scope, resolve_scope
 from lite.interview_chat import Read
 from lite.output import say
 from lite.personal.brief import Brief, brief_from_json, render_brief
 from lite.personal.check import WAVES, NodeCheck, check_node, decomposition_problems
-from lite.personal.interviewer import Halt, interview
+
+# `_Log` — журнал интервью и его запись (одна реализация на оба места).
+from lite.personal.interviewer import TRANSCRIPT, Halt, _Log, interview
 from lite.personal.nodes import FILENAMES, Launch, author_node, revise_node
 from lite.personal.state import PersonalRun, run_dir, save
 from lite.personal.tasks import TASKS_PATH, render_personal_tasks
@@ -52,6 +57,21 @@ _GIT_ERRORS = (RuntimeError, subprocess.CalledProcessError, OSError)
 #: проверяются до них (`_guard` без git-эффектов)
 _BEFORE_PR = ("interview", "design", "decomposition")
 FALLBACK_BASE = "master"
+#: пауза на просмотр (#768): этап → подпись для человека и вид узла
+STAGE_LABELS = {"brief": "бриф", "design": "дизайн", "decomposition": "декомпозиция"}
+_STAGE_KINDS = {"design": "personal-design", "decomposition": "personal-decomposition"}
+#: хэши узлов, прошедших проверку перед паузой: повтор `dfl run` на паузе не
+#: платит за проверку заново, если файл не меняли
+REVIEW_PASSED = "review-passed.json"
+REVIEW_PAUSED = "просмотр этапа «{label}» прерван — " + RETRY
+NO_TTY = (
+    "ждёт просмотра этапа «{label}» — откройте {links}; замечания — dfl run в терминале"
+)
+
+
+def _stdin_is_tty() -> bool:
+    """stdin — терминал (как `lite.dfl._is_tty`; подменяется в тестах)."""
+    return sys.stdin.isatty()
 
 
 @dataclass
@@ -68,6 +88,8 @@ class _Ctx:
     stopped: bool = False
     #: база прогона: `run.base_ref` или (не установлена) `FALLBACK_BASE`
     base: str = FALLBACK_BASE
+    #: есть терминал для паузы на просмотр (спрашивается только на паузе)
+    tty: Callable[[], bool] = _stdin_is_tty
 
     def stop(self, reason: str) -> bool:
         """Записать и показать причину стопа; `False` — шаг встал."""
@@ -89,13 +111,15 @@ def advance(
     agent: Agent,
     launch: Launch = launch_author,
     check: Callable = run_check,
+    tty: Callable[[], bool] = _stdin_is_tty,
 ) -> int:
     """Выполнить шаги прогона, пока можно.
 
     0 — дошёл до `code-pr`/`done` или ждёт человека; 1 — стоп
     (`run.stop_reason` записан и выведен). После каждого шага — `save(run)`.
+    `tty` — есть ли терминал для паузы на просмотр этапа (#768).
     """
-    ctx = _Ctx(run, ops, read, agent, launch, check)
+    ctx = _Ctx(run, ops, read, agent, launch, check, tty=tty)
     run.stop_reason = ""
     save(run)
     ctx.base = _base(run, ops)
@@ -137,17 +161,34 @@ def _base(run: PersonalRun, ops: Ops) -> str:
 
 
 def _step_interview(ctx: _Ctx) -> bool:
-    """Интервью → `brief.json` (R8-a), `00-brief.md`, запись одобрения."""
+    """Интервью → `brief.json` (R8-a), `00-brief.md`, запись одобрения;
+    с паузой на `brief` — затем просмотр (подтверждённый бриф не переспрашивается)."""
     run = ctx.run
     rd = run_dir(run.run_id)
     rd.mkdir(parents=True, exist_ok=True)
-    brief = interview(rd, run.subject, read=ctx.read, agent=ctx.agent)
+    paused = "brief" in run.review_pause
+    if not (paused and _brief_written(ctx, rd)) and not _interview(ctx, rd):
+        return False
+    if paused and not _review(ctx, "brief", [FILENAMES["brief"]]):
+        return False
+    run.step = "design"
+    return True
+
+
+def _interview(ctx: _Ctx, rd: Path) -> bool:
+    """Интервью до подтверждённого брифа и его запись; `False` — пауза/стоп."""
+    brief = interview(rd, ctx.run.subject, read=ctx.read, agent=ctx.agent)
     if brief is Halt.PAUSED:  # человек прервал — пауза, не сбой (код 0)
-        run.stop_reason = INTERVIEW_PAUSED
+        ctx.run.stop_reason = INTERVIEW_PAUSED
         say(INTERVIEW_PAUSED)
         return False
     if isinstance(brief, Halt):
         return ctx.stop(f"интервью не завершено — {RETRY}")
+    _write_brief(ctx, rd, brief)
+    return True
+
+
+def _write_brief(ctx: _Ctx, rd: Path, brief: Brief) -> None:
     (rd / BRIEF_JSON).write_text(
         json.dumps(asdict(brief), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -155,8 +196,11 @@ def _step_interview(ctx: _Ctx) -> bool:
     ctx.bundle.mkdir(parents=True, exist_ok=True)
     (ctx.bundle / FILENAMES["brief"]).write_text(render_brief(brief), encoding="utf-8")
     _approve_brief(rd / APPROVALS)
-    run.step = "design"
-    return True
+
+
+def _brief_written(ctx: _Ctx, rd: Path) -> bool:
+    """Бриф уже подтверждён и записан (возобновление паузы на `brief`)."""
+    return (rd / BRIEF_JSON).is_file() and (ctx.bundle / FILENAMES["brief"]).is_file()
 
 
 def _approve_brief(path: Path) -> None:
@@ -175,13 +219,29 @@ def _approve_brief(path: Path) -> None:
 
 
 def _step_design(ctx: _Ctx) -> bool:
-    if not _node(ctx, "personal-design"):
+    if not (_checked_before(ctx, "design") or _node(ctx, "personal-design")):
+        return False
+    if "design" in ctx.run.review_pause and not _review(
+        ctx, "design", [FILENAMES["personal-design"]]
+    ):
         return False
     ctx.run.step = "decomposition"
     return True
 
 
 def _step_decomposition(ctx: _Ctx) -> bool:
+    """Декомпозиция готова (`_decomposition_ready`), с паузой — просмотр."""
+    if not (_checked_before(ctx, "decomposition") or _decomposition_ready(ctx)):
+        return False
+    if "decomposition" in ctx.run.review_pause and not _review(
+        ctx, "decomposition", [FILENAMES["personal-decomposition"]]
+    ):
+        return False
+    ctx.run.step = "spec-pr"
+    return True
+
+
+def _decomposition_ready(ctx: _Ctx) -> bool:
     """Узел декомпозиции и её инварианты (граф DT/BEH, покрытие критериев).
 
     Нарушения правит автор (спека §4.4/§8: человек отвечает только на
@@ -199,7 +259,6 @@ def _step_decomposition(ctx: _Ctx) -> bool:
         text = path.read_text(encoding="utf-8")
         problems = decomposition_problems(text, brief)
         if not problems:
-            ctx.run.step = "spec-pr"
             return True
         if round_no > MAX_ROUNDS:
             break
@@ -220,17 +279,10 @@ def _fix_invariants(ctx: _Ctx, kind: str, before: str, problems: list[str]) -> b
     возвращается, стоп."""
     run, name = ctx.run, FILENAMES[kind]
     path = ctx.bundle / name
-    call = AuthorCall(
-        run_id=run.run_id,
-        run_dir=os.path.realpath(run_dir(run.run_id)),
-        target_dir=run.target_dir,
-        bundle_dir=run.bundle_dir,
-        filename=name,
-    )
     ctx.calls.revise += 1
     try:
         outcome = revise_node(
-            call,
+            _author_call(run, name),
             kind,
             run.subject,
             before,
@@ -256,6 +308,16 @@ def _fix_invariants(ctx: _Ctx, kind: str, before: str, problems: list[str]) -> b
         return True
     path.write_text(before, encoding="utf-8")
     return ctx.stop(f"{reason} — {RETRY} ({ABANDON})")
+
+
+def _author_call(run: PersonalRun, name: str) -> AuthorCall:
+    return AuthorCall(
+        run_id=run.run_id,
+        run_dir=os.path.realpath(run_dir(run.run_id)),
+        target_dir=run.target_dir,
+        bundle_dir=run.bundle_dir,
+        filename=name,
+    )
 
 
 def _load_brief(ctx: _Ctx) -> Brief | None:
@@ -370,6 +432,168 @@ def _accepted(run: PersonalRun, wave: int) -> set | None:
         return override.accepted(ej.level_records(rd, wave), ej.overridden(rd, wave))
     except (OSError, ValueError, KeyError, TypeError):
         return None
+
+
+# --- review pause (#768) -----------------------------------------------------
+
+
+def _review(ctx: _Ctx, stage: str, files: list[str]) -> bool:
+    """Пауза на просмотр этапа: `True` — «дальше», `False` — стоп или пауза.
+
+    Круг: недоигранные замечания (RF-1: применяются без вопроса) или новые
+    с экрана паузы → правка (бриф — интервьюером, узел — автором с гвардом
+    удалений) → «применено» → для узла проверка заново → снова пауза.
+    `/стоп`/EOF — пауза (код 0); без терминала — стоп со ссылкой.
+    """
+    rd = run_dir(ctx.run.run_id)
+    paths = [ctx.bundle / name for name in files]
+    label = STAGE_LABELS[stage]
+    _remember_checked(ctx, stage)
+    if not ctx.tty():
+        links = ", ".join(f"file://{p.resolve()}" for p in paths)
+        return ctx.stop(NO_TTY.format(label=label, links=links))
+    round_no = 0
+    while True:
+        batch = rp.pending(rd, stage)
+        if not batch:
+            answer = rp.ask(label, paths, read=ctx.read)
+            if answer is None:
+                ctx.run.stop_reason = REVIEW_PAUSED.format(label=label)
+                say(ctx.run.stop_reason)
+                return False
+            if not answer:
+                return True
+            rp.record(rd, stage, answer)
+            continue
+        round_no += 1
+        say(f"замечания к этапу «{label}» — правка, круг {round_no}")
+        if not _apply_remarks(ctx, stage, batch):
+            return False
+        rp.mark_applied(rd, stage, len(batch))
+        if stage in _STAGE_KINDS and not _recheck(ctx, stage):
+            return False
+        _remember_checked(ctx, stage)
+        say(ctx.calls.line())
+
+
+def _recheck(ctx: _Ctx, stage: str) -> bool:
+    """Проверка узла заново после правки (edge-check с разбором #762)."""
+    if stage == "decomposition":
+        return _decomposition_ready(ctx)
+    return _node(ctx, _STAGE_KINDS[stage])
+
+
+def _apply_remarks(ctx: _Ctx, stage: str, batch: list[rp.Remark]) -> bool:
+    if stage == "brief":
+        return _brief_by_owner(ctx, batch)
+    return _revise_by_owner(ctx, _STAGE_KINDS[stage], batch)
+
+
+def _brief_by_owner(ctx: _Ctx, batch: list[rp.Remark]) -> bool:
+    """Замечание к брифу — правка интервьюеру («поправить: …» в журнал
+    интервью), бриф пересобирается и снова подтверждается «Верно?»."""
+    rd = run_dir(ctx.run.run_id)
+    fix = "поправить: " + "\n".join(r.text for r in batch)
+    log = _Log(rd / TRANSCRIPT)
+    humans = [e for e in log.entries if e.get("role") == "human"]
+    if not humans or humans[-1].get("text") != fix:  # повтор после паузы — без дубля
+        log.append({"role": "human", "text": fix})
+    return _interview(ctx, rd)
+
+
+def _revise_by_owner(ctx: _Ctx, kind: str, batch: list[rp.Remark]) -> bool:
+    """Правка узла автором по замечаниям владельца; не принята — файл
+    возвращается, стоп."""
+    path = ctx.bundle / FILENAMES[kind]
+    before = path.read_text(encoding="utf-8")
+    decisions = "\n".join(f"- замечание владельца: {r.text}" for r in batch)
+    try:
+        reason = _owner_round(ctx, kind, before, decisions)
+    except BaseException:
+        path.write_text(before, encoding="utf-8")
+        raise
+    if reason is None:
+        return True
+    path.write_text(before, encoding="utf-8")
+    return ctx.stop(f"{reason} — {RETRY}")
+
+
+def _owner_round(ctx: _Ctx, kind: str, before: str, decisions: str) -> str | None:
+    """RF-2: удалённые/ослабленные id — вопрос по каждому; «нет» — файл
+    возвращается и один повтор с «<id> не удалять». `None` — правка принята."""
+    path = ctx.bundle / FILENAMES[kind]
+    failed = _owner_revise(ctx, kind, before, decisions)
+    if failed:
+        return failed
+    bad = node_guard.weakened(before, path.read_text(encoding="utf-8"), set(), set())
+    if not bad:
+        return None
+    allowed = rp.confirm_removals(bad, read=ctx.read)
+    kept = [item for item in bad if item not in allowed]
+    if not kept:
+        return None
+    path.write_text(before, encoding="utf-8")
+    keep = "\n".join(f"- {item} не удалять" for item in kept)
+    failed = _owner_revise(ctx, kind, before, f"{decisions}\n{keep}")
+    if failed:
+        return failed
+    after = path.read_text(encoding="utf-8")
+    still = node_guard.weakened(before, after, allowed, allowed)
+    if still:
+        return f"правка удаляет {', '.join(still)} — уточните замечание"
+    return None
+
+
+def _owner_revise(ctx: _Ctx, kind: str, before: str, decisions: str) -> str | None:
+    """Один вызов автора; сбой — причина, иначе `None`."""
+    name = FILENAMES[kind]
+    ctx.calls.revise += 1
+    outcome = revise_node(
+        _author_call(ctx.run, name),
+        kind,
+        ctx.run.subject,
+        before,
+        "нет",
+        decisions,
+        launch=ctx.launch,
+    )
+    if outcome.code != 0:
+        return f"правка {name} не состоялась: {outcome.reason or outcome.code}"
+    return None
+
+
+def _node_digest(ctx: _Ctx, stage: str) -> str:
+    kind = _STAGE_KINDS.get(stage)
+    path = ctx.bundle / FILENAMES[kind or stage]
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _passed_marks(ctx: _Ctx) -> dict[str, str]:
+    path = run_dir(ctx.run.run_id) / REVIEW_PASSED
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _remember_checked(ctx: _Ctx, stage: str) -> None:
+    """Запомнить хэш узла, прошедшего проверку перед паузой."""
+    marks = _passed_marks(ctx)
+    marks[stage] = _node_digest(ctx, stage)
+    path = run_dir(ctx.run.run_id) / REVIEW_PASSED
+    path.write_text(json.dumps(marks, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _checked_before(ctx: _Ctx, stage: str) -> bool:
+    """Узел этапа с паузой уже проверен и не менялся (возобновление паузы)."""
+    if stage not in ctx.run.review_pause:
+        return False
+    mark = _passed_marks(ctx).get(stage)
+    try:
+        return mark is not None and mark == _node_digest(ctx, stage)
+    except OSError:
+        return False
 
 
 # --- spec-pr -----------------------------------------------------------------
@@ -526,6 +750,9 @@ def _pr_body(run: PersonalRun) -> str:
     if accepted:
         lines += ["", "Принято вопреки замечаниям edge-check (журнал прогона):"]
         lines += [f"- {key}" for key in accepted]
+    remarks = rp.pr_section(run_dir(run.run_id))
+    if remarks:
+        lines += ["", remarks.rstrip("\n")]
     return "\n".join(lines) + "\n"
 
 
