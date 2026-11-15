@@ -27,7 +27,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from lite.interview_chat import Read, is_skip, read_answer
+from lite.interview_chat import Read, read_answer
 from lite.output import say
 from lite.personal.brief import (
     Brief,
@@ -46,6 +46,9 @@ PROMPT_PATH = Path(__file__).parent / "prompts" / "interviewer.md"
 CAP_NOTE = "СЕЙЧАС: лимит вопросов исчерпан"
 CONFIRM = "Верно? 1. да · 2. поправить: <что>"
 WHAT_TO_FIX = "Что поправить?"
+#: на «Верно?» словом «да» тоже подтверждают; «не знаю» — поправка, не стоп
+YES_WORDS = frozenset({"да", "верно", "ок"})
+SKIP_WORD = "пропустить"
 FORM_STOP = (
     "агент не ответил по форме дважды подряд — интервью остановлено; "
     "продолжить: dfl run"
@@ -335,14 +338,16 @@ def _checks_in_row(entries: list[Entry]) -> int:
 
 
 def _confirmed(brief: Brief, log: _Log, read: Read) -> bool:
-    """Сводка и «верно?»: «1» — да; поправка записывается, `False`."""
+    """Сводка и «верно?»: «1»/«да»/«верно»/«ок» — да; «пропустить», `/стоп`,
+    EOF — стоп; иное (и «не знаю») — поправка записывается, `False`."""
     say(render_brief(brief))
     while True:
         say(CONFIRM)
         text = read_answer(read, quick=str.isdigit)
-        if text is None or is_skip(text):
+        word = (text or "").strip().casefold()
+        if text is None or word == SKIP_WORD:
             raise _Stop
-        if text == "1":
+        if text == "1" or word in YES_WORDS:
             return True
         fix = _correction(text, read)
         if fix:

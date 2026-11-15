@@ -264,8 +264,10 @@ def test_agent_unavailable_stops(
 def test_stop_word_and_skip_on_confirmation(tmp_path: Path) -> None:
     result, _, _ = run(tmp_path, [ask("Что?")], ["/стоп"])
     assert result is None
-    result, _, _ = run(tmp_path / "b", [brief(GOOD)], ["пропустить"])
+    result, agent, events = run(tmp_path / "b", [brief(GOOD)], ["пропустить", ""])
     assert result is None
+    assert len(agent.prompts) == 1
+    assert events == ["agent", "read", "read"]
 
 
 def test_paid_calls_reported(
@@ -321,3 +323,22 @@ def test_corrupt_transcript_line_skipped(
     out = capsys.readouterr().out
     assert out.count(iv.CORRUPT_LINE) == 2
     assert "Человек: только я" in agent.prompts[0]
+
+
+@pytest.mark.parametrize("word", ["да", " Верно ", "ОК"])
+def test_word_yes_confirms_without_agent_call(tmp_path: Path, word: str) -> None:
+    result, agent, _ = run(tmp_path, [brief(GOOD)], [word, ""])
+    assert result is not None
+    assert len(agent.prompts) == 1
+
+
+def test_dont_know_at_confirmation_does_not_stop(tmp_path: Path) -> None:
+    result, agent, _ = run(tmp_path, [brief(GOOD), brief(GOOD)], ["не знаю", "", "1"])
+    assert result is not None
+    assert len(agent.prompts) == 2
+    assert "Человек: поправить: не знаю" in agent.prompts[1]
+
+
+def test_prompt_contradiction_example_uses_options() -> None:
+    text = iv.PROMPT_PATH.read_text(encoding="utf-8")
+    assert '"options": ["верно первое", "верно второе", "своё"]' in text
