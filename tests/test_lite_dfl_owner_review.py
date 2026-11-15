@@ -316,8 +316,8 @@ def test_candidate_body_has_owner_remarks(
     assert _candidate_body(state, op, None) == plain  # не применено — раздела нет
     rp.mark_applied(rd, "design", 1)
     body = _candidate_body(state, op, None)
-    assert body == plain + "\n\n" + rp.pr_section(rd).rstrip("\n")
-    assert "- design: уточнить D-01" in body
+    assert body == plain + "\n\n" + rp.pr_section(rd, op["nodes"]).rstrip("\n")
+    assert "- дизайн: уточнить D-01" in body
 
 
 def test_revised_wave_paused_again(env: Env, monkeypatch, capfd) -> None:  # noqa: F811
@@ -372,3 +372,35 @@ def test_non_claude_author_at_terminal_hint(env: Env, monkeypatch, capfd) -> Non
     ) in out
     assert "dfl run в терминале" not in out
     assert seen == [] and rs.load(RUN_ID).status == runner.WAITING_OWNER_REVIEW
+
+
+def test_candidate_body_only_own_wave(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Candidate-PR волны несёт замечания только к своим узлам."""
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    state = _candidate_state(tmp_path)
+    rd = rs.run_dir(RUN_ID)
+    rp.record(rd, "requirements", "уточнить FR-01")
+    rp.mark_applied(rd, "requirements", 1)
+    rp.record(rd, "design", "уточнить D-01")
+    rp.mark_applied(rd, "design", 1)
+    w2 = _candidate_body(state, {"nodes": ["requirements"]}, None)
+    w4 = _candidate_body(state, {"nodes": ["design", "acceptance"]}, None)
+    assert "- требования: уточнить FR-01" in w2 and "дизайн:" not in w2
+    assert "- дизайн: уточнить D-01" in w4 and "требования:" not in w4
+    assert "Замечания владельца" not in _candidate_body(
+        state, {"nodes": ["charter"]}, None
+    )
+
+
+def test_one_run_output_no_duplicate_wait_hint(env: Env, monkeypatch, capfd) -> None:  # noqa: F811
+    """Видимый вывод одного `dfl run`, дошедшего до паузы: экран паузы без
+    строки «ждёт просмотра этапа: dfl run» перед ним (она — для путей без
+    экрана)."""
+    _setup(env, monkeypatch, "дальше", "дальше")
+    assert env.run("run", "--subject", "t") == 0
+    out, _ = _read(capfd)
+    assert "ждёт просмотра этапа" not in out
+    assert out.count("этап «дизайн» готов и прошёл проверку") == 1
+    assert out.rstrip().endswith(f"прогон {RUN_ID}: running")

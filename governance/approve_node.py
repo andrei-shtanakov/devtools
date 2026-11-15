@@ -1802,9 +1802,12 @@ def _candidate_title(state: RunState, op: dict) -> str:
 
 def _candidate_body(state: RunState, op: dict, debt: na.NodeDebt | None) -> str:
     """Тело candidate-PR волны; применённые замечания владельца на паузе
-    просмотра (#768) — разделом в конце, без замечаний тело прежнее."""
+    просмотра (#768) — разделом в конце, только к узлам этой волны
+    (`op["nodes"]`); без замечаний тело прежнее."""
     body = _candidate_text(state, op, debt)
-    section = review_remarks.pr_section(rs.run_dir(state.run_id))
+    section = review_remarks.pr_section(
+        rs.run_dir(state.run_id), stages=op.get("nodes") or ()
+    )
     return f"{body}\n\n{section.rstrip()}" if section else body
 
 

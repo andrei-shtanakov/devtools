@@ -57,7 +57,7 @@ _GIT_ERRORS = (RuntimeError, subprocess.CalledProcessError, OSError)
 _BEFORE_PR = ("interview", "design", "decomposition")
 FALLBACK_BASE = "master"
 #: пауза на просмотр (#768): этап → подпись для человека и вид узла
-STAGE_LABELS = {"brief": "бриф", "design": "дизайн", "decomposition": "декомпозиция"}
+STAGE_LABELS = rp.STAGE_LABELS
 _STAGE_KINDS = {"design": "personal-design", "decomposition": "personal-decomposition"}
 #: хэши узлов, прошедших проверку перед паузой: повтор `dfl run` на паузе не
 #: платит за проверку заново, если файл не меняли

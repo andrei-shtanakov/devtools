@@ -16,12 +16,23 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 
 REMARKS = "review-remarks.jsonl"
 APPLIED, DROPPED, PENDING = "applied", "dropped", "pending"
 _CONSUMED = (APPLIED, DROPPED)
+#: русские названия этапов обоих путей (экран паузы, раздел PR)
+STAGE_LABELS = {
+    "brief": "бриф",
+    "charter": "устав",
+    "requirements": "требования",
+    "behaviour-spec": "спецификация поведения",
+    "design": "дизайн",
+    "acceptance": "приёмка",
+    "decomposition": "декомпозиция",
+}
 
 
 @dataclass(frozen=True)
@@ -121,14 +132,20 @@ def mark_dropped(run_dir: Path, stage: str, upto: int) -> None:
     _append(run_dir, {"kind": DROPPED, "stage": stage, "upto": upto})
 
 
-def pr_section(run_dir: Path) -> str:
+def pr_section(run_dir: Path, stages: Collection[str] | None = None) -> str:
     """Раздел описания PR: применённые замечания списком, отклонённые —
-    отдельной строкой; нет ни тех, ни других — пустая строка."""
-    remarks = all_remarks(run_dir)
-    lines = [f"- {r.stage}: {r.text}" for r in remarks if r.status == APPLIED]
-    dropped = [f"{r.stage}: {r.text}" for r in remarks if r.status == DROPPED]
+    отдельной строкой; нет ни тех, ни других — пустая строка. `stages` —
+    только эти этапы (candidate-PR волны — её узлы); `None` — все."""
+    remarks = [r for r in all_remarks(run_dir) if stages is None or r.stage in stages]
+    lines = [f"- {_named(r)}" for r in remarks if r.status == APPLIED]
+    dropped = [_named(r) for r in remarks if r.status == DROPPED]
     if dropped:
         lines += ["", "не применены (правка удаляла пункты): " + "; ".join(dropped)]
     if not lines:
         return ""
     return "## Замечания владельца\n\n" + "\n".join(lines).lstrip("\n") + "\n"
+
+
+def _named(remark: Remark) -> str:
+    """«<этап по-русски>: <текст>»."""
+    return f"{STAGE_LABELS.get(remark.stage, remark.stage)}: {remark.text}"

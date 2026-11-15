@@ -16,6 +16,7 @@ from governance.review_remarks import (  # noqa: F401 — публичные и�
     DROPPED,
     PENDING,
     REMARKS,
+    STAGE_LABELS,
     Remark,
     all_remarks,
     mark_applied,

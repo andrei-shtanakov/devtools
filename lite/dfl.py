@@ -150,15 +150,6 @@ TRACK_NO_TTY_HINT = (
     "тип проекта не спрошен (нет терминала) — enterprise; личный проект: "
     "dfl run --subject '…' --track personal"
 )
-#: подписи узлов enterprise-волны на экране паузы просмотра (#768)
-OWNER_STAGE_LABELS = {
-    "charter": "устав",
-    "requirements": "требования",
-    "behaviour-spec": "спецификация поведения",
-    "design": "дизайн",
-    "acceptance": "приёмка",
-    "decomposition": "декомпозиция",
-}
 OWNER_REVIEW_PAUSED = "просмотр этапа «{label}» прерван — продолжить: dfl run"
 OWNER_NEEDS_CLAUDE = (
     "замечания на паузе поддерживаются только с автором claude "
@@ -885,7 +876,7 @@ def _say_owner_review_wait(repo: str, subject: str | None, *, tty: bool) -> None
     if tty:
         say(OWNER_NEEDS_CLAUDE.format(links=links))
         return
-    label = ", ".join(OWNER_STAGE_LABELS[kind] for kind, _path in files)
+    label = ", ".join(rp.STAGE_LABELS[kind] for kind, _path in files)
     say(orv.NO_TTY.format(label=label, links=links))
 
 
@@ -907,7 +898,7 @@ def _owner_node(
     на экране паузы; правка принята — op помечен «правлено», затем
     замечания «применены». `None` — дальше; иначе код (0 — пауза)."""
     rd = rs.run_dir(state.run_id)
-    label = OWNER_STAGE_LABELS[stage]
+    label = rp.STAGE_LABELS[stage]
     batch = rp.pending(rd, stage)
     if not batch:
         answer = rp.ask(label, [path], read=ic.stdin_read)
@@ -1212,8 +1203,12 @@ def _report_step(
     line: str | None,
 ) -> None:
     """Итог шага по уровням для прогона `state`: строка итога `line`, вопрос,
-    состояние, следующий шаг (на уровне 0, если он — действие человека)."""
-    if line is not None:
+    состояние, следующий шаг (на уровне 0, если он — действие человека).
+
+    Пауза просмотра в разговоре (`chatting`) — без строки итога и следующего
+    шага: экран паузы `_owner_review_rounds` идёт сразу за шагом."""
+    screen = _owner_screen_next(state, code, chatting=chatting)
+    if line is not None and not screen:
         say(line)
     stop = sf.load(state.run_id, state.status)
     for text, level in sf.shown(stop) if stop is not None else []:
@@ -1229,7 +1224,19 @@ def _report_step(
         return  # как отвечать — уже сказано (вопрос) или скажет цикл
     if chatting and state.status == sf.EDGE:
         return  # вместо «поправьте» — разбор; не начнётся — скажет он
+    if screen:
+        return
     _say_next(state)
+
+
+def _owner_screen_next(state: rs.RunState, code: int, *, chatting: bool) -> bool:
+    """За шагом в этом же `dfl run` последует экран паузы просмотра."""
+    return (
+        chatting
+        and code == 0
+        and state.status == runner.WAITING_OWNER_REVIEW
+        and not runner.review_pause_passed(state)
+    )
 
 
 def _say_next(state: rs.RunState) -> None:

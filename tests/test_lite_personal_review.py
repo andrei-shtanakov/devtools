@@ -201,8 +201,8 @@ def test_unclear_remark_not_replayed(tmp_path) -> None:
     rd = state.run_dir(run.run_id)
     assert rp.pending(rd, "design") == []
     assert [r.status for r in rp.all_remarks(rd)] == ["dropped"]
-    assert "- design: убери поиск" not in rp.pr_section(rd)
-    assert "не применены (правка удаляла пункты): design: убери поиск" in (
+    assert "- дизайн: убери поиск" not in rp.pr_section(rd)
+    assert "не применены (правка удаляла пункты): дизайн: убери поиск" in (
         rp.pr_section(rd)
     )
 
@@ -370,7 +370,7 @@ def test_spec_pr_body_has_owner_remarks(tmp_path) -> None:
     read = _lines("добавь логи", "", "дальше")
     assert _advance(run, ops, read=read, launch=author) == 0
     assert run.spec_pr == SPEC_PR
-    assert "## Замечания владельца\n\n- design: добавь логи\n" in ops.body
+    assert "## Замечания владельца\n\n- дизайн: добавь логи\n" in ops.body
 
 
 def test_spec_pr_body_unchanged_without_remarks(tmp_path) -> None:

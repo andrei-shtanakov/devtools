@@ -99,7 +99,7 @@ def test_pr_section_lists_applied(tmp_path: Path) -> None:
     rp.record(tmp_path, "design", "не применено")
     section = rp.pr_section(tmp_path)
     assert section.startswith("## Замечания владельца")
-    assert "- design: добавь X" in section
+    assert "- дизайн: добавь X" in section
     assert "не применено" not in section
 
 
@@ -135,9 +135,9 @@ def test_dropped_not_pending_and_listed_separately(tmp_path: Path) -> None:
     assert [r.text for r in rp.pending(tmp_path, "design")] == ["ещё Z"]
     section = rp.pr_section(tmp_path)
     assert section.startswith("## Замечания владельца")
-    assert "- design: добавь X" in section
-    assert "не применены (правка удаляла пункты): design: убери Y" in section
-    assert "- design: убери Y" not in section and "ещё Z" not in section
+    assert "- дизайн: добавь X" in section
+    assert "не применены (правка удаляла пункты): дизайн: убери Y" in section
+    assert "- дизайн: убери Y" not in section and "ещё Z" not in section
 
 
 def test_pr_section_only_dropped(tmp_path: Path) -> None:
@@ -145,4 +145,4 @@ def test_pr_section_only_dropped(tmp_path: Path) -> None:
     rp.mark_dropped(tmp_path, "design", 1)
     section = rp.pr_section(tmp_path)
     assert section.startswith("## Замечания владельца")
-    assert "не применены (правка удаляла пункты): design: убери Y" in section
+    assert "не применены (правка удаляла пункты): дизайн: убери Y" in section
