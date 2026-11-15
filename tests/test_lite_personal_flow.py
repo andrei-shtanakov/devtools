@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 
 from governance.author_launch import LaunchOutcome
+from governance.brief_facts import DefaultBranch
+from governance.facts import Fact, Outcome
 from lite import edge_resolve as er
 from lite.personal import flow, state
 from lite.personal.brief import Brief, Context, Function, Goal, brief_from_json
@@ -47,6 +49,11 @@ class FakeOps:
         self.prs: list[dict] = []
         self.existing_pr: int | None = None
         self.spec_head = HEAD
+        self.default: Fact = Fact(Outcome.FOUND, DefaultBranch("master", "s"))
+
+    def default_branch_fact(self, repo_slug: str) -> Fact:
+        self.calls.append(("default_branch_fact", repo_slug))
+        return self.default
 
     def dirty_paths(self, target_dir: str) -> list[str]:
         self.calls.append(("dirty_paths", target_dir))
@@ -200,6 +207,9 @@ def test_happy_path_to_code_pr(run, capsys) -> None:
     tasks_path = f"spec/{ws}-tasks.md"
     effects = [c for c in ops.calls if c[0] not in ("prs_by_head_prefix",)]
     assert effects == [
+        ("default_branch_fact", "o/repo"),
+        ("dirty_paths", target),
+        ("current_branch", target),
         ("dirty_paths", target),
         ("current_branch", target),
         ("checkout_and_pull", target, "master"),
@@ -267,7 +277,7 @@ def test_resume_real_handlers_from_spec_pr(run) -> None:
     ops = FakeOps(run)
     assert _advance(run, ops, check) == 0
     assert check.calls == [] and run.step == "code-pr"  # type: ignore[attr-defined]
-    assert ops.names()[0] == "dirty_paths"
+    assert ops.names()[:2] == ["default_branch_fact", "dirty_paths"]
 
 
 def test_fail_then_revised_then_pass(run, monkeypatch) -> None:
@@ -306,7 +316,7 @@ def test_not_converged_stops_after_max_rounds(run, monkeypatch, capsys) -> None:
     assert run.step == "design" and "не сошлись" in run.stop_reason
     assert state.load(run.run_id).stop_reason == run.stop_reason
     assert run.stop_reason in capsys.readouterr().out
-    assert ops.calls == []
+    assert ops.names() == ["default_branch_fact", "dirty_paths", "current_branch"]
 
 
 def test_resolution_stopped_stops(run, monkeypatch) -> None:
@@ -316,6 +326,7 @@ def test_resolution_stopped_stops(run, monkeypatch) -> None:
 
 
 def test_dirty_tree_stops_before_git_effects(run) -> None:
+    _nodes_on_disk(run)
     ops = FakeOps(run)
     ops.dirty = [f"{run.bundle_dir}/00-brief.md", "src/app.py"]
     assert _advance(run, ops) == 1
@@ -332,6 +343,7 @@ def test_own_bundle_files_are_not_dirt(run) -> None:
 
 
 def test_wrong_branch_stops_before_git_effects(run) -> None:
+    _nodes_on_disk(run)
     ops = FakeOps(run)
     ops.branch = "feature/x"
     assert _advance(run, ops) == 1
@@ -564,3 +576,69 @@ def test_approval_not_duplicated_on_rerun(run) -> None:
     flow._approve_brief(rd / flow.APPROVALS)
     flow._approve_brief(rd / flow.APPROVALS)
     assert len((rd / flow.APPROVALS).read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_main_default_branch_resolved_before_interview(run, monkeypatch) -> None:
+    """Цель на `main`: база — ветка по умолчанию форджи, записана до интервью."""
+    seen: list[str] = []
+    monkeypatch.setattr(
+        flow, "interview", lambda *a, **k: seen.append(run.base_ref) or BRIEF
+    )
+    ops = FakeOps(run)
+    ops.default = Fact(Outcome.FOUND, DefaultBranch("main", "s"))
+    ops.branch = "main"
+    assert _advance(run, ops) == 0
+    assert seen == ["main"] and state.load(run.run_id).base_ref == "main"
+    assert ("checkout_and_pull", run.target_dir, "main") in ops.calls
+    assert ("create_pr", "o/repo", f"spec/{run.ws_id}-personal", "", "main") in (
+        ops.calls
+    )
+    assert run.step == "code-pr"
+
+
+def test_default_branch_unknown_not_persisted(run, capsys) -> None:
+    ops = FakeOps(run)
+    ops.default = Fact(Outcome.UNAVAILABLE, None, "сеть")
+    assert _advance(run, ops) == 0
+    assert run.base_ref == "" and state.load(run.run_id).base_ref == ""
+    assert ("checkout_and_pull", run.target_dir, "master") in ops.calls
+    assert "сеть" in capsys.readouterr().out
+
+
+def test_stored_base_ref_not_asked_again(run) -> None:
+    run.base_ref = "trunk"
+    ops = FakeOps(run)
+    ops.branch = "trunk"
+    assert _advance(run, ops) == 0
+    assert "default_branch_fact" not in ops.names()
+
+
+def test_wrong_branch_stops_before_interview(run, monkeypatch) -> None:
+    monkeypatch.setattr(
+        flow, "interview", lambda *a, **k: pytest.fail("платное интервью")
+    )
+    ops = FakeOps(run)
+    ops.branch = "feature/x"
+    assert _advance(run, ops) == 1
+    assert run.step == "interview"
+    assert "master" in run.stop_reason and f"spec/{run.ws_id}-personal" in (
+        run.stop_reason
+    )
+
+
+def test_dirty_tree_stops_before_authoring(run) -> None:
+    def no_launch(call, prompt):
+        raise AssertionError("платный автор")
+
+    run.step = "design"
+    ops = FakeOps(run)
+    ops.dirty = ["src/app.py"]
+    rc = flow.advance(
+        run,
+        ops,
+        read=lambda: None,
+        agent=lambda p: "",
+        launch=no_launch,
+        check=checker("PASS"),
+    )
+    assert rc == 1 and "src/app.py" in run.stop_reason and run.step == "design"

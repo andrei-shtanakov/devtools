@@ -42,6 +42,10 @@ BRIEF_APPROVAL = {"node": "brief", "how": "подтверждено в разг�
 RETRY = "продолжить: dfl run"
 _RECHECK = (Outcome.REVISED, Outcome.OVERRIDDEN)
 _GIT_ERRORS = (RuntimeError, subprocess.CalledProcessError, OSError)
+#: шаги до spec-PR: впереди платные интервью и авторинг — дерево и ветка
+#: проверяются до них (`_guard` без git-эффектов)
+_BEFORE_PR = ("interview", "design", "decomposition")
+FALLBACK_BASE = "master"
 
 
 @dataclass
@@ -56,6 +60,8 @@ class _Ctx:
     check: Callable
     calls: PaidCalls = field(default_factory=PaidCalls)
     stopped: bool = False
+    #: база прогона: `run.base_ref` или (не установлена) `FALLBACK_BASE`
+    base: str = FALLBACK_BASE
 
     def stop(self, reason: str) -> bool:
         """Записать и показать причину стопа; `False` — шаг встал."""
@@ -86,6 +92,10 @@ def advance(
     ctx = _Ctx(run, ops, read, agent, launch, check)
     run.stop_reason = ""
     save(run)
+    ctx.base = _base(run, ops)
+    if run.step in _BEFORE_PR and _guard(ctx) is None:
+        save(run)
+        return 1
     while run.step != "done":
         moved = STEP_HANDLERS[run.step](ctx)
         save(run)
@@ -94,6 +104,27 @@ def advance(
     if ctx.calls.spent():
         say(ctx.calls.line())
     return 1 if ctx.stopped else 0
+
+
+def _base(run: PersonalRun, ops: Ops) -> str:
+    """База прогона: `run.base_ref`, а пустая — ветка по умолчанию цели.
+
+    Как `governance.runner._resolve_base_ref` (#729): установленный факт
+    форджи записывается в прогон до платных шагов; не установлен —
+    `FALLBACK_BASE` вслух и БЕЗ записи (следующий `dfl run` переспросит).
+    """
+    if run.base_ref:
+        return run.base_ref
+    fact = ops.default_branch_fact(run.repo_slug)
+    if not fact.established or fact.value is None:
+        say(
+            f"ветка по умолчанию {run.repo_slug} не установлена ({fact.detail}) — "
+            f"база {FALLBACK_BASE} (не закрепляется)"
+        )
+        return FALLBACK_BASE
+    run.base_ref = fact.value.name
+    save(run)
+    return run.base_ref
 
 
 # --- interview ---------------------------------------------------------------
@@ -259,6 +290,9 @@ def _spec_branch(run: PersonalRun) -> str:
 def _guard(ctx: _Ctx) -> str | None:
     """RF-3: чужая грязь или не та ветка — стоп до любого git-эффекта.
 
+    Зовётся и в начале `advance` на шагах до spec-PR — до платных интервью
+    и авторинга (сам git-эффектов не делает).
+
     Узлы бандла и `tasks.md` — свои файлы прогона (написаны в рабочее
     дерево до ветки), грязью не считаются. Ветка прогона допустима
     (возобновление после падения между веткой и PR). Возвращает текущую
@@ -280,10 +314,11 @@ def _guard(ctx: _Ctx) -> str | None:
         )
         return None
     branch = ops.current_branch(run.target_dir)
-    if branch not in (run.base_ref, _spec_branch(run)):
+    if branch not in (ctx.base, _spec_branch(run)):
         ctx.stop(
             f"{run.target_dir} на ветке {branch or '(detached)'}, ожидалась "
-            f"{run.base_ref} — переключитесь и повторите dfl run"
+            f"{ctx.base} (или ветка прогона {_spec_branch(run)}) — "
+            "переключитесь и повторите dfl run"
         )
         return None
     return branch
@@ -303,7 +338,7 @@ def _open_spec_pr(ctx: _Ctx) -> bool:
         )
     except (OSError, RuntimeError, ValueError) as exc:
         return ctx.stop(f"tasks.md не построен: {exc}")
-    target, base = run.target_dir, run.base_ref
+    target, base = run.target_dir, ctx.base
     branch = _spec_branch(run)
     tasks = _tasks_rel(run)
     try:
@@ -379,9 +414,9 @@ def _merge_spec_pr(ctx: _Ctx) -> bool:
             )
         say(f"spec-PR #{pr} вмержен")
     try:
-        ops.checkout_and_pull(run.target_dir, run.base_ref)
+        ops.checkout_and_pull(run.target_dir, ctx.base)
     except _GIT_ERRORS as exc:
-        return ctx.stop(f"checkout/pull {run.base_ref} не удался: {exc} — {RETRY}")
+        return ctx.stop(f"checkout/pull {ctx.base} не удался: {exc} — {RETRY}")
     run.step = "code-run"
     return True
 

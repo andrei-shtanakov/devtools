@@ -42,7 +42,9 @@ class PersonalRun:
     target_dir: str
     bundle_dir: str
     step: str = "interview"
-    base_ref: str = "master"
+    #: база прогона; пусто — ещё не установлена (ветка по умолчанию цели,
+    #: записывается, только когда факт форджи установлен — `flow._base`)
+    base_ref: str = ""
     spec_pr: int | None = None
     code_pr: int | None = None
     stop_reason: str = ""
