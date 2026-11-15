@@ -46,6 +46,10 @@ def check_node(
     edge_id, bases = EDGES[kind]
     wave = WAVES[kind]
     bundle = Path(run.target_dir) / run.bundle_dir
+    record_path = (
+        run_dir(run.run_id) / "edge-check" / f"w{wave}" / f"{kind}--{edge_id}.json"
+    )
+    record_path.unlink(missing_ok=True)  # сбой прибора не оставляет старых находок
     try:
         result = check(
             edge_id,
@@ -57,10 +61,9 @@ def check_node(
         )
     except Exception as exc:  # noqa: BLE001 - прибор не роняет прогон
         return NodeCheck("ERROR", [], f"{type(exc).__name__}: {exc}")
-    out = run_dir(run.run_id) / "edge-check" / f"w{wave}"
-    out.mkdir(parents=True, exist_ok=True)
+    record_path.parent.mkdir(parents=True, exist_ok=True)
     record = {**result, "node": kind, "wave": wave}
-    (out / f"{kind}--{edge_id}.json").write_text(
+    record_path.write_text(
         json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     verdict = str(result.get("verdict"))
@@ -78,7 +81,9 @@ def split_decomposition(text: str) -> tuple[str, str]:
 
 
 def _cited(checks: str) -> set[str]:
-    return {c.strip() for m in _CRITERIA.finditer(checks) for c in m[1].split(",")}
+    return {
+        c.strip() for m in _CRITERIA.finditer(checks) for c in re.split(r"[,;]", m[1])
+    }
 
 
 def decomposition_problems(text: str, brief: Brief) -> list[str]:

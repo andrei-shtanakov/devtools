@@ -104,3 +104,25 @@ def test_split_decomposition() -> None:
     checks, whole = check.split_decomposition(text)
     assert "BEH-01" in checks and "DT-01" not in checks and whole == text
     assert check.split_decomposition("x")[0] == ""
+
+
+def test_error_after_fail_leaves_no_stale_findings(tmp_path: Path) -> None:
+    run = _run(tmp_path)
+    finding = {"rule_id": "R1", "class": "major", "statement": "x", "location": {}}
+    check.check_node(run, "personal-design", check=_fake("FAIL", [finding]))
+    rd = state.run_dir(run.run_id)
+    assert ej.blocking_findings(rd, 1)
+
+    def boom(*a, **k):
+        raise RuntimeError("down")
+
+    res = check.check_node(run, "personal-design", check=boom)
+    assert res.failure and ej.blocking_findings(rd, 1) == []
+
+
+def test_cited_accepts_semicolons() -> None:
+    assert check._cited("**Критерии:** FR-01/1; FR-02/1, FR-03/2") == {
+        "FR-01/1",
+        "FR-02/1",
+        "FR-03/2",
+    }
