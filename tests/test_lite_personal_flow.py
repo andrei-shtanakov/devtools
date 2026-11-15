@@ -14,6 +14,7 @@ from governance.facts import Fact, Outcome
 from lite import edge_resolve as er
 from lite.personal import flow, state
 from lite.personal.brief import Brief, Context, Function, Goal, brief_from_json
+from lite.personal.interviewer import Halt
 
 FIXTURES = Path(__file__).parent / "fixtures" / "personal"
 SPEC_PR = 41
@@ -392,10 +393,20 @@ def test_decomposition_problems_stop(run) -> None:
     assert "FR-03/1" in run.stop_reason and run.step == "decomposition"
 
 
-def test_interview_stopped(run, monkeypatch) -> None:
-    monkeypatch.setattr(flow, "interview", lambda *a, **k: None)
+def test_interview_failed_stops(run, monkeypatch) -> None:
+    monkeypatch.setattr(flow, "interview", lambda *a, **k: Halt.FAILED)
     assert _advance(run, FakeOps(run)) == 1
     assert run.step == "interview" and run.stop_reason
+    assert not (_bundle(run) / "00-brief.md").exists()
+
+
+def test_interview_paused_is_not_failure(run, monkeypatch, capsys) -> None:
+    """Человек прервал интервью (/стоп, Ctrl-D, Ctrl-C) — код 0, не сбой."""
+    monkeypatch.setattr(flow, "interview", lambda *a, **k: Halt.PAUSED)
+    assert _advance(run, FakeOps(run)) == 0
+    assert run.step == "interview"
+    assert run.stop_reason == flow.INTERVIEW_PAUSED
+    assert flow.INTERVIEW_PAUSED in capsys.readouterr().out
     assert not (_bundle(run) / "00-brief.md").exists()
 
 

@@ -30,7 +30,7 @@ from lite.interview_chat import Read
 from lite.output import say
 from lite.personal.brief import Brief, brief_from_json, render_brief
 from lite.personal.check import WAVES, NodeCheck, check_node, decomposition_problems
-from lite.personal.interviewer import interview
+from lite.personal.interviewer import Halt, interview
 from lite.personal.nodes import FILENAMES, Launch, author_node, revise_node
 from lite.personal.state import PersonalRun, run_dir, save
 from lite.personal.tasks import TASKS_PATH, render_personal_tasks
@@ -40,6 +40,7 @@ BRIEF_JSON = "brief.json"
 APPROVALS = "approvals.jsonl"
 BRIEF_APPROVAL = {"node": "brief", "how": "подтверждено в разговоре"}
 RETRY = "продолжить: dfl run"
+INTERVIEW_PAUSED = f"интервью прервано — {RETRY}"
 #: хвост стопов, после которых прогон может быть проще начать заново
 ABANDON = "бросить прогон и начать заново — dfl abandon"
 _RECHECK = (Outcome.REVISED, Outcome.OVERRIDDEN)
@@ -138,7 +139,11 @@ def _step_interview(ctx: _Ctx) -> bool:
     rd = run_dir(run.run_id)
     rd.mkdir(parents=True, exist_ok=True)
     brief = interview(rd, run.subject, read=ctx.read, agent=ctx.agent)
-    if brief is None:
+    if brief is Halt.PAUSED:  # человек прервал — пауза, не сбой (код 0)
+        run.stop_reason = INTERVIEW_PAUSED
+        say(INTERVIEW_PAUSED)
+        return False
+    if isinstance(brief, Halt):
         return ctx.stop(f"интервью не завершено — {RETRY}")
     (rd / BRIEF_JSON).write_text(
         json.dumps(asdict(brief), ensure_ascii=False, indent=2) + "\n",

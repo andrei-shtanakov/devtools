@@ -61,7 +61,7 @@ def brief(data: dict[str, Any]) -> str:
 class Script:
     """Scripted agent (list of replies) recording prompts and read events."""
 
-    def __init__(self, replies: list[str | Exception], events: list[str]) -> None:
+    def __init__(self, replies: list[str | BaseException], events: list[str]) -> None:
         self.replies = list(replies)
         self.prompts: list[str] = []
         self.events = events
@@ -70,7 +70,7 @@ class Script:
         self.prompts.append(prompt)
         self.events.append("agent")
         reply = self.replies.pop(0)
-        if isinstance(reply, Exception):
+        if isinstance(reply, BaseException):
             raise reply
         return reply
 
@@ -88,8 +88,8 @@ class Reader:
 
 
 def run(
-    tmp_path: Path, replies: list[str | Exception], lines: list[str]
-) -> tuple[Brief | None, Script, list[str]]:
+    tmp_path: Path, replies: list[str | BaseException], lines: list[str]
+) -> tuple[Brief | iv.Halt, Script, list[str]]:
     events: list[str] = []
     agent = Script(replies, events)
     result = iv.interview(tmp_path, "заметки", read=Reader(lines, events), agent=agent)
@@ -123,7 +123,7 @@ def test_ask_then_brief_confirmed(tmp_path: Path) -> None:
 def test_problems_go_back_to_agent_not_human(tmp_path: Path) -> None:
     replies = [brief(bare_fr()), brief(GOOD)]
     result, agent, events = run(tmp_path, replies, ["1"])
-    assert result is not None
+    assert isinstance(result, Brief)
     assert "FR-02: нет критерия приёмки" in agent.prompts[1]
     assert events[:2] == ["agent", "agent"]
     check = [e for e in transcript(tmp_path) if e["role"] == "check"]
@@ -141,7 +141,7 @@ def test_cap_forces_summary_and_demotes(
     assert iv.CAP_NOTE not in agent.prompts[iv.MAX_QUESTIONS - 1]
     out = capsys.readouterr().out
     assert "## Уточнить" in out
-    assert result is not None
+    assert isinstance(result, Brief)
     assert [f.id for f in result.functions] == ["FR-01"]
     assert any("Экспорт" in i for i in result.open_items)
 
@@ -150,7 +150,7 @@ def test_ask_after_cap_is_form_error(tmp_path: Path) -> None:
     replies = [ask(f"Вопрос {n}?", ["да"]) for n in range(iv.MAX_QUESTIONS)]
     replies += [ask("Ещё один?"), brief(GOOD)]
     result, agent, _ = run(tmp_path, replies, ["1"] * (iv.MAX_QUESTIONS + 1))
-    assert result is not None
+    assert isinstance(result, Brief)
     assert "brief" in agent.prompts[-1].split(iv.CAP_NOTE)[-1]
     asks = [e for e in transcript(tmp_path) if e.get("kind") == "ask"]
     assert len(asks) == iv.MAX_QUESTIONS
@@ -161,7 +161,7 @@ def test_three_checks_in_row_then_forced(tmp_path: Path) -> None:
     result, agent, events = run(tmp_path, replies, ["1"])
     assert len(agent.prompts) == 4
     assert events[:4] == ["agent"] * 4
-    assert result is not None
+    assert isinstance(result, Brief)
     assert [f.id for f in result.functions] == ["FR-01"]
     checks = [e for e in transcript(tmp_path) if e["role"] == "check"]
     assert len(checks) == iv.MAX_CHECKS_IN_ROW
@@ -171,7 +171,7 @@ def test_remaining_problems_go_to_open_items_when_forced(tmp_path: Path) -> None
     data = copy.deepcopy(GOOD)
     data["context"]["platform"] = ""
     result, _, _ = run(tmp_path, [brief(data)] * 4, ["1"])
-    assert result is not None
+    assert isinstance(result, Brief)
     assert "контекст: пустое поле «Платформа»" in result.open_items
 
 
@@ -182,7 +182,7 @@ def test_correction_continues_conversation(tmp_path: Path) -> None:
     result, agent, _ = run(
         tmp_path, replies, ["2. поправить: платформа Linux", "", "1"]
     )
-    assert result is not None
+    assert isinstance(result, Brief)
     assert result.context.platform == "Linux"
     assert "Человек: поправить: платформа Linux" in agent.prompts[1]
 
@@ -194,7 +194,7 @@ def test_correction_at_cap_still_reaches_agent(tmp_path: Path) -> None:
     replies += [brief(GOOD), brief(fixed)]
     lines = ["1"] * iv.MAX_QUESTIONS + ["2", "платформа Linux", "", "1"]
     result, agent, _ = run(tmp_path, replies, lines)
-    assert result is not None and result.context.platform == "Linux"
+    assert isinstance(result, Brief) and result.context.platform == "Linux"
     assert "платформа Linux" in agent.prompts[-1]
     assert iv.CAP_NOTE in agent.prompts[-1]
 
@@ -211,7 +211,7 @@ def test_resume_from_transcript(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     result, agent, events = run(tmp_path, [brief(GOOD)], ["1"])
-    assert result is not None
+    assert isinstance(result, Brief)
     assert "Кто пользуется?" in agent.prompts[0]
     assert "только я" in agent.prompts[0]
     assert events == ["agent", "read"]
@@ -232,7 +232,7 @@ def test_resume_pending_question_without_agent(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     result, agent, events = run(tmp_path, [brief(GOOD)], ["2", "1"])
-    assert result is not None
+    assert isinstance(result, Brief)
     assert events[0] == "read"
     assert "Человек: 2. семья" in agent.prompts[0]
 
@@ -241,21 +241,21 @@ def test_malformed_agent_twice_stops(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     result, agent, _ = run(tmp_path, ["привет", "не знаю, что сказать"], [])
-    assert result is None
+    assert result is iv.Halt.FAILED
     assert "агент не ответил по форме" in capsys.readouterr().out
     assert "в ответе нет JSON-объекта" in agent.prompts[1]
 
 
 def test_malformed_once_then_ok(tmp_path: Path) -> None:
     result, _, _ = run(tmp_path, ['{"brief": {"goals": 1}}', brief(GOOD)], ["1"])
-    assert result is not None
+    assert isinstance(result, Brief)
 
 
 def test_agent_unavailable_stops(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     result, _, _ = run(tmp_path, [AgentUnavailable("нет ответа за 300 с")], [])
-    assert result is None
+    assert result is iv.Halt.FAILED
     out = capsys.readouterr().out
     assert "нет ответа за 300 с" in out
     assert "платных вызовов агента: 1" in out
@@ -263,9 +263,9 @@ def test_agent_unavailable_stops(
 
 def test_stop_word_and_skip_on_confirmation(tmp_path: Path) -> None:
     result, _, _ = run(tmp_path, [ask("Что?")], ["/стоп"])
-    assert result is None
+    assert result is iv.Halt.PAUSED
     result, agent, events = run(tmp_path / "b", [brief(GOOD)], ["пропустить", ""])
-    assert result is None
+    assert result is iv.Halt.PAUSED
     assert len(agent.prompts) == 1
     assert events == ["agent", "read", "read"]
 
@@ -275,7 +275,7 @@ def test_paid_calls_reported(
 ) -> None:
     replies = [ask("Кто?", ["я"]), ask("Что?", ["это"]), brief(GOOD)]
     result, agent, _ = run(tmp_path, replies, ["1", "1", "1"])
-    assert result is not None
+    assert isinstance(result, Brief)
     out = capsys.readouterr().out
     assert f"платных вызовов агента: {len(agent.prompts)}" in out
     assert out.count("платных вызовов агента") == 1
@@ -308,7 +308,7 @@ def test_empty_brief_not_offered_for_confirmation(
     assert iv.NOTHING_TO_BUILD in out
     assert out.count(iv.CONFIRM) == 1
     assert "Человек: экспорт в csv за секунду" in agent.prompts[-1]
-    assert result is not None and result.functions[0].id == "FR-01"
+    assert isinstance(result, Brief) and result.functions[0].id == "FR-01"
 
 
 def test_corrupt_transcript_line_skipped(
@@ -319,7 +319,7 @@ def test_corrupt_transcript_line_skipped(
         '{"role": "agent", "te\n' + good + "\n[1, 2]\n", encoding="utf-8"
     )
     result, agent, _ = run(tmp_path, [brief(GOOD)], ["1"])
-    assert result is not None
+    assert isinstance(result, Brief)
     out = capsys.readouterr().out
     assert out.count(iv.CORRUPT_LINE) == 2
     assert "Человек: только я" in agent.prompts[0]
@@ -328,13 +328,13 @@ def test_corrupt_transcript_line_skipped(
 @pytest.mark.parametrize("word", ["да", " Верно ", "ОК"])
 def test_word_yes_confirms_without_agent_call(tmp_path: Path, word: str) -> None:
     result, agent, _ = run(tmp_path, [brief(GOOD)], [word, ""])
-    assert result is not None
+    assert isinstance(result, Brief)
     assert len(agent.prompts) == 1
 
 
 def test_dont_know_at_confirmation_does_not_stop(tmp_path: Path) -> None:
     result, agent, _ = run(tmp_path, [brief(GOOD), brief(GOOD)], ["не знаю", "", "1"])
-    assert result is not None
+    assert isinstance(result, Brief)
     assert len(agent.prompts) == 2
     assert "Человек: поправить: не знаю" in agent.prompts[1]
 
@@ -342,3 +342,20 @@ def test_dont_know_at_confirmation_does_not_stop(tmp_path: Path) -> None:
 def test_prompt_contradiction_example_uses_options() -> None:
     text = iv.PROMPT_PATH.read_text(encoding="utf-8")
     assert '"options": ["верно первое", "верно второе", "своё"]' in text
+
+
+def test_eof_on_question_is_pause(tmp_path: Path) -> None:
+    result, _, _ = run(tmp_path, [ask("Что?")], [])
+    assert result is iv.Halt.PAUSED
+
+
+def test_ctrl_c_during_agent_call_is_pause(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ctrl-C во время платного вызова агента: пауза (не сбой), разговор цел,
+    число платных вызовов напечатано."""
+    replies: list[str | BaseException] = [ask("Кто?", ["я"]), KeyboardInterrupt()]
+    result, agent, _ = run(tmp_path, replies, ["1"])
+    assert result is iv.Halt.PAUSED and len(agent.prompts) == 2
+    assert [e["role"] for e in transcript(tmp_path)] == ["agent", "human"]
+    assert "платных вызовов агента: 2" in capsys.readouterr().out

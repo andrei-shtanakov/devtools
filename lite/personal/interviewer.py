@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import enum
 import json
 import re
 from dataclasses import dataclass, replace
@@ -91,8 +92,21 @@ class BriefTurn:
     data: dict[str, Any]
 
 
+class Halt(enum.Enum):
+    """Почему интервью не дало бриф."""
+
+    #: человек прервал (`/стоп`, EOF, Ctrl-C, «пропустить») — пауза, не сбой
+    PAUSED = "paused"
+    #: агент дважды не по форме или недоступен — сбой
+    FAILED = "failed"
+
+
 class _Stop(Exception):
-    """Разговор остановлен; сообщение (если нужно) уже выведено."""
+    """Человек остановил разговор."""
+
+
+class _Failed(Exception):
+    """Агент не смог вести разговор; сообщение уже выведено."""
 
 
 class _Log:
@@ -129,12 +143,12 @@ def _parse_entry(line: str) -> Entry | None:
     return None
 
 
-def interview(run_dir: Path, subject: str, *, read: Read, agent: Agent) -> Brief | None:
-    """Вести свободное интервью; подтверждённый человеком бриф или `None`.
+def interview(run_dir: Path, subject: str, *, read: Read, agent: Agent) -> Brief | Halt:
+    """Вести свободное интервью; подтверждённый человеком бриф или `Halt`.
 
-    `None` — человек остановился (`/стоп`, EOF, «пропустить» на подтверждении),
-    агент дважды подряд ответил не по форме или недоступен (сообщение уже
-    выведено). Разговор хранится в `run_dir / TRANSCRIPT` и продолжается с него.
+    `Halt.PAUSED` — человек остановился (`/стоп`, EOF, Ctrl-C, «пропустить»
+    на подтверждении); `Halt.FAILED` — агент дважды подряд ответил не по
+    форме или недоступен (сообщение уже выведено). Разговор хранится в `run_dir / TRANSCRIPT` и продолжается с него.
     Число платных вызовов агента печатается один раз в конце."""
     calls = 0
 
@@ -146,13 +160,15 @@ def interview(run_dir: Path, subject: str, *, read: Read, agent: Agent) -> Brief
     try:
         return _converse(_Log(run_dir / TRANSCRIPT), subject, read, counted)
     except _Stop:
-        return None
+        return Halt.PAUSED
+    except _Failed:
+        return Halt.FAILED
     except AgentUnavailable as exc:
         say(UNAVAILABLE_STOP.format(reason=exc))
-        return None
+        return Halt.FAILED
     except KeyboardInterrupt:
         say("")
-        return None
+        return Halt.PAUSED
     finally:
         say(PAID_CALLS.format(n=calls))
 
@@ -243,7 +259,7 @@ def _next_turn(entries: list[Entry], subject: str, agent: Agent) -> AskTurn | Br
         except FormError as exc:
             error = str(exc)
     say(FORM_STOP)
-    raise _Stop
+    raise _Failed
 
 
 def build_prompt(
