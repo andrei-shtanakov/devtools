@@ -175,10 +175,21 @@ def _id_problems(ids: list[str], prefix: str) -> list[str]:
     return problems
 
 
+def _has_criteria(f: Function) -> bool:
+    return any(c.strip() for c in f.criteria)
+
+
 def _function_problems(f: Function, goal_ids: set[str]) -> list[str]:
     problems = []
-    if not f.criteria:
+    if not _has_criteria(f):
         problems.append(f"{f.id}: нет критерия приёмки")
+    if not f.title.strip():
+        problems.append(f"{f.id}: пустое название функции")
+    problems += [
+        f"{f.id}: критерий {k} пуст"
+        for k, c in enumerate(f.criteria, start=1)
+        if not c.strip()
+    ]
     if not f.goals:
         problems.append(f"{f.id}: нет ссылки на цель")
     problems += [
@@ -196,6 +207,11 @@ def brief_problems(b: Brief) -> list[str]:
         problems.append("бриф: нет ни одной функции (FR-01)")
     problems += _id_problems([g.id for g in b.goals], "G")
     problems += _id_problems([f.id for f in b.functions], "FR")
+    for g in b.goals:
+        if not g.title.strip():
+            problems.append(f"{g.id}: пустое название цели")
+        if not g.text.strip():
+            problems.append(f"{g.id}: пустой текст цели")
     goal_ids = {g.id for g in b.goals}
     for f in b.functions:
         problems += _function_problems(f, goal_ids)
@@ -209,12 +225,15 @@ def brief_problems(b: Brief) -> list[str]:
 
 def demote_uncovered(b: Brief) -> Brief:
     """Move FRs without criteria into `open_items` (they stay for the owner)."""
-    bare = [f for f in b.functions if not f.criteria]
+    bare = [f for f in b.functions if not _has_criteria(f)]
     if not bare:
         return b
     notes = tuple(f"{f.id} {f.title}: нет критерия приёмки" for f in bare)
+    kept = [f for f in b.functions if _has_criteria(f)]
     return replace(
         b,
-        functions=tuple(f for f in b.functions if f.criteria),
+        functions=tuple(
+            replace(f, id=f"FR-{pos:02d}") for pos, f in enumerate(kept, start=1)
+        ),
         open_items=b.open_items + notes,
     )

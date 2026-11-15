@@ -105,6 +105,20 @@ def test_render_other_and_open_items_section() -> None:
             "FR-03",
         ),
         (make_brief(context=dataclasses.replace(CTX, network=" ")), "Сеть"),
+        (make_brief(goals=(Goal("G-01", " ", "b"),)), "G-01"),
+        (make_brief(goals=(Goal("G-01", "a", "  "),)), "G-01"),
+        (
+            make_brief(functions=(Function("FR-01", " ", ("G-01",), ("а",), "w"),)),
+            "FR-01",
+        ),
+        (
+            make_brief(functions=(Function("FR-01", "t", ("G-01",), (" ",), "w"),)),
+            "FR-01",
+        ),
+        (
+            make_brief(functions=(Function("FR-01", "t", ("G-01",), ("а", ""), "w"),)),
+            "FR-01",
+        ),
     ],
 )
 def test_problems_each_rule(brief: Brief, needle: str) -> None:
@@ -180,3 +194,16 @@ def test_demote_uncovered() -> None:
     out = demote_uncovered(make_brief(functions=(covered, bare)))
     assert out.functions == (covered,)
     assert out.open_items == ("FR-02 голая: нет критерия приёмки",)
+
+
+def test_demote_then_problems_has_no_order_issue() -> None:
+    fs = (
+        Function("FR-01", "a", ("G-01",), ("x",), "w"),
+        Function("FR-02", "b", ("G-01",), (), "w"),
+        Function("FR-03", "c", ("G-01",), ("y",), "w"),
+    )
+    out = demote_uncovered(make_brief(functions=fs))
+    assert [f.id for f in out.functions] == ["FR-01", "FR-02"]
+    assert out.functions[1].title == "c"
+    assert out.open_items == ("FR-02 b: нет критерия приёмки",)
+    assert brief_problems(out) == []
