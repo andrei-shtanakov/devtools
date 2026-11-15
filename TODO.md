@@ -3094,3 +3094,14 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 ## dfl — интервью разговором (devtools#748)
 
 - [ ] `lite/interview_probe.py` → публичная команда просмотра сессии discovery вместо импорта внутреннего API (`effective_entries`, `entry_holders`, `readiness`, приватный `_answered_coverage_keys`, `FRAMES`) @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:dfl-interview-probe-public-api @blocked_by:todo://discovery/discovery-session-view
+
+## Ре-вендор контракта discovery v1.3 (inbox devtools#773)
+
+- [ ] Ре-вендор discovery-toolkit @ `c09b124` (контракт брифа v1.3, `gate_check.py` GC-18…GC-21) в `governance/discovery_contract/` + брифы-фикстуры заказчика под v1.3 (Translation table, `**Category**` у NFR, `owns:`) + починка GC-18…GC-21 в `lite/gate_repair.py` (иначе enterprise-интервью встанет на гейте брифа) @owner:github:andrei-shtanakov @id:revendor-discovery-contract-v1.3 @blocked_by:todo://discovery/revendor-discovery-contract-v1.3
+  Копия и пин готовы на ветке `chore/revendor-discovery-contract-v1.3` (sha256 сверены с
+  issue). Замер 15.11: с новой копией падают 78 тестов (`spec_loop` 66, `brief_input` 9,
+  `waves_e2e` 3, `sandbox_live` 1) — все на GC-18/20/21 у брифов заказчика v1.2. Мержить
+  только после ре-вендора фрейма в discovery (discovery#74): до него интервью выдаёт брифы
+  v1.2, и новый гейт отказал бы каждому enterprise-прогону. Отдельно (authority-root, мерж
+  человеком): копия `contracts/discovery-approval/` пинуется на discovery и пойдёт за
+  discovery#74. Личный путь dfl не затронут.
