@@ -30,6 +30,7 @@ from governance.facts import Outcome as FactOutcome
 from governance.ops import Ops
 from lite import edge_journal as ej
 from lite import node_guard
+from lite import owner_review as orv
 from lite import review_pause as rp
 from lite.edge_resolve import MAX_ROUNDS, Outcome, PaidCalls, Scope, resolve_scope
 from lite.interview_chat import Read
@@ -62,14 +63,8 @@ _STAGE_KINDS = {"design": "personal-design", "decomposition": "personal-decompos
 #: платит за проверку заново, если файл не меняли
 REVIEW_PASSED = "review-passed.json"
 REVIEW_PAUSED = "просмотр этапа «{label}» прерван — " + RETRY
-UNCLEAR_REMARK = (
-    "замечание не применено: правка удаляла {ids} — сформулируйте иначе (dfl run)"
-)
-#: исходы круга правки по замечаниям владельца (`_owner_round`)
-_ACCEPTED, _PAUSED, _UNCLEAR, _FAILED = "accepted", "paused", "unclear", "failed"
-NO_TTY = (
-    "ждёт просмотра этапа «{label}» — откройте {links}; замечания — dfl run в терминале"
-)
+UNCLEAR_REMARK = orv.UNCLEAR_REMARK
+NO_TTY = orv.NO_TTY
 
 
 def _stdin_is_tty() -> bool:
@@ -454,8 +449,7 @@ def _review(ctx: _Ctx, stage: str, files: list[str]) -> bool:
     label = STAGE_LABELS[stage]
     _remember_checked(ctx, stage)
     if not ctx.tty():
-        links = ", ".join(f"file://{p.resolve()}" for p in paths)
-        return ctx.stop(NO_TTY.format(label=label, links=links))
+        return ctx.stop(NO_TTY.format(label=label, links=orv.links(paths)))
     round_no = 0
     while True:
         batch = rp.pending(rd, stage)
@@ -502,77 +496,28 @@ def _brief_by_owner(ctx: _Ctx, batch: list[rp.Remark]) -> bool:
 
 
 def _revise_by_owner(ctx: _Ctx, stage: str, batch: list[rp.Remark]) -> bool:
-    """Правка узла автором по замечаниям владельца; не принята — файл
-    возвращается: сбой — стоп; `/стоп` на вопросе удаления — пауза
-    (замечание остаётся недоигранным); правка всё равно ослабляет узел —
-    замечание отклоняется (`mark_dropped`, повторно не переигрывается) и
+    """Правка узла автором по замечаниям владельца (`owner_review`); не
+    принята — файл возвращён: сбой — стоп; `/стоп` на вопросе удаления —
+    пауза (замечание остаётся недоигранным); правка всё равно ослабляет узел
+    — замечание отклоняется (`mark_dropped`, повторно не переигрывается) и
     стоп с просьбой сформулировать иначе."""
     kind = _STAGE_KINDS[stage]
-    path = ctx.bundle / FILENAMES[kind]
-    before = path.read_text(encoding="utf-8")
-    decisions = "\n".join(f"- замечание владельца: {r.text}" for r in batch)
-    try:
-        outcome, detail = _owner_round(ctx, kind, before, decisions)
-    except BaseException:
-        path.write_text(before, encoding="utf-8")
-        raise
-    if outcome == _ACCEPTED:
+    outcome, detail = orv.revise_by_owner(
+        ctx.bundle / FILENAMES[kind],
+        orv.decisions(batch),
+        revise=functools.partial(_owner_revise, ctx, kind),
+        read=ctx.read,
+    )
+    if outcome == orv.ACCEPTED:
         return True
-    path.write_text(before, encoding="utf-8")
-    if outcome == _PAUSED:
+    if outcome == orv.PAUSED:
         ctx.run.stop_reason = REVIEW_PAUSED.format(label=STAGE_LABELS[stage])
         say(ctx.run.stop_reason)
         return False
-    if outcome == _UNCLEAR:
+    if outcome == orv.UNCLEAR:
         rp.mark_dropped(run_dir(ctx.run.run_id), stage, len(batch))
         return ctx.stop(UNCLEAR_REMARK.format(ids=detail))
     return ctx.stop(f"{detail} — {RETRY}")
-
-
-def _owner_round(ctx: _Ctx, kind: str, before: str, decisions: str) -> tuple[str, str]:
-    """RF-2: вопрос «удалить <id>?» — только об удалённых/пониженных id; «нет»
-    — файл возвращается и один повтор с «<id> не удалять». Сломанные id
-    (дубли, новые находки гейта, `<grammar>`) — правка отклоняется без
-    вопроса, один повтор с названной проблемой.
-
-    Итог `(исход, подробность)`: `_ACCEPTED`; `_PAUSED` (`/стоп` на вопросе,
-    без платного повтора); `_UNCLEAR` (повтор снова ослабляет; подробность —
-    id); `_FAILED` (сбой автора; подробность — причина)."""
-    path = ctx.bundle / FILENAMES[kind]
-    failed = _owner_revise(ctx, kind, before, decisions)
-    if failed:
-        return _FAILED, failed
-    after = path.read_text(encoding="utf-8")
-    bad = node_guard.weakened(before, after, set(), set())
-    if not bad:
-        return _ACCEPTED, ""
-    olds = set(node_guard.node_items(before))
-    broken = node_guard.weakened(before, after, olds, olds)
-    allowed: set[str] = set()
-    if broken:
-        extra = [
-            (
-                f"- не ломать пункты {', '.join(broken)}: без дублей id и в "
-                "формате узла (прошлая правка их сломала)"
-            )
-        ]
-    else:
-        answer = rp.confirm_removals(bad, read=ctx.read)
-        if answer is None:
-            return _PAUSED, ""
-        allowed = answer
-        extra = [f"- {item} не удалять" for item in bad if item not in allowed]
-        if not extra:
-            return _ACCEPTED, ""
-    path.write_text(before, encoding="utf-8")
-    failed = _owner_revise(ctx, kind, before, "\n".join([decisions, *extra]))
-    if failed:
-        return _FAILED, failed
-    after = path.read_text(encoding="utf-8")
-    still = node_guard.weakened(before, after, allowed, allowed)
-    if still:
-        return _UNCLEAR, ", ".join(still)
-    return _ACCEPTED, ""
 
 
 def _owner_revise(ctx: _Ctx, kind: str, before: str, decisions: str) -> str | None:

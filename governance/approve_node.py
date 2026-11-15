@@ -1794,6 +1794,18 @@ def _candidate_title(state: RunState, op: dict) -> str:
 
 
 def _candidate_body(state: RunState, op: dict, debt: na.NodeDebt | None) -> str:
+    """Тело candidate-PR волны; применённые замечания владельца на паузе
+    просмотра (#768) — разделом в конце, без замечаний тело прежнее."""
+    body = _candidate_text(state, op, debt)
+    # Ленивый импорт: governance не зависит от lite при загрузке (цикл
+    # `lite.review_pause` → … → `governance.approve_node`).
+    from lite import review_pause
+
+    section = review_pause.pr_section(rs.run_dir(state.run_id))
+    return f"{body}\n\n{section.rstrip()}" if section else body
+
+
+def _candidate_text(state: RunState, op: dict, debt: na.NodeDebt | None) -> str:
     if op.get("act") == ACT_REVIEW_V1:
         policy = op["policy"]
         return "\n".join(
