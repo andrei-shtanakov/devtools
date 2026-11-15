@@ -29,6 +29,8 @@ identity: перестановка делает прежние результа�
 | `acceptance-vs-requirements-behaviour` | acceptance | requirements, behaviour-spec | `ERROR` |
 | `decomposition-vs-design-acceptance` | decomposition | design, acceptance | `ERROR` |
 | `engineer-brief-vs-customer-brief` | engineer-brief | customer-brief | `N/A` по `A1` |
+| `personal-design-vs-brief` | personal-design | brief | `ERROR` (личный путь `dfl`) |
+| `personal-decomposition-vs-design-brief` | personal-decomposition | design, brief | `ERROR` (личный путь `dfl`) |
 
 Ребро charter разбито на два (по одному основанию), а не одно с двумя:
 загрузчик не поддерживает несколько оснований вместе с `applicability`

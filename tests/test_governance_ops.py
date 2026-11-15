@@ -18,7 +18,7 @@ import pytest
 import governance.ops as ops_mod
 from governance.author_launch import AuthorCall, LaunchOutcome
 from governance.facts import Outcome
-from governance.ops import RealOps
+from governance.ops import HARNESS_UNTRACKED, RealOps
 from tests.conftest import _STRICT_GH_DIRS
 from tests.df_config_fixture import write_config
 
@@ -1044,6 +1044,33 @@ def test_is_dirty_spec_gitignore_plus_other_is_dirty(monkeypatch):
 def test_is_dirty_tracked_spec_gitignore_change_is_dirty(monkeypatch):
     _install_fake_run(monkeypatch, returncode=0, stdout=" M spec/.gitignore\n")
     assert RealOps().is_dirty("/tmp/devtools") is True
+
+
+def test_dirty_paths_lists_each_untracked_and_skips_harness(monkeypatch):
+    out = "?? spec/.gitignore\0?? ws/a.md\0 M foo.py\0R  new.py\0old.py\0"
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout=out)
+    assert RealOps().dirty_paths("/tmp/devtools") == ["ws/a.md", "foo.py", "new.py"]
+    assert calls[0].argv == [
+        "git",
+        "status",
+        "--porcelain",
+        "-z",
+        "--untracked-files=all",
+    ]
+
+
+def test_dirty_paths_harness_spec_gitignore_is_not_dirt(monkeypatch):
+    """Тот же `HARNESS_UNTRACKED`, что у `is_dirty` (devtools#770)."""
+    assert "?? spec/.gitignore" in HARNESS_UNTRACKED
+    _install_fake_run(monkeypatch, returncode=0, stdout="?? spec/.gitignore\0")
+    assert RealOps().dirty_paths("/tmp/devtools") == []
+    _install_fake_run(monkeypatch, returncode=0, stdout=" M spec/.gitignore\0")
+    assert RealOps().dirty_paths("/tmp/devtools") == ["spec/.gitignore"]
+
+
+def test_dirty_paths_empty_on_clean_tree(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=0, stdout="")
+    assert RealOps().dirty_paths("/tmp/devtools") == []
 
 
 # --- Кейс 11: checkout_and_pull — S8 на default-ветке (круг 5) -------------

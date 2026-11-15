@@ -1,0 +1,26 @@
+edge: personal-decomposition-vs-design-brief
+subject_role: personal-decomposition
+basis_roles: [design, brief]
+items:
+  - id: R1
+    text: >-
+      Каждый критерий приёмки брифа (FR-NN/k; k — номер пункта в списке
+      «Критерии приёмки» функции FR-NN, с единицы) покрыт хотя бы одной
+      проверкой `#### BEH-NN` декомпозиции (строка `**Критерии:**`).
+  - id: R2
+    text: >-
+      Каждая задача DT опирается на решение дизайна, которое она реализует.
+  - id: R3
+    text: >-
+      У каждой проверки есть строка `**checked_by**` с `kind` и `target`.
+  - id: R4
+    text: >-
+      Декомпозиция ссылается только на существующие FR-NN/k брифа и D-NN
+      дизайна.
+  - id: R5
+    text: >-
+      Задача DT не вводит обязательств, которых нет в дизайне и брифе.
+severity:
+  blocking: [blocker, major]
+  advisory: [minor]
+applicability: []

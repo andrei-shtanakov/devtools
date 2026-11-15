@@ -20,7 +20,7 @@ import enum
 import os
 import re
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -83,22 +83,48 @@ class Outcome(enum.Enum):
 @dataclass
 class PaidCalls:
     """Платные вызовы за `dfl run`: сортировка (без кэша), переписывание,
-    повторная проверка (считает вызывающий — по шагу после круга)."""
+    повторная проверка (считает вызывающий — по шагу после круга);
+    `author` — авторинг узла (личный путь; волновой путь его не считает,
+    и его строка прежняя)."""
 
     triage: int = 0
     revise: int = 0
     check: int = 0
+    author: int = 0
 
     def spent(self) -> bool:
         """Был ли хоть один платный вызов."""
-        return bool(self.triage or self.revise or self.check)
+        return bool(self.triage or self.revise or self.check or self.author)
 
     def line(self) -> str:
         """Строка для человека."""
+        head = f"авторинг {self.author}, " if self.author else ""
         return (
-            f"платных вызовов: сортировка {self.triage}, переписывание "
+            f"платных вызовов: {head}сортировка {self.triage}, переписывание "
             f"{self.revise}, проверка {self.check}"
         )
+
+
+@dataclass(frozen=True)
+class Scope:
+    """Где разбирать замечания — без `RunState` (волновой и личный путь).
+
+    `run_dir` — каталог прогона (журнал, записи рёбер, копии файлов;
+    `run_dir.name` — `run_id` для границы автора); `target_dir`/`bundle_dir`
+    — чекаут цели и бандл в нём: файлы узлов и оснований читаются и
+    переписываются в рабочем дереве; `wave` — ключ журнала; `can_override`
+    — можно ли предлагать «принять вопреки» (`test`); `filenames` — вид узла
+    → имя файла (узлы находок и основания рёбер); `subject` — тема для
+    промпта переписывания.
+    """
+
+    run_dir: Path
+    target_dir: str
+    bundle_dir: str
+    wave: int
+    can_override: bool
+    filenames: Mapping[str, str]
+    subject: str = ""
 
 
 class _Unreadable(Exception):
@@ -121,20 +147,58 @@ def resolve(
     (на `MAX_ROUNDS` в `test` предлагается принять узел вопреки замечанию);
     `calls` — счётчик платных вызовов вызывающего.
     """
-    calls = calls if calls is not None else PaidCalls()
     findings = applicable_findings(state)
     if findings is None:
         return Outcome.NOT_APPLICABLE
+    scope = Scope(
+        run_dir=rs.run_dir(state.run_id),
+        target_dir=state.target_dir,
+        bundle_dir=state.bundle_dir,
+        wave=state.wave,
+        can_override=state.mode == "test",
+        filenames=_AUTHOR_FILENAMES,
+        subject=state.subject,
+    )
+    return resolve_scope(
+        scope,
+        findings,
+        read=read,
+        agent=agent,
+        revise=revise,
+        round_no=round_no,
+        calls=calls,
+    )
+
+
+def resolve_scope(
+    scope: Scope,
+    findings: list[ej.Finding],
+    *,
+    read: Read,
+    agent: Agent,
+    revise: Revise,
+    round_no: int,
+    calls: PaidCalls | None = None,
+) -> Outcome:
+    """Ядро круга разбора по готовым находкам `findings` (без `RunState`).
+
+    Находки отбирает вызывающий (волна — `applicable_findings`); пусто или
+    файл находки — не узел её вида по `scope.filenames` (§9 п.4) — разбирать
+    нечего. Остальное — как `resolve`.
+    """
+    if not findings or not _nodes_match(findings, scope.filenames):
+        return Outcome.NOT_APPLICABLE
+    calls = calls if calls is not None else PaidCalls()
     try:
-        nodes = _read_files(state, dict.fromkeys(f.path for f in findings if f.path))
-        bases = _bases(state, findings)
+        nodes = _read_files(scope, dict.fromkeys(f.path for f in findings if f.path))
+        bases = _bases(scope, findings)
     except _Unreadable as exc:
         say(f"разбор замечаний невозможен: {exc}")
         return Outcome.NOT_APPLICABLE
-    run_dir = rs.run_dir(state.run_id)
-    prior = ej.load(run_dir, state.wave)
+    run_dir = scope.run_dir
+    prior = ej.load(run_dir, scope.wave)
     try:
-        records = ej.level_records(run_dir, state.wave)
+        records = ej.level_records(run_dir, scope.wave)
     except (OSError, ValueError, KeyError, TypeError):
         return Outcome.NOT_APPLICABLE
     refusal = override.non_overridable_reason(records)
@@ -147,17 +211,17 @@ def resolve(
         return Outcome.STOPPED
     notes: set[str] = set()
     visible = [_visible(i) for i in items]
-    chosen = _ask_all(state, visible, prior, read, round_no, refusal, notes)
+    chosen = _ask_all(scope, visible, prior, read, round_no, refusal, notes)
     if chosen is None:
         return Outcome.STOPPED
-    overrides = ej.overridden(run_dir, state.wave)
+    overrides = ej.overridden(run_dir, scope.wave)
     if {f.digest for f in findings} <= overrides:
         if override.accepted(records, overrides) is not None:
             say("замечания приняты вопреки — записано в журнал; проверяю снова")
             return Outcome.OVERRIDDEN
         _note(notes, refusal or NOT_COVERED)
         return Outcome.STOPPED
-    return _rewrite(state, findings, nodes, revise, round_no, calls, overrides)
+    return _rewrite(scope, findings, nodes, revise, round_no, calls, overrides)
 
 
 def override_offer(n: int, rule: str) -> str:
@@ -194,9 +258,14 @@ def applicable_findings(state: rs.RunState) -> list[ej.Finding] | None:
     findings = [f for f in found if f.key in keys]
     if not findings:
         return None
-    if any(not f.path or f.path != _AUTHOR_FILENAMES.get(f.node) for f in findings):
+    if not _nodes_match(findings, _AUTHOR_FILENAMES):
         return None
     return findings
+
+
+def _nodes_match(findings: list[ej.Finding], filenames: Mapping[str, str]) -> bool:
+    """У каждой находки есть файл, и это файл узла её вида."""
+    return all(f.path and f.path == filenames.get(f.node) for f in findings)
 
 
 def stop_keys(state: rs.RunState) -> set[Key]:
@@ -226,32 +295,32 @@ def _counted(agent: Agent, calls: PaidCalls) -> Agent:
     return call
 
 
-def _target_root(state: rs.RunState) -> Path:
+def _target_root(scope: Scope) -> Path:
     """Канонический корень чекаута цели (требование `safe_io`)."""
-    return Path(os.path.realpath(state.target_dir))
+    return Path(os.path.realpath(scope.target_dir))
 
 
-def _rel(state: rs.RunState, name: str) -> str:
-    return f"{state.bundle_dir.strip('/')}/{name}"
+def _rel(scope: Scope, name: str) -> str:
+    return f"{scope.bundle_dir.strip('/')}/{name}"
 
 
-def _read_node(state: rs.RunState, name: str) -> str:
+def _read_node(scope: Scope, name: str) -> str:
     """Текст файла бандла через `safe_io`; отказ — `_Unreadable`."""
     try:
         data = safe_io.read_regular(
-            _target_root(state), _rel(state, name), limit=NODE_LIMIT
+            _target_root(scope), _rel(scope, name), limit=NODE_LIMIT
         )
         return data.decode("utf-8")
     except (safe_io.SafeIOError, UnicodeDecodeError) as exc:
         raise _Unreadable(f"{name}: {exc}") from exc
 
 
-def _read_files(state: rs.RunState, names: Iterable[str]) -> dict[str, str]:
+def _read_files(scope: Scope, names: Iterable[str]) -> dict[str, str]:
     """Текущие тексты файлов узлов (с ручными правками)."""
-    return {n: _read_node(state, n) for n in names}
+    return {n: _read_node(scope, n) for n in names}
 
 
-def _bases(state: rs.RunState, findings: list[ej.Finding]) -> dict[str, str]:
+def _bases(scope: Scope, findings: list[ej.Finding]) -> dict[str, str]:
     """Тексты оснований рёбер (`basis_roles`); роли без файла и отсутствующие
     файлы пропускаются, файл, который нельзя прочитать безопасно, — отказ."""
     out: dict[str, str] = {}
@@ -261,12 +330,12 @@ def _bases(state: rs.RunState, findings: list[ej.Finding]) -> dict[str, str]:
         except EdgeCheckError:
             continue
         for role in roles:
-            name = _AUTHOR_FILENAMES.get(role)
+            name = scope.filenames.get(role)
             if name is None or name in out:
                 continue
-            if not os.path.lexists(_target_root(state) / _rel(state, name)):
+            if not os.path.lexists(_target_root(scope) / _rel(scope, name)):
                 continue
-            out[name] = _read_node(state, name)
+            out[name] = _read_node(scope, name)
     return out
 
 
@@ -292,7 +361,7 @@ def _mentioned(ids: list[str], text: str) -> list[str]:
 
 
 def _ask_all(
-    state: rs.RunState,
+    scope: Scope,
     items: list[Item],
     prior: list[ej.Decision],
     read: Read,
@@ -312,7 +381,7 @@ def _ask_all(
     memory = em.recall(
         prior,
         [i.finding for i in items],
-        test=state.mode == "test",
+        test=scope.can_override,
         last_round=round_no == MAX_ROUNDS,
     )
     questions = _questions(items, memory, refusal is None)
@@ -333,7 +402,7 @@ def _ask_all(
             say("разбор остановлен — продолжить: dfl run")
             return None
         decision = replace(decision, batch=batch)
-        ej.append(rs.run_dir(state.run_id), state.wave, decision)
+        ej.append(scope.run_dir, scope.wave, decision)
         chosen.append(decision)
         if decision.kind == "override":
             accepted_groups.add(q.group)
@@ -463,7 +532,7 @@ def _where(f: ej.Finding) -> str:
 
 
 def _rewrite(
-    state: rs.RunState,
+    scope: Scope,
     findings: list[ej.Finding],
     nodes: dict[str, str],
     revise: Revise,
@@ -474,9 +543,9 @@ def _rewrite(
     """Переписать каждый файл с неснятыми находками (`skipped` — digest'ы
     групп, принятых вопреки последним решением); сбой, ослабление или
     прерывание — вернуть тексты всех файлов круга."""
-    run_dir = rs.run_dir(state.run_id)
+    run_dir = scope.run_dir
     todo = [f for f in findings if f.digest not in skipped]
-    journal = ej.load(run_dir, state.wave)
+    journal = ej.load(run_dir, scope.wave)
     done: list[str] = []
     try:
         for name in dict.fromkeys(f.path for f in todo if f.path):
@@ -484,15 +553,15 @@ def _rewrite(
             _backup(run_dir, round_no, name, nodes[name])
             done.append(name)
             calls.revise += 1
-            reason = _revise_file(state, name, nodes[name], mine, journal, revise)
+            reason = _revise_file(scope, name, nodes[name], mine, journal, revise)
             if reason is None:
-                reason = _weakened(state, name, nodes[name], _allows(journal, mine))
+                reason = _weakened(scope, name, nodes[name], _allows(journal, mine))
             if reason is not None:
                 say(reason)
-                _restore(state, nodes, done)
+                _restore(scope, nodes, done)
                 return Outcome.STOPPED
     except BaseException:
-        _restore(state, nodes, done)
+        _restore(scope, nodes, done)
         raise
     for f in todo:
         say(f"  исправлено: {_where(f)}: {f.statement}", 1)
@@ -518,25 +587,25 @@ def _backup(run_dir: Path, round_no: int, name: str, text: str) -> None:
     safe_io.publish(root, f"{REVISE_DIR}/{round_no}/{name}", text.encode("utf-8"))
 
 
-def _restore(state: rs.RunState, nodes: dict[str, str], names: list[str]) -> None:
+def _restore(scope: Scope, nodes: dict[str, str], names: list[str]) -> None:
     """Вернуть тексты файлов круга; не вернувшиеся — назвать."""
     failed: list[str] = []
     for name in names:
         try:
             safe_io.publish(
-                _target_root(state), _rel(state, name), nodes[name].encode("utf-8")
+                _target_root(scope), _rel(scope, name), nodes[name].encode("utf-8")
             )
         except safe_io.SafeIOError:
             failed.append(name)
     if failed:
         say(
             f"файлы не возвращены: {', '.join(failed)} — копии в "
-            f"{rs.run_dir(state.run_id) / REVISE_DIR}"
+            f"{scope.run_dir / REVISE_DIR}"
         )
 
 
 def _revise_file(
-    state: rs.RunState,
+    scope: Scope,
     name: str,
     current: str,
     findings: list[ej.Finding],
@@ -545,10 +614,10 @@ def _revise_file(
 ) -> str | None:
     """Вызов автора по файлу; отказ — причина для человека, иначе `None`."""
     call = AuthorCall(
-        run_id=state.run_id,
-        run_dir=os.path.realpath(rs.run_dir(state.run_id)),
-        target_dir=state.target_dir,
-        bundle_dir=state.bundle_dir,
+        run_id=scope.run_dir.name,
+        run_dir=os.path.realpath(scope.run_dir),
+        target_dir=scope.target_dir,
+        bundle_dir=scope.bundle_dir,
         filename=name,
     )
     keys = {f.key for f in findings}
@@ -556,7 +625,7 @@ def _revise_file(
     outcome = revise(
         call,
         findings[0].node,
-        state.subject,
+        scope.subject,
         current,
         "\n".join(f"- {_where(f)}: {f.statement}" for f in findings),
         decisions or "нет",
@@ -572,11 +641,11 @@ def _decision_line(d: ej.Decision) -> str:
 
 
 def _weakened(
-    state: rs.RunState, name: str, before: str, allows: tuple[set[str], set[str]]
+    scope: Scope, name: str, before: str, allows: tuple[set[str], set[str]]
 ) -> str | None:
     """Сверка до/после (§5); ослаблен или не читается — причина, иначе `None`."""
     try:
-        after = _read_node(state, name)
+        after = _read_node(scope, name)
     except _Unreadable as exc:
         return f"переписанный файл не читается: {exc}"
     bad = node_guard.weakened(before, after, *allows)

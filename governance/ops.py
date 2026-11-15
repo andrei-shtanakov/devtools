@@ -197,6 +197,8 @@ class Ops(Protocol):
 
     def is_dirty(self, target_dir: str) -> bool: ...
 
+    def dirty_paths(self, target_dir: str) -> list[str]: ...
+
     def current_branch(self, target_dir: str) -> str | None: ...
 
     def materialize_pr_head(self, target_dir: str, pr: int, sha: str) -> str: ...
@@ -1174,6 +1176,37 @@ class RealOps(BriefFactsMixin):
         )
         lines = [ln for ln in done.stdout.splitlines() if ln.strip()]
         return any(ln not in HARNESS_UNTRACKED for ln in lines)
+
+    def dirty_paths(self, target_dir: str) -> list[str]:
+        """Пути незакоммиченных изменений (каждый неотслеживаемый файл отдельно).
+
+        Тот же источник, что `is_dirty` (`git status --porcelain`, служебный
+        `HARNESS_UNTRACKED` — не грязь), но с путями: личный путь `dfl` пишет
+        узлы бандла в рабочее дерево до ветки прогона и отличает свою грязь от
+        чужой. `-z` — пути без кавычек (кириллица), у переименования второй
+        путь (исходный) пропускается.
+        """
+        done = subprocess.run(
+            ["git", "status", "--porcelain", "-z", "--untracked-files=all"],
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        parts = done.stdout.split("\0")
+        paths: list[str] = []
+        i = 0
+        while i < len(parts):
+            entry = parts[i]
+            i += 1
+            if len(entry) < 4:
+                continue
+            code, path = entry[:2], entry[3:]
+            if code[0] in "RC":
+                i += 1  # исходный путь переименования/копии
+            if f"{code} {path}" not in HARNESS_UNTRACKED:
+                paths.append(path)
+        return paths
 
     def current_branch(self, target_dir: str) -> str | None:
         """Имя текущей ветки в target_dir; None — detached HEAD."""
