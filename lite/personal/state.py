@@ -12,6 +12,7 @@ from pathlib import Path
 
 from governance import run_state as rs
 from governance import spec_loop
+from lite.output import say
 
 PERSONAL_ROOT = rs.RUNS_ROOT.parent / "personal-runs"
 
@@ -103,14 +104,20 @@ def load(run_id: str) -> PersonalRun:
 
 
 def active_for(repo_slug: str) -> PersonalRun | None:
-    """Последний по mtime незавершённый прогон репо или `None`."""
+    """Последний по mtime незавершённый прогон репо или `None`.
+
+    Нечитаемый `run.json` (битый JSON, нет полей, негодное имя каталога) —
+    одна строка предупреждения и пропуск: чужой сломанный прогон не валит
+    `dfl run` этого репо."""
     if not PERSONAL_ROOT.is_dir():
         return None
-    files = sorted(
-        PERSONAL_ROOT.glob("*/run.json"), key=lambda p: p.stat().st_mtime, reverse=True
-    )
-    for path in files:
-        run = load(path.parent.name)
+    runs: list[tuple[float, PersonalRun]] = []
+    for path in PERSONAL_ROOT.glob("*/run.json"):
+        try:
+            runs.append((path.stat().st_mtime, load(path.parent.name)))
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            say(f"личный прогон не читается, пропущен: {path} ({exc})")
+    for _, run in sorted(runs, key=lambda item: item[0], reverse=True):
         if run.repo_slug == repo_slug and run.step != "done":
             return run
     return None

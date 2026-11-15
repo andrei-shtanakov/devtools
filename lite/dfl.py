@@ -26,15 +26,18 @@ import tempfile
 import traceback
 from collections.abc import Callable
 from contextlib import ExitStack
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import cast
 
 from governance import brief_tools as bt
 from governance import df_config, run_lock, runner, spec_loop, user_targets
 from governance import interview as iv
 from governance import run_state as rs
+from governance.author_launch import launch_author
+from governance.edge_check.check import run_check
 from governance.facts import Outcome
-from governance.ops import RealOps
+from governance.ops import Ops, RealOps
 from lite import edge_resolve as er
 from lite import failure_log as fl
 from lite import interview_chat as ic
@@ -52,6 +55,8 @@ from lite.output import (
     verbosity,
     verbosity_from_env,
 )
+from lite.personal import flow as personal_flow
+from lite.personal import state as personal_state
 from lite.pipeline import (
     CHAIN_STOPPED_HINT,
     accepted_url,
@@ -111,6 +116,14 @@ NOT_CONVERGED_HINT = (
     "дальше: dfl run — ещё круг (платные вызовы), правка файла руками или dfl abandon"
 )
 SCREEN_MARK = "уровень 3: вывод раннера шёл на экран"
+TRACK_QUESTION = "Что это за проект?"
+TRACK_OPTIONS = (
+    "Личный — для себя (возможно, с близким кругом)",
+    "Enterprise — заказчик, команда, регламенты",
+)
+TRACKS = ("personal", "enterprise")  # в порядке `TRACK_OPTIONS`
+TRACK_RETRY = "ответьте номером: 1 или 2"
+TRACK_STOPPED = "прогон не начат — повторите dfl run --subject '<тема>'"
 
 # лог текущего вызова; путь переживает закрытие лога — его читает `_record`,
 # который `cli` выполняет после выхода из `main`
@@ -391,7 +404,7 @@ def _dispatch(
             return interview(cwd, args.subject), None
         if args.command == "correct":
             return correct(cwd, args.text, args.subject), None
-        return run(cwd, args.subject, args.stakeholder), None
+        return run(cwd, args.subject, args.stakeholder, track=args.track), None
     except REFUSALS as exc:
         say(refusal(f"dfl {args.command}", str(exc)), 0, err=True)
         return 2, exc
@@ -419,6 +432,9 @@ def _parser() -> argparse.ArgumentParser:
     p_run = add("run", help="следующий шаг конвейера")
     p_run.add_argument("--subject", help="тема нового прогона")
     p_run.add_argument("--stakeholder", default="customer")
+    p_run.add_argument(
+        "--track", choices=TRACKS, help="тип проекта (без него — вопрос)"
+    )
     p_ans = add("answer", help="ответ на вопрос интервью и dfl run")
     p_ans.add_argument(
         "--file",
@@ -486,12 +502,25 @@ def _require_test_mode(*, status_header: bool = False) -> None:
     say("")
 
 
-def run(cwd: Path, subject: str | None, role: str, *, chat: bool = True) -> int:
+def run(
+    cwd: Path,
+    subject: str | None,
+    role: str,
+    *,
+    chat: bool = True,
+    track: str | None = None,
+) -> int:
     """Один шаг конвейера для репо в `cwd`; код шага или 0/2 самого `dfl`.
 
-    В терминале (и `chat`) при `harness.author = claude` ждущий ответа прогон
-    ведётся интервью разговором; иначе — подсказка `dfl answer --file`."""
+    Сначала — личный путь (`_personal`): активный личный прогон продолжается,
+    новая тема начинается вопросом о типе проекта (или `track`). Иначе — шаг
+    enterprise-конвейера: в терминале (и `chat`) при `harness.author = claude`
+    ждущий ответа прогон ведётся интервью разговором; иначе — подсказка
+    `dfl answer --file`."""
     target = user_targets.register(cwd)
+    code = _personal(target, subject, track)
+    if code is not None:
+        return code
     chatting = chat and _is_tty()
     if chatting and _author_is_claude():
         return _run_chatting(target, subject, role)
@@ -499,6 +528,103 @@ def run(cwd: Path, subject: str | None, role: str, *, chat: bool = True) -> int:
     if chatting and _waiting_run(target.repo, subject) is not None:
         raise DflError(CHAT_HARNESS_REFUSAL)
     return code
+
+
+def _personal(
+    target: user_targets.UserTarget, subject: str | None, track: str | None
+) -> int | None:
+    """Код шага личного пути или `None` — дальше enterprise-путь.
+
+    Без `subject` — активный личный прогон репо (RF-4: он важнее
+    enterprise-прогонов). С `subject` — активный личный прогон той же темы;
+    иначе новая тема: тип — `track`, вопрос (только в терминале и только для
+    темы без enterprise-прогона), без терминала — enterprise, как прежде."""
+    slug = user_targets.slug_from_url(target.repo_url)
+    active = personal_state.active_for(slug)
+    if active is not None and subject in (None, active.subject):
+        return _advance_personal(active)
+    if subject is None:
+        return None
+    if track is None and _track_tty() and _new_subject(target.repo, subject):
+        track = _ask_track(ic.stdin_read)
+        if track is None:
+            say(TRACK_STOPPED)
+            return 0
+    if track != "personal":
+        return None
+    run = personal_state.new_personal_run(
+        subject, target.repo, slug, str(target.path), date.today()
+    )
+    personal_state.save(run)
+    say(f"личный прогон {run.run_id}", 1)
+    return _advance_personal(run)
+
+
+def _track_tty() -> bool:
+    """Можно спросить тип проекта: stdin — терминал (подменяется в тестах;
+    отдельно от `_is_tty`, чтобы тесты разговора enterprise не получали
+    вопроса)."""
+    return sys.stdin.isatty()
+
+
+def _new_subject(repo: str, subject: str) -> bool:
+    """Темы нет среди customer-прогонов репо (их продолжение — без вопроса)."""
+    runs, _ = _repo_runs(repo)
+    return not any(_frame(s) == "customer" and s.subject == subject for s in runs)
+
+
+def _ask_track(read: ic.Read) -> str | None:
+    """Вопрос о типе проекта; ответ номером. `None` — EOF или `/стоп`."""
+    while True:
+        say(TRACK_QUESTION)
+        for n, option in enumerate(TRACK_OPTIONS, start=1):
+            say(f"{n}. {option}")
+        text = ic.read_answer(read, quick=str.isdigit)
+        if text is None:
+            return None
+        text = text.strip()
+        if text.isdigit() and 1 <= int(text) <= len(TRACKS):
+            return TRACKS[int(text) - 1]
+        say(TRACK_RETRY)
+
+
+def _advance_personal(run: personal_state.PersonalRun) -> int:
+    """`advance` с настоящими терминалом, агентом и эффектами.
+
+    Под `runlog.captured` — каждый эффект (git/gh/spec-runner, автор узла,
+    edge-check, агент), а не весь `advance`: вопросы интервью и разбора
+    замечаний (`say` + `read`) идут на экран, как у `_run_chatting`, где
+    разговор тоже вне перехвата."""
+    return personal_flow.advance(
+        run,
+        cast(Ops, _QuietOps(RealOps())),
+        read=ic.stdin_read,
+        agent=_quiet(st.claude_agent(df_config.load().author_model)),
+        launch=_quiet(launch_author),
+        check=_quiet(run_check),
+    )
+
+
+def _quiet[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
+    """`fn`, вызов которого идёт под `runlog.captured` (вывод потомков — в лог)."""
+
+    @functools.wraps(fn)
+    def call(*args: P.args, **kwargs: P.kwargs) -> R:
+        with runlog.captured(_LOG, verbosity()):
+            return fn(*args, **kwargs)
+
+    return call
+
+
+class _QuietOps:
+    """Обёртка `Ops`: каждый метод — под `runlog.captured` (`_quiet`)."""
+
+    def __init__(self, ops: object) -> None:
+        self._ops = ops
+
+    def __getattr__(self, name: str) -> object:
+        attr = getattr(self._ops, name)
+        return _quiet(attr) if callable(attr) else attr
 
 
 def _run_chatting(
@@ -1078,8 +1204,8 @@ def _forge():
 
 def status(cwd: Path) -> int:
     """Прогоны репо из журнала и следующий шаг; форджа и эффектов нет."""
-    repo = _registered_repo(cwd)
-    runs, broken = _repo_runs(repo)
+    target = _registered_target(cwd)
+    runs, broken = _repo_runs(target.repo)
     for run_id in broken:
         say(f"{run_id}  не читается: {rs.run_dir(run_id)}/run.json")
     for state in runs:
@@ -1088,14 +1214,18 @@ def status(cwd: Path) -> int:
         say(f"{line}  дальше: {hint}" if hint else line)
         for key, op_status in _op_statuses(state).items():
             say(f"  {key}: {op_status}", 2)
+    active = personal_state.active_for(user_targets.slug_from_url(target.repo_url))
+    if active is not None:
+        line = f"личный прогон {active.run_id}: шаг {active.step}"
+        say(f"{line} — {active.stop_reason}" if active.stop_reason else line)
     return 0
 
 
-def _registered_repo(cwd: Path) -> str:
+def _registered_target(cwd: Path) -> user_targets.UserTarget:
     here = cwd.resolve()
     for target in user_targets.load().values():
         if here == target.path or target.path in here.parents:
-            return target.repo
+            return target
     raise DflError(f"{cwd} не зарегистрирован — сначала dfl run в этом каталоге")
 
 

@@ -100,3 +100,23 @@ def test_cyrillic_subject_falls_back() -> None:
 
 def test_two_cyrillic_runs_distinct_ws_ids() -> None:
     assert len({_cyr().ws_id for _ in range(20)}) > 1
+
+
+def test_active_for_skips_unreadable(
+    personal_root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Битый `run.json` и каталог с негодным именем — пропуск с одной
+    строкой предупреждения, а не падение `dfl run` (Task 9)."""
+    live = _new()
+    state.save(live)
+    for name, text in (
+        ("bad id", "{}"),
+        ("broken-1", "{not json"),
+        ("partial", "{}"),
+        ("listed", "[]"),
+    ):
+        (personal_root / name).mkdir()
+        (personal_root / name / "run.json").write_text(text, encoding="utf-8")
+    assert state.active_for("o/r") == live
+    out = capsys.readouterr().out
+    assert all(n in out for n in ("bad id", "broken-1", "partial", "listed"))
