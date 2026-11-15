@@ -337,3 +337,41 @@ TRACK_HINT_TEXT = (
     "тип проекта не спрошен (нет терминала) — enterprise; личный проект: "
     "dfl run --subject '…' --track personal"
 )
+
+
+@pytest.mark.parametrize("with_subject", [True, False])
+def test_track_enterprise_refused_for_active_personal_run(
+    env: Env,  # noqa: F811
+    personal: Advance,
+    capsys: pytest.CaptureFixture[str],
+    with_subject: bool,
+) -> None:
+    """Регрессия ревью #774: явный `--track enterprise` при активном личном
+    прогоне (той темы или без `--subject`) — отказ, не платный шаг личного."""
+    _active(env)
+    args = ["--subject", SUBJECT] if with_subject else []
+    assert env.run("run", *args, "--track", "enterprise") == 2
+    err = capsys.readouterr().err
+    assert "ведётся личным путём" in err and "dfl abandon" in err
+    assert personal.runs == [] and env.spec_calls == []
+
+
+def test_track_personal_without_subject_refused(
+    env: Env,  # noqa: F811
+    personal: Advance,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--track personal` без `--subject` и без активного личного прогона —
+    отказ, а не молча enterprise-шаг."""
+    assert env.run("run", "--track", "personal") == 2
+    assert "--track требует --subject" in capsys.readouterr().err
+    assert personal.runs == [] and env.spec_calls == []
+
+
+def test_track_personal_without_subject_continues_active(
+    env: Env,  # noqa: F811
+    personal: Advance,
+) -> None:
+    live = _active(env)
+    assert env.run("run", "--track", "personal") == 0
+    assert [r.run_id for r in personal.runs] == [live.run_id]

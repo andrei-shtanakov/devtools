@@ -130,6 +130,15 @@ TRACK_PERSONAL_TAKEN = (
     "не применим — продолжить её: dfl run --subject '<тема>' без --track; "
     "личный проект заведите под другой темой (или сначала dfl abandon)"
 )
+TRACK_ENTERPRISE_TAKEN = (
+    "тема «{subject}» ведётся личным путём (прогон {run_id}), --track enterprise "
+    "не применим — продолжить её: dfl run без --track; enterprise-конвейер для "
+    "неё — сначала dfl abandon, затем dfl run --subject '<тема>' --track enterprise"
+)
+TRACK_NEEDS_SUBJECT = (
+    "--track требует --subject: активного личного прогона в репо нет — "
+    "dfl run --subject '<тема>' --track personal"
+)
 TRACK_NO_TTY_HINT = (
     "тип проекта не спрошен (нет терминала) — enterprise; личный проект: "
     "dfl run --subject '…' --track personal"
@@ -549,12 +558,22 @@ def _personal(
     enterprise-прогонов). С `subject` — активный личный прогон той же темы;
     иначе новая тема: тип — `track`, вопрос (только в терминале и только для
     темы без enterprise-прогона), без терминала — enterprise, как прежде,
-    с подсказкой про `--track personal`."""
+    с подсказкой про `--track personal`. Явный `--track`, противоречащий
+    найденному (личный прогон при `enterprise`; `personal` без темы и без
+    личного прогона), — отказ, а не молчаливое игнорирование."""
     slug = user_targets.slug_from_url(target.repo_url)
     active = personal_state.active_for(slug, subject=subject)
     if active is not None:
+        if track == "enterprise":
+            raise DflError(
+                TRACK_ENTERPRISE_TAKEN.format(
+                    subject=active.subject, run_id=active.run_id
+                )
+            )
         return _advance_personal(active)
     if subject is None:
+        if track == "personal":
+            raise DflError(TRACK_NEEDS_SUBJECT)
         return None
     new = _new_subject(target.repo, subject)
     if track == "personal" and not new:
