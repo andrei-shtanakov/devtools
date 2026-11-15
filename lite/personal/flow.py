@@ -206,7 +206,6 @@ def _step_decomposition(ctx: _Ctx) -> bool:
         say(f"декомпозиция нарушает инварианты — правка автором, круг {round_no}")
         if not _fix_invariants(ctx, kind, text, problems):
             return False
-        ctx.calls.check += 1
         if not _node(ctx, kind):
             return False
     return ctx.stop(
@@ -272,12 +271,14 @@ def _node(ctx: _Ctx, kind: str) -> bool:
     """Узел написан и прошёл своё ребро (с разбором замечаний); иначе стоп."""
     name = FILENAMES[kind]
     if not (ctx.bundle / name).exists():
+        ctx.calls.author += 1
         outcome = author_node(ctx.run, kind, launch=ctx.launch)
         if outcome.code != 0:
             return ctx.stop(
                 f"автор {name} не написал узел: {outcome.reason or outcome.code}"
                 f" — {RETRY}"
             )
+    ctx.calls.check += 1  # каждая проверка ребра платная, и первая
     result = check_node(ctx.run, kind, check=ctx.check)
     round_no = 0
     while True:

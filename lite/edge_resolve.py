@@ -83,20 +83,24 @@ class Outcome(enum.Enum):
 @dataclass
 class PaidCalls:
     """Платные вызовы за `dfl run`: сортировка (без кэша), переписывание,
-    повторная проверка (считает вызывающий — по шагу после круга)."""
+    повторная проверка (считает вызывающий — по шагу после круга);
+    `author` — авторинг узла (личный путь; волновой путь его не считает,
+    и его строка прежняя)."""
 
     triage: int = 0
     revise: int = 0
     check: int = 0
+    author: int = 0
 
     def spent(self) -> bool:
         """Был ли хоть один платный вызов."""
-        return bool(self.triage or self.revise or self.check)
+        return bool(self.triage or self.revise or self.check or self.author)
 
     def line(self) -> str:
         """Строка для человека."""
+        head = f"авторинг {self.author}, " if self.author else ""
         return (
-            f"платных вызовов: сортировка {self.triage}, переписывание "
+            f"платных вызовов: {head}сортировка {self.triage}, переписывание "
             f"{self.revise}, проверка {self.check}"
         )
 

@@ -857,3 +857,30 @@ def test_spec_pr_branch_fact_unavailable_stops(run) -> None:
     assert _advance(run, ops) == 1
     assert "git сломан" in run.stop_reason
     assert not {"checkout_and_pull", "switch_to", "commit_paths"} & set(ops.names())
+
+
+def test_paid_calls_counted_on_happy_path(run, capsys) -> None:
+    """Регрессия ревью #774: авторинг и каждая проверка ребра (и первая)
+    — платные вызовы; строка расходов печатается."""
+    assert _advance(run, FakeOps(run)) == 0
+    out = capsys.readouterr().out
+    assert (
+        "платных вызовов: авторинг 2, сортировка 0, переписывание 0, проверка 2" in out
+    )
+
+
+def test_paid_calls_count_recheck_and_revision(run, monkeypatch) -> None:
+    """Перепроверка после разбора и правка инвариантов — тоже в счётчике."""
+    _wider_brief_at_decomposition(run)
+    seen: list[flow.PaidCalls] = []
+    original = flow._Ctx.__init__
+
+    def spy(self, *a, **k):
+        original(self, *a, **k)
+        seen.append(self.calls)
+
+    monkeypatch.setattr(flow._Ctx, "__init__", spy)
+    assert _advance_with(run, FakeOps(run), _reviser(FIXED), checker("PASS")) == 0
+    [calls] = seen
+    # дизайн на диске (не автор), декомпозиция: автор 1, правка 1, проверки 2
+    assert (calls.author, calls.revise, calls.check) == (1, 1, 2)
