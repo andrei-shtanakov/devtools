@@ -14,7 +14,10 @@ from governance import run_state as rs
 from governance import spec_loop
 from lite.output import say
 
-PERSONAL_ROOT = rs.RUNS_ROOT.parent / "personal-runs"
+#: Корень личных прогонов; `None` — `personal-runs` рядом с `rs.RUNS_ROOT`,
+#: читается при каждом вызове: тест, изолировавший `RUNS_ROOT`, изолирует и
+#: личные прогоны (настоящие прогоны разработчика тестам не видны).
+PERSONAL_ROOT: Path | None = None
 
 STEPS = (
     "interview",
@@ -75,10 +78,17 @@ def new_personal_run(
     )
 
 
+def personal_root() -> Path:
+    """`PERSONAL_ROOT` или `personal-runs` рядом с текущим `rs.RUNS_ROOT`."""
+    if PERSONAL_ROOT is not None:
+        return PERSONAL_ROOT
+    return rs.RUNS_ROOT.parent / "personal-runs"
+
+
 def run_dir(run_id: str) -> Path:
-    """Каталог прогона под `PERSONAL_ROOT` (run_id валидируется)."""
+    """Каталог прогона под `personal_root()` (run_id валидируется)."""
     rs.validate_id_component(run_id, label="run_id")
-    return PERSONAL_ROOT / run_id
+    return personal_root() / run_id
 
 
 def save(run: PersonalRun) -> None:
@@ -109,10 +119,11 @@ def active_for(repo_slug: str) -> PersonalRun | None:
     Нечитаемый `run.json` (битый JSON, нет полей, негодное имя каталога) —
     одна строка предупреждения и пропуск: чужой сломанный прогон не валит
     `dfl run` этого репо."""
-    if not PERSONAL_ROOT.is_dir():
+    root = personal_root()
+    if not root.is_dir():
         return None
     runs: list[tuple[float, PersonalRun]] = []
-    for path in PERSONAL_ROOT.glob("*/run.json"):
+    for path in root.glob("*/run.json"):
         try:
             runs.append((path.stat().st_mtime, load(path.parent.name)))
         except (OSError, ValueError, TypeError, AttributeError) as exc:

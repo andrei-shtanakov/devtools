@@ -81,8 +81,8 @@ def test_personal_root_outside_runs_root() -> None:
     import importlib
 
     fresh = importlib.reload(state)
-    assert fresh.PERSONAL_ROOT != rs.RUNS_ROOT
-    assert rs.RUNS_ROOT not in fresh.PERSONAL_ROOT.parents
+    assert fresh.personal_root() != rs.RUNS_ROOT
+    assert rs.RUNS_ROOT not in fresh.personal_root().parents
 
 
 def _cyr() -> state.PersonalRun:

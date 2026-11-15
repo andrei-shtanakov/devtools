@@ -124,6 +124,10 @@ TRACK_OPTIONS = (
 TRACKS = ("personal", "enterprise")  # в порядке `TRACK_OPTIONS`
 TRACK_RETRY = "ответьте номером: 1 или 2"
 TRACK_STOPPED = "прогон не начат — повторите dfl run --subject '<тема>'"
+TRACK_NO_TTY_HINT = (
+    "тип проекта не спрошен (нет терминала) — enterprise; личный проект: "
+    "dfl run --subject '…' --track personal"
+)
 
 # лог текущего вызова; путь переживает закрытие лога — его читает `_record`,
 # который `cli` выполняет после выхода из `main`
@@ -538,14 +542,18 @@ def _personal(
     Без `subject` — активный личный прогон репо (RF-4: он важнее
     enterprise-прогонов). С `subject` — активный личный прогон той же темы;
     иначе новая тема: тип — `track`, вопрос (только в терминале и только для
-    темы без enterprise-прогона), без терминала — enterprise, как прежде."""
+    темы без enterprise-прогона), без терминала — enterprise, как прежде,
+    с подсказкой про `--track personal`."""
     slug = user_targets.slug_from_url(target.repo_url)
     active = personal_state.active_for(slug)
     if active is not None and subject in (None, active.subject):
         return _advance_personal(active)
     if subject is None:
         return None
-    if track is None and _track_tty() and _new_subject(target.repo, subject):
+    if track is None and _new_subject(target.repo, subject):
+        if not _track_tty():
+            say(TRACK_NO_TTY_HINT)
+            return None
         track = _ask_track(ic.stdin_read)
         if track is None:
             say(TRACK_STOPPED)

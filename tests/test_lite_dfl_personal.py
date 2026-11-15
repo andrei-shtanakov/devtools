@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 
 import pytest
 
+from governance import run_state as rs
 from governance import user_targets
 from lite import dfl
 from lite.personal import flow
@@ -36,8 +38,8 @@ class Advance:
 
 @pytest.fixture()
 def personal(env: Env, monkeypatch: pytest.MonkeyPatch) -> Advance:  # noqa: F811
-    """Личные прогоны — рядом с `RUNS_ROOT` в `tmp`, `advance` — рекордер."""
-    monkeypatch.setattr(ps, "PERSONAL_ROOT", env.tmp / "personal-runs")
+    """`advance` — рекордер. `PERSONAL_ROOT` НЕ подменяется: личные прогоны
+    обязаны уйти в `tmp` вслед за `RUNS_ROOT` фикстуры `env`."""
     rec = Advance()
     monkeypatch.setattr(flow, "advance", rec)
     monkeypatch.setattr(dfl, "_track_tty", lambda: True)
@@ -235,3 +237,39 @@ def test_quiet_wraps_effects_under_capture(
     assert ops.head_sha("/t", "b") == "abc" and ops.name == "x"
     assert dfl._quiet(lambda a, *, b: a + b)(1, b=2) == 3
     assert seen == ["in", "call", "out", "in", "out"]
+
+
+def test_personal_root_isolated_in_tests(
+    env: Env,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """Тест, изолировавший `RUNS_ROOT`, не видит настоящих личных прогонов
+    разработчика: `dfl run` не продолжит чужой прогон с настоящими эффектами."""
+    real = Path(rs.__file__).resolve().parent.parent / "out" / "personal-runs"
+    root = ps.personal_root()
+    assert root == env.tmp / "personal-runs" and tmp_path in root.parents
+    assert root != real
+
+
+def test_no_terminal_new_subject_hints_track(
+    env: Env,  # noqa: F811
+    personal: Advance,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(dfl, "_track_tty", lambda: False)
+    monkeypatch.setattr(dfl.ic, "stdin_read", lambda p: pytest.fail("вопрос"))
+    assert env.run("run", "--subject", SUBJECT) == 0
+    out = capsys.readouterr().out
+    assert dfl.TRACK_NO_TTY_HINT in out
+    assert TRACK_HINT_TEXT == dfl.TRACK_NO_TTY_HINT
+    assert personal.runs == [] and "--need" in env.spec_calls[0]
+    _run("WS-1-a", "WS-1", "customer", "completed", subject="t1")
+    assert env.run("run", "--subject", "t1") == 0  # тема есть — подсказки нет
+    assert dfl.TRACK_NO_TTY_HINT not in capsys.readouterr().out
+
+
+TRACK_HINT_TEXT = (
+    "тип проекта не спрошен (нет терминала) — enterprise; личный проект: "
+    "dfl run --subject '…' --track personal"
+)
