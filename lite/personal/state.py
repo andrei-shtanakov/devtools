@@ -115,8 +115,9 @@ def load(run_id: str) -> PersonalRun:
     return PersonalRun(**{k: v for k, v in raw.items() if k in known})
 
 
-def active_for(repo_slug: str) -> PersonalRun | None:
-    """Последний по mtime незавершённый прогон репо или `None`.
+def active_for(repo_slug: str, subject: str | None = None) -> PersonalRun | None:
+    """Последний по mtime незавершённый прогон репо (с `subject` — этой темы)
+    или `None`: второй личный проект репо не прячет первый.
 
     Нечитаемый `run.json` (битый JSON, нет полей, негодное имя каталога) —
     одна строка предупреждения и пропуск: чужой сломанный прогон не валит
@@ -131,6 +132,8 @@ def active_for(repo_slug: str) -> PersonalRun | None:
         except (OSError, ValueError, TypeError, AttributeError) as exc:
             say(f"личный прогон не читается, пропущен: {path} ({exc})")
     for _, run in sorted(runs, key=lambda item: item[0], reverse=True):
-        if run.repo_slug == repo_slug and run.step != "done":
+        if run.repo_slug != repo_slug or run.step == "done":
+            continue
+        if subject is None or run.subject == subject:
             return run
     return None

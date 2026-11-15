@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -267,6 +268,38 @@ def test_no_terminal_new_subject_hints_track(
     _run("WS-1-a", "WS-1", "customer", "completed", subject="t1")
     assert env.run("run", "--subject", "t1") == 0  # тема есть — подсказки нет
     assert dfl.TRACK_NO_TTY_HINT not in capsys.readouterr().out
+
+
+def test_older_personal_subject_reachable(
+    env: Env,  # noqa: F811
+    personal: Advance,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Второй личный проект в том же репо не прячет первый: `--subject <старая>`
+    продолжает её прогон, без вопроса о типе и без нового прогона."""
+    old = _active(env)
+    newer = ps.new_personal_run("Другое", REPO, SLUG, str(env.tmp / "t"), date.today())
+    ps.save(newer)
+    os.utime(ps.run_dir(newer.run_id) / "run.json", (2e9, 2e9))
+    monkeypatch.setattr(dfl.ic, "stdin_read", lambda p: pytest.fail("вопрос"))
+    _no_step(monkeypatch)
+    assert env.run("run", "--subject", SUBJECT) == 0
+    assert env.run("run") == 0
+    assert [r.run_id for r in personal.runs] == [old.run_id, newer.run_id]
+    assert len(list(ps.personal_root().glob("*/run.json"))) == 2
+
+
+def test_track_personal_refused_for_enterprise_subject(
+    env: Env,  # noqa: F811
+    personal: Advance,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run("WS-1-a", "WS-1", "customer", "waiting_interview", subject="t1")
+    assert env.run("run", "--subject", "t1", "--track", "personal") == 2
+    captured = capsys.readouterr()
+    reason, todo = dfl.TRACK_PERSONAL_TAKEN.format(subject="t1").split(" — ")
+    assert reason in captured.err and todo in captured.err
+    assert personal.runs == [] and env.spec_calls == []
 
 
 TRACK_HINT_TEXT = (

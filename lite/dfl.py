@@ -124,6 +124,11 @@ TRACK_OPTIONS = (
 TRACKS = ("personal", "enterprise")  # в порядке `TRACK_OPTIONS`
 TRACK_RETRY = "ответьте номером: 1 или 2"
 TRACK_STOPPED = "прогон не начат — повторите dfl run --subject '<тема>'"
+TRACK_PERSONAL_TAKEN = (
+    "тема «{subject}» уже ведётся enterprise-конвейером, --track personal "
+    "не применим — продолжить её: dfl run --subject '<тема>' без --track; "
+    "личный проект заведите под другой темой (или сначала dfl abandon)"
+)
 TRACK_NO_TTY_HINT = (
     "тип проекта не спрошен (нет терминала) — enterprise; личный проект: "
     "dfl run --subject '…' --track personal"
@@ -545,12 +550,15 @@ def _personal(
     темы без enterprise-прогона), без терминала — enterprise, как прежде,
     с подсказкой про `--track personal`."""
     slug = user_targets.slug_from_url(target.repo_url)
-    active = personal_state.active_for(slug)
-    if active is not None and subject in (None, active.subject):
+    active = personal_state.active_for(slug, subject=subject)
+    if active is not None:
         return _advance_personal(active)
     if subject is None:
         return None
-    if track is None and _new_subject(target.repo, subject):
+    new = _new_subject(target.repo, subject)
+    if track == "personal" and not new:
+        raise DflError(TRACK_PERSONAL_TAKEN.format(subject=subject))
+    if track is None and new:
         if not _track_tty():
             say(TRACK_NO_TTY_HINT)
             return None
