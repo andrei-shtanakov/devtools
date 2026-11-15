@@ -5,9 +5,11 @@
 проверить» живёт в вызывающем коде.
 
 Журнал `review-remarks.jsonl` — append-only, по JSON-объекту в строке:
-`{"kind": "remark", "stage", "text", "ts"}` и `{"kind": "applied", "stage",
-"ts"}`. Замечание применено, если после него есть строка `applied` того же
-этапа. Строки не переписываются, оборванная последняя строка игнорируется.
+`{"kind": "remark", "stage", "text", "ts"}` и `{"kind": "applied" | "dropped",
+"stage", "upto", "ts"}`. Строки `applied`/`dropped` этапа по порядку гасят
+следующие `upto` замечаний этапа: `applied` — правка внесена, `dropped` —
+отклонена (правка удаляла пункты); погашенное не недоиграно. Строки не
+переписываются, оборванная последняя строка игнорируется.
 """
 
 from __future__ import annotations
@@ -31,6 +33,8 @@ ENTERPRISE_STAGES = (
 )
 DONE_WORDS = frozenset({"дальше", "да", "ок", "1"})
 REMARKS = "review-remarks.jsonl"
+APPLIED, DROPPED, PENDING = "applied", "dropped", "pending"
+_CONSUMED = (APPLIED, DROPPED)
 _YES_WORDS = frozenset({"1", "да"})
 _NO_WORDS = frozenset({"2", "нет"})
 
@@ -45,7 +49,13 @@ class Remark:
 
     stage: str
     text: str
-    applied: bool
+    #: `APPLIED` | `DROPPED` | `PENDING`
+    status: str
+
+    @property
+    def applied(self) -> bool:
+        """Правка по замечанию внесена."""
+        return self.status == APPLIED
 
 
 def parse_flag(value: str, stages: tuple[str, ...]) -> tuple[str, ...]:
@@ -96,24 +106,24 @@ def _append(run_dir: Path, row: dict[str, object]) -> None:
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def _applied_counts(rows: list[dict[str, object]]) -> dict[str, int]:
-    counts: dict[str, int] = {}
+def _consumed(rows: list[dict[str, object]]) -> dict[str, list[str]]:
+    """Этап → исходы погашенных замечаний по порядку (`upto` раз каждый)."""
+    result: dict[str, list[str]] = {}
     for row in rows:
-        if row.get("kind") != "applied":
-            continue
-        stage, upto = str(row.get("stage", "")), row.get("upto", 0)
-        if isinstance(upto, int):
-            counts[stage] = counts.get(stage, 0) + upto
-    return counts
+        kind, upto = row.get("kind"), row.get("upto", 0)
+        if kind in _CONSUMED and isinstance(upto, int) and upto > 0:
+            result.setdefault(str(row.get("stage", "")), []).extend([str(kind)] * upto)
+    return result
 
 
 def all_remarks(run_dir: Path) -> list[Remark]:
-    """Все замечания по порядку записи, с признаком «применено».
+    """Все замечания по порядку записи, с исходом.
 
-    Замечание применено, если его номер среди замечаний своего этапа (с 1)
-    не больше суммы `upto` из строк `applied` этого этапа (применяются по порядку)."""
+    N-е замечание этапа (с 1) получает N-й исход из строк `applied`/`dropped`
+    этого этапа (каждая — `upto` исходов, по порядку журнала); исходов
+    меньше — `PENDING`."""
     rows = _journal(run_dir)
-    applied = _applied_counts(rows)
+    consumed = _consumed(rows)
     seen: dict[str, int] = {}
     result: list[Remark] = []
     for row in rows:
@@ -121,14 +131,15 @@ def all_remarks(run_dir: Path) -> list[Remark]:
             continue
         stage = str(row.get("stage", ""))
         seen[stage] = seen.get(stage, 0) + 1
-        done = seen[stage] <= applied.get(stage, 0)
-        result.append(Remark(stage, str(row.get("text", "")), done))
+        done = consumed.get(stage, [])
+        status = done[seen[stage] - 1] if seen[stage] <= len(done) else PENDING
+        result.append(Remark(stage, str(row.get("text", "")), status))
     return result
 
 
 def pending(run_dir: Path, stage: str) -> list[Remark]:
-    """Неприменённые замечания этапа."""
-    return [r for r in all_remarks(run_dir) if r.stage == stage and not r.applied]
+    """Недоигранные (не применённые и не отклонённые) замечания этапа."""
+    return [r for r in all_remarks(run_dir) if r.stage == stage and r.status == PENDING]
 
 
 def record(run_dir: Path, stage: str, text: str) -> None:
@@ -141,7 +152,13 @@ def mark_applied(run_dir: Path, stage: str, upto: int) -> None:
 
     `upto` = `len(pending(...))` того снимка, который потребила переписка;
     записанные после снимка остаются неприменёнными."""
-    _append(run_dir, {"kind": "applied", "stage": stage, "upto": upto})
+    _append(run_dir, {"kind": APPLIED, "stage": stage, "upto": upto})
+
+
+def mark_dropped(run_dir: Path, stage: str, upto: int) -> None:
+    """Пометить отклонёнными ближайшие `upto` недоигранных замечаний этапа
+    (правка по ним удаляла пункты); снимок — как у `mark_applied`."""
+    _append(run_dir, {"kind": DROPPED, "stage": stage, "upto": upto})
 
 
 def ask(stage_label: str, paths: list[Path], *, read: Read) -> str | None:
@@ -176,8 +193,13 @@ def confirm_removals(ids: list[str], *, read: Read) -> set[str] | None:
 
 
 def pr_section(run_dir: Path) -> str:
-    """Раздел описания PR с применёнными замечаниями; нет их — пустая строка."""
-    lines = [f"- {r.stage}: {r.text}" for r in all_remarks(run_dir) if r.applied]
+    """Раздел описания PR: применённые замечания списком, отклонённые —
+    отдельной строкой; нет ни тех, ни других — пустая строка."""
+    remarks = all_remarks(run_dir)
+    lines = [f"- {r.stage}: {r.text}" for r in remarks if r.status == APPLIED]
+    dropped = [f"{r.stage}: {r.text}" for r in remarks if r.status == DROPPED]
+    if dropped:
+        lines += ["", "не применены (правка удаляла пункты): " + "; ".join(dropped)]
     if not lines:
         return ""
-    return "## Замечания владельца\n\n" + "\n".join(lines) + "\n"
+    return "## Замечания владельца\n\n" + "\n".join(lines).lstrip("\n") + "\n"

@@ -119,3 +119,30 @@ def test_append_after_torn_line_keeps_row(tmp_path: Path) -> None:
         fh.write('{"kind": "rem')
     rp.record(tmp_path, "design", "b")
     assert [r.text for r in rp.pending(tmp_path, "design")] == ["a", "b"]
+
+
+def test_dropped_not_pending_and_listed_separately(tmp_path: Path) -> None:
+    rp.record(tmp_path, "design", "добавь X")
+    rp.mark_applied(tmp_path, "design", 1)
+    rp.record(tmp_path, "design", "убери Y")
+    rp.mark_dropped(tmp_path, "design", 1)
+    rp.record(tmp_path, "design", "ещё Z")
+    assert [(r.text, r.status) for r in rp.all_remarks(tmp_path)] == [
+        ("добавь X", "applied"),
+        ("убери Y", "dropped"),
+        ("ещё Z", "pending"),
+    ]
+    assert [r.text for r in rp.pending(tmp_path, "design")] == ["ещё Z"]
+    section = rp.pr_section(tmp_path)
+    assert section.startswith("## Замечания владельца")
+    assert "- design: добавь X" in section
+    assert "не применены (правка удаляла пункты): design: убери Y" in section
+    assert "- design: убери Y" not in section and "ещё Z" not in section
+
+
+def test_pr_section_only_dropped(tmp_path: Path) -> None:
+    rp.record(tmp_path, "design", "убери Y")
+    rp.mark_dropped(tmp_path, "design", 1)
+    section = rp.pr_section(tmp_path)
+    assert section.startswith("## Замечания владельца")
+    assert "не применены (правка удаляла пункты): design: убери Y" in section

@@ -200,6 +200,11 @@ def test_unclear_remark_not_replayed(tmp_path) -> None:
     assert (_bundle(run) / "20-design.md").read_text(encoding="utf-8") == DESIGN
     rd = state.run_dir(run.run_id)
     assert rp.pending(rd, "design") == []
+    assert [r.status for r in rp.all_remarks(rd)] == ["dropped"]
+    assert "- design: убери поиск" not in rp.pr_section(rd)
+    assert "не применены (правка удаляла пункты): design: убери поиск" in (
+        rp.pr_section(rd)
+    )
 
     author2 = _author()
     check = checker("PASS")

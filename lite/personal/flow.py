@@ -510,8 +510,8 @@ def _revise_by_owner(ctx: _Ctx, stage: str, batch: list[rp.Remark]) -> bool:
     """Правка узла автором по замечаниям владельца; не принята — файл
     возвращается: сбой — стоп; `/стоп` на вопросе удаления — пауза
     (замечание остаётся недоигранным); правка всё равно ослабляет узел —
-    замечание гасится (повторно не переигрывается) и стоп с просьбой
-    сформулировать иначе."""
+    замечание отклоняется (`mark_dropped`, повторно не переигрывается) и
+    стоп с просьбой сформулировать иначе."""
     kind = _STAGE_KINDS[stage]
     path = ctx.bundle / FILENAMES[kind]
     before = path.read_text(encoding="utf-8")
@@ -529,7 +529,7 @@ def _revise_by_owner(ctx: _Ctx, stage: str, batch: list[rp.Remark]) -> bool:
         say(ctx.run.stop_reason)
         return False
     if outcome == _UNCLEAR:
-        rp.mark_applied(run_dir(ctx.run.run_id), stage, len(batch))
+        rp.mark_dropped(run_dir(ctx.run.run_id), stage, len(batch))
         return ctx.stop(UNCLEAR_REMARK.format(ids=detail))
     return ctx.stop(f"{detail} — {RETRY}")
 
