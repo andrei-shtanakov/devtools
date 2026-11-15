@@ -1,0 +1,160 @@
+"""Ядро паузы «посмотреть этап» в `dfl` (#768).
+
+Общее для личного и enterprise-путей: разбор флага, журнал замечаний
+владельца, экран паузы и подтверждение удалений. Сам цикл «переписать →
+проверить» живёт в вызывающем коде.
+
+Журнал `review-remarks.jsonl` — append-only, по JSON-объекту в строке:
+`{"kind": "remark", "stage", "text", "ts"}` и `{"kind": "applied", "stage",
+"ts"}`. Замечание применено, если после него есть строка `applied` того же
+этапа. Строки не переписываются, оборванная последняя строка игнорируется.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+from governance.auto_tasks import notice
+from lite.interview_chat import STOP_WORD, Read, read_answer
+
+PERSONAL_STAGES = ("brief", "design", "decomposition")
+ENTERPRISE_STAGES = (
+    "charter",
+    "requirements",
+    "behaviour-spec",
+    "design",
+    "acceptance",
+    "decomposition",
+)
+DONE_WORDS = frozenset({"дальше", "да", "ок", "1"})
+REMARKS = "review-remarks.jsonl"
+_YES_WORDS = frozenset({"1", "да"})
+_NO_WORDS = frozenset({"2", "нет"})
+
+
+class ReviewError(Exception):
+    """Неверная настройка паузы (например, неизвестное имя этапа)."""
+
+
+@dataclass(frozen=True)
+class Remark:
+    """Замечание владельца к этапу."""
+
+    stage: str
+    text: str
+    applied: bool
+
+
+def parse_flag(value: str, stages: tuple[str, ...]) -> tuple[str, ...]:
+    """`--review`: `all` — все этапы пути, `none`/пусто — без пауз, иначе список."""
+    text = value.strip()
+    if text.casefold() == "all":
+        return stages
+    if text.casefold() in ("", "none"):
+        return ()
+    names = tuple(n.strip() for n in text.split(",") if n.strip())
+    unknown = [n for n in names if n not in stages]
+    if unknown:
+        raise ReviewError(
+            f"неизвестный этап: {', '.join(unknown)}; допустимы: {', '.join(stages)}"
+        )
+    return names
+
+
+def from_config(names: tuple[str, ...], stages: tuple[str, ...]) -> tuple[str, ...]:
+    """Этапы из конфига, относящиеся к этому пути; чужие молча отбрасываются."""
+    return tuple(n for n in names if n in stages)
+
+
+def _journal(run_dir: Path) -> list[dict[str, str]]:
+    path = run_dir / REMARKS
+    if not path.is_file():
+        return []
+    rows: list[dict[str, str]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _append(run_dir: Path, row: dict[str, str]) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    row["ts"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    with (run_dir / REMARKS).open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def all_remarks(run_dir: Path) -> list[Remark]:
+    """Все замечания по порядку записи, с признаком «применено»."""
+    rows = _journal(run_dir)
+    result: list[Remark] = []
+    for i, row in enumerate(rows):
+        if row.get("kind") != "remark":
+            continue
+        stage = row.get("stage", "")
+        applied = any(
+            r.get("kind") == "applied" and r.get("stage") == stage
+            for r in rows[i + 1 :]
+        )
+        result.append(Remark(stage, row.get("text", ""), applied))
+    return result
+
+
+def pending(run_dir: Path, stage: str) -> list[Remark]:
+    """Неприменённые замечания этапа."""
+    return [r for r in all_remarks(run_dir) if r.stage == stage and not r.applied]
+
+
+def record(run_dir: Path, stage: str, text: str) -> None:
+    """Записать замечание (не применено)."""
+    _append(run_dir, {"kind": "remark", "stage": stage, "text": text})
+
+
+def mark_applied(run_dir: Path, stage: str) -> None:
+    """Пометить применёнными все записанные к этому моменту замечания этапа."""
+    _append(run_dir, {"kind": "applied", "stage": stage})
+
+
+def ask(stage_label: str, paths: list[Path], *, read: Read) -> str | None:
+    """Экран паузы. `""` — «дальше»; текст — замечания; `None` — `/стоп`/EOF."""
+    notice(f"этап «{stage_label}» готов и прошёл проверку — посмотрите:")
+    for path in paths:
+        notice(f"  file://{path.resolve()}")
+    notice(
+        "замечания своими словами (пустая строка — отправить); "
+        f"«дальше» — без замечаний; {STOP_WORD} — прервать"
+    )
+    answer = read_answer(read, quick=lambda s: s.strip().casefold() in DONE_WORDS)
+    if answer is None:
+        return None
+    return "" if answer.casefold() in DONE_WORDS else answer
+
+
+def confirm_removals(ids: list[str], *, read: Read) -> set[str]:
+    """Спросить по каждому id, можно ли удалить; `None` от чтения — никого."""
+    allowed: set[str] = set()
+    for item in ids:
+        notice(f"удалить {item}? 1. да · 2. нет")
+        answer = read_answer(
+            read, quick=lambda s: s.strip().casefold() in _YES_WORDS | _NO_WORDS
+        )
+        if answer is None:
+            return set()
+        if answer.casefold() in _YES_WORDS:
+            allowed.add(item)
+    return allowed
+
+
+def pr_section(run_dir: Path) -> str:
+    """Раздел описания PR с применёнными замечаниями; нет их — пустая строка."""
+    lines = [f"- {r.stage}: {r.text}" for r in all_remarks(run_dir) if r.applied]
+    if not lines:
+        return ""
+    return "## Замечания владельца\n\n" + "\n".join(lines) + "\n"
