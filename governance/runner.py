@@ -113,6 +113,13 @@ INTERVIEW_BRIEF = "interview-brief"
 # файл снятым (devtools#247).
 INTERVIEW_FINDINGS = "interview-findings.txt"
 
+#: Пауза на просмотр этапа (#768): волна прошла edge-check, узел выбран для
+#: просмотра — раннер стоит до candidate-PR, замечания разбирает `dfl`.
+WAITING_OWNER_REVIEW = "waiting_owner_review"
+#: Op паузы волны (`wave_key`): `{"status": "completed", "revised": bool}`
+#: пишет `dfl`, когда человек сказал «дальше».
+REVIEW_PAUSE = "review-pause"
+
 # (op key, kind для ops.author, ожидаемое имя файла в bundle_dir) — S2/S3.
 _AUTHOR_STEPS = (
     ("author-charter", "charter", "00-charter.md"),
@@ -781,10 +788,13 @@ def reset_ops_for(state: RunState) -> tuple[str, ...]:
     `stopped_dirty`/`stopped_preflight` — ничего, только статус.
     """
     if state.status in ("stopped_gate", "stopped_review", "stopped_author"):
-        return tuple(
-            wave_key(state, base) for base in ("commit", "gate-candidate", "edge")
-        )
+        return _wave_edit_ops(state)
     return ()
+
+
+def _wave_edit_ops(state: RunState) -> tuple[str, ...]:
+    """Op'ы волны, которые правка узла делает недействительными."""
+    return tuple(wave_key(state, base) for base in ("commit", "gate-candidate", "edge"))
 
 
 #: Файл находок, который ведёт шаг. Ключ — БАЗА op'а (`wave_key` даёт
@@ -1085,6 +1095,9 @@ def resume(run_id: str, ops: Ops, *, lock: rl.RunLock) -> RunState:
         state.status = "running"
         save(state)
         return advance(state, ops, lock=lock)
+    if state.status == WAITING_OWNER_REVIEW:
+        _resume_owner_review(state)
+        return advance(state, ops, lock=lock)
     if state.status in _STOPPED_RESET_OPS:
         if _reconcile_pr_merged_out_of_band(state, ops, lock=lock):
             return state
@@ -1096,6 +1109,35 @@ def resume(run_id: str, ops: Ops, *, lock: rl.RunLock) -> RunState:
         save(state)
         return advance(state, ops, lock=lock)
     return advance(state, ops, lock=lock)
+
+
+def review_pause_passed(state: RunState) -> bool:
+    """Пауза просмотра текущей волны пройдена: `dfl` записал `completed`."""
+    return op_status(state, wave_key(state, REVIEW_PAUSE)) == "completed"
+
+
+def _resume_owner_review(state: RunState) -> None:
+    """Продолжение после паузы просмотра (#768, RF-3).
+
+    Без правок — `running` как есть: edge-check этих байтов уже прошёл,
+    повторная платная проверка не нужна. С правками — сброс диапазона
+    `commit`…`edge` волны (как у `stopped_review`) и снятие op паузы:
+    переписанный файл коммитится и проверяется заново, после проверки пауза
+    показывается снова. Пауза не пройдена — отказ без изменений.
+    """
+    if not review_pause_passed(state):
+        raise ValueError(
+            f"run {state.run_id!r}, волна {state.wave}: пауза просмотра не "
+            "пройдена — dfl run"
+        )
+    key = wave_key(state, REVIEW_PAUSE)
+    if (state.ops.get(key) or {}).get("revised"):
+        keys = _wave_edit_ops(state)
+        _drop_findings_of(state, keys)
+        for reset in (*keys, key):
+            state.ops.pop(reset, None)
+    state.status = "running"
+    save(state)
 
 
 def _resume_wave(state: RunState, ops: Ops, *, lock: rl.RunLock) -> RunState | None:
@@ -1598,6 +1640,7 @@ def reopen(
             "commit",
             "gate-candidate",
             "edge",
+            REVIEW_PAUSE,
             "push",
             "candidate",
             "finalize",
@@ -4358,7 +4401,7 @@ def _step_edge(state: RunState, ops: Ops) -> bool:
     """
     key = wave_key(state, "edge")
     if op_status(state, key) == "completed":
-        return True
+        return _no_review_pause(state)
     _ensure_started(state, key)
     findings_path = run_dir(state.run_id) / "edge-findings.txt"
     findings_path.unlink(missing_ok=True)
@@ -4381,7 +4424,7 @@ def _step_edge(state: RunState, ops: Ops) -> bool:
     edges = {f"{n}--{e}": r["verdict"] for (n, e), r in records.items()}
     if verdict == "PASS":
         op_complete(state, key, verdict=verdict, edges=edges)
-        return True
+        return _no_review_pause(state)
     accepted = _overridden_level(state, verdict, records)
     if accepted is not None:
         op_complete(
@@ -4392,7 +4435,7 @@ def _step_edge(state: RunState, ops: Ops) -> bool:
             overridden=[list(k) for k in sorted(accepted)],
             overridden_digests=sorted(edge_override.blocking_digests(records)),
         )
-        return True
+        return _no_review_pause(state)
     lines: list[str] = []
     for (node, edge), record in records.items():
         if record["verdict"] == "ERROR":
@@ -4411,6 +4454,17 @@ def _step_edge(state: RunState, ops: Ops) -> bool:
             lines.append(f"error EDGE-CHECK({node}/{edge}): {EDGE_UNRATED}")
     findings_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     state.status = "stopped_review"
+    save(state)
+    return False
+
+
+def _no_review_pause(state: RunState) -> bool:
+    """После прошедшего edge-check: узел волны выбран для просмотра (#768) и
+    пауза ещё не пройдена — стоп `WAITING_OWNER_REVIEW` до candidate-PR."""
+    nodes = {kind for _key, kind, _fname in _author_steps_for(state)}
+    if nodes.isdisjoint(state.review_pause) or review_pause_passed(state):
+        return True
+    state.status = WAITING_OWNER_REVIEW
     save(state)
     return False
 

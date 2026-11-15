@@ -1027,8 +1027,11 @@ def _report_state(state: rs.RunState) -> int:
     Перечня продолжаемых статусов здесь намеренно нет: он уже устарел молча
     один раз (E2 добавил `waiting_interview`/`stopped_interview`, а фраза
     осталась про два), и устареет снова. Продолжаемость решает `_dispatch`,
-    сюда попадает то, что он не взял.
+    сюда попадает то, что он не взял. Пауза просмотра этапа (#768) — не
+    стоп: подсказка `dfl run` и код 0.
     """
+    if state.status == runner.WAITING_OWNER_REVIEW:
+        return _owner_review_wait(state)
     if state.mode == "test" and _test_resumable(state.status):
         # В test повтор кнопки продолжает этот статус (`_dispatch`) — звать
         # `make behaviour-run` незачем, у `dfl` его и нет.
@@ -1073,11 +1076,27 @@ def _brief_ready(state: rs.RunState) -> int:
     return 0
 
 
+def _owner_review_wait(state: rs.RunState) -> int:
+    """Пауза просмотра этапа (#768): кнопка не продолжает, ждёт `dfl`."""
+    print(
+        f"spec-loop: прогон {state.run_id!r} (волна {state.wave}) ждёт "
+        "просмотра этапа: dfl run"
+    )
+    return 0
+
+
 def _dispatch(state: rs.RunState, ops, lock: run_lock.RunLock) -> int:
-    """Действие по фактическому статусу найденного прогона."""
+    """Действие по фактическому статусу найденного прогона.
+
+    Пауза просмотра (`WAITING_OWNER_REVIEW`) продолжается только после
+    записи `dfl` «пауза пройдена»; до неё — подсказка и код 0."""
     rs.require_mode(state)
     if state.status == "brief_ready":
         return _brief_ready(state)
+    if state.status == runner.WAITING_OWNER_REVIEW:
+        if not runner.review_pause_passed(state):
+            return _owner_review_wait(state)
+        return _after_resume(runner.resume(state.run_id, ops, lock=lock), ops)
     if state.status in WAVE_PAUSES:
         after = runner.resume(state.run_id, ops, lock=lock)
         if after.status in WAVE_PAUSES:

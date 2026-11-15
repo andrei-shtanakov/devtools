@@ -1067,6 +1067,8 @@ def _outcome(state: rs.RunState, code: int) -> str | None:
             return f"прогон {state.run_id} остановлен: {first}"
     if code != 0:
         return f"шаг завершился с кодом {code}"
+    if state.status == runner.WAITING_OWNER_REVIEW:
+        return f"прогон {state.run_id} ждёт просмотра этапа: dfl run"
     return f"прогон {state.run_id}: {state.status}"
 
 
