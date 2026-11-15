@@ -44,11 +44,19 @@ class PersonalRun:
     stop_reason: str = ""
 
 
+def _ws_id(subject: str, today: date) -> str:
+    """ws-id из subject; для не-ASCII темы (кириллица) — `personal-<дата>`."""
+    try:
+        return spec_loop.ws_id_for(subject, today)
+    except spec_loop.SpecLoopError:
+        return f"personal-{today:%Y%m%d}"
+
+
 def new_personal_run(
     subject: str, repo: str, repo_slug: str, target_dir: str, today: date
 ) -> PersonalRun:
     """Новый прогон: `run_id` = ws-id + случайный суффикс."""
-    ws_id = spec_loop.ws_id_for(subject, today)
+    ws_id = _ws_id(subject, today)
     return PersonalRun(
         run_id=f"{ws_id}-{secrets.token_hex(3)}",
         ws_id=ws_id,
