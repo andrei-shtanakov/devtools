@@ -159,8 +159,9 @@ def ask(stage_label: str, paths: list[Path], *, read: Read) -> str | None:
     return "" if answer.casefold() in DONE_WORDS else answer
 
 
-def confirm_removals(ids: list[str], *, read: Read) -> set[str]:
-    """Спросить по каждому id, можно ли удалить; `None` от чтения — никого."""
+def confirm_removals(ids: list[str], *, read: Read) -> set[str] | None:
+    """Спросить по каждому id, можно ли удалить: разрешённые id; `None` —
+    `/стоп`/EOF (человек прервал — пауза у вызывающего, не «нет»)."""
     allowed: set[str] = set()
     for item in ids:
         notice(f"удалить {item}? 1. да · 2. нет")
@@ -168,7 +169,7 @@ def confirm_removals(ids: list[str], *, read: Read) -> set[str]:
             read, quick=lambda s: s.strip().casefold() in _YES_WORDS | _NO_WORDS
         )
         if answer is None:
-            return set()
+            return None
         if answer.casefold() in _YES_WORDS:
             allowed.add(item)
     return allowed

@@ -64,6 +64,11 @@ _STAGE_KINDS = {"design": "personal-design", "decomposition": "personal-decompos
 #: платит за проверку заново, если файл не меняли
 REVIEW_PASSED = "review-passed.json"
 REVIEW_PAUSED = "просмотр этапа «{label}» прерван — " + RETRY
+UNCLEAR_REMARK = (
+    "замечание не применено: правка удаляла {ids} — сформулируйте иначе (dfl run)"
+)
+#: исходы круга правки по замечаниям владельца (`_owner_round`)
+_ACCEPTED, _PAUSED, _UNCLEAR, _FAILED = "accepted", "paused", "unclear", "failed"
 NO_TTY = (
     "ждёт просмотра этапа «{label}» — откройте {links}; замечания — dfl run в терминале"
 )
@@ -486,7 +491,7 @@ def _recheck(ctx: _Ctx, stage: str) -> bool:
 def _apply_remarks(ctx: _Ctx, stage: str, batch: list[rp.Remark]) -> bool:
     if stage == "brief":
         return _brief_by_owner(ctx, batch)
-    return _revise_by_owner(ctx, _STAGE_KINDS[stage], batch)
+    return _revise_by_owner(ctx, stage, batch)
 
 
 def _brief_by_owner(ctx: _Ctx, batch: list[rp.Remark]) -> bool:
@@ -501,47 +506,64 @@ def _brief_by_owner(ctx: _Ctx, batch: list[rp.Remark]) -> bool:
     return _interview(ctx, rd)
 
 
-def _revise_by_owner(ctx: _Ctx, kind: str, batch: list[rp.Remark]) -> bool:
+def _revise_by_owner(ctx: _Ctx, stage: str, batch: list[rp.Remark]) -> bool:
     """Правка узла автором по замечаниям владельца; не принята — файл
-    возвращается, стоп."""
+    возвращается: сбой — стоп; `/стоп` на вопросе удаления — пауза
+    (замечание остаётся недоигранным); правка всё равно ослабляет узел —
+    замечание гасится (повторно не переигрывается) и стоп с просьбой
+    сформулировать иначе."""
+    kind = _STAGE_KINDS[stage]
     path = ctx.bundle / FILENAMES[kind]
     before = path.read_text(encoding="utf-8")
     decisions = "\n".join(f"- замечание владельца: {r.text}" for r in batch)
     try:
-        reason = _owner_round(ctx, kind, before, decisions)
+        outcome, detail = _owner_round(ctx, kind, before, decisions)
     except BaseException:
         path.write_text(before, encoding="utf-8")
         raise
-    if reason is None:
+    if outcome == _ACCEPTED:
         return True
     path.write_text(before, encoding="utf-8")
-    return ctx.stop(f"{reason} — {RETRY}")
+    if outcome == _PAUSED:
+        ctx.run.stop_reason = REVIEW_PAUSED.format(label=STAGE_LABELS[stage])
+        say(ctx.run.stop_reason)
+        return False
+    if outcome == _UNCLEAR:
+        rp.mark_applied(run_dir(ctx.run.run_id), stage, len(batch))
+        return ctx.stop(UNCLEAR_REMARK.format(ids=detail))
+    return ctx.stop(f"{detail} — {RETRY}")
 
 
-def _owner_round(ctx: _Ctx, kind: str, before: str, decisions: str) -> str | None:
+def _owner_round(ctx: _Ctx, kind: str, before: str, decisions: str) -> tuple[str, str]:
     """RF-2: удалённые/ослабленные id — вопрос по каждому; «нет» — файл
-    возвращается и один повтор с «<id> не удалять». `None` — правка принята."""
+    возвращается и один повтор с «<id> не удалять».
+
+    Итог `(исход, подробность)`: `_ACCEPTED`; `_PAUSED` (`/стоп` на вопросе,
+    без платного повтора); `_UNCLEAR` (повтор снова ослабляет; подробность —
+    id); `_FAILED` (сбой автора; подробность — причина)."""
     path = ctx.bundle / FILENAMES[kind]
     failed = _owner_revise(ctx, kind, before, decisions)
     if failed:
-        return failed
+        return _FAILED, failed
     bad = node_guard.weakened(before, path.read_text(encoding="utf-8"), set(), set())
     if not bad:
-        return None
+        return _ACCEPTED, ""
     allowed = rp.confirm_removals(bad, read=ctx.read)
+    if allowed is None:
+        return _PAUSED, ""
     kept = [item for item in bad if item not in allowed]
     if not kept:
-        return None
+        return _ACCEPTED, ""
     path.write_text(before, encoding="utf-8")
     keep = "\n".join(f"- {item} не удалять" for item in kept)
     failed = _owner_revise(ctx, kind, before, f"{decisions}\n{keep}")
     if failed:
-        return failed
+        return _FAILED, failed
     after = path.read_text(encoding="utf-8")
     still = node_guard.weakened(before, after, allowed, allowed)
     if still:
-        return f"правка удаляет {', '.join(still)} — уточните замечание"
-    return None
+        return _UNCLEAR, ", ".join(still)
+    return _ACCEPTED, ""
 
 
 def _owner_revise(ctx: _Ctx, kind: str, before: str, decisions: str) -> str | None:

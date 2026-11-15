@@ -87,8 +87,8 @@ def test_confirm_removals_yes_no() -> None:
     assert got == {"D-01"}
 
 
-def test_confirm_removals_stop_is_empty() -> None:
-    assert rp.confirm_removals(["D-01", "D-02"], read=scripted("да", None)) == set()
+def test_confirm_removals_stop_is_none() -> None:
+    assert rp.confirm_removals(["D-01", "D-02"], read=scripted("да", None)) is None
 
 
 def test_pr_section_lists_applied(tmp_path: Path) -> None:

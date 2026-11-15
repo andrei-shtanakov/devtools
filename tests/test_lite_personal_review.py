@@ -185,16 +185,43 @@ def test_removal_confirmed_is_accepted(tmp_path) -> None:
     assert len(author.prompts) == 1  # type: ignore[attr-defined]
 
 
-def test_removal_retry_still_weakens_stops(tmp_path) -> None:
+def test_unclear_remark_not_replayed(tmp_path) -> None:
+    """Повтор снова ослабляет — стоп, замечание погашено: следующий прогон
+    не переигрывает его, а спрашивает новое."""
     run = _run(tmp_path, ("design",))
     author = _author(NO_D02, NO_D02)
     read = _lines("убери поиск", "", "нет")
     assert _advance(run, FakeOps(run), read=read, launch=author) == 1
     assert run.step == "design"
-    assert "правка удаляет D-02 — уточните замечание" in run.stop_reason
+    assert (
+        "замечание не применено: правка удаляла D-02 — сформулируйте иначе "
+        "(dfl run)" in run.stop_reason
+    )
     assert (_bundle(run) / "20-design.md").read_text(encoding="utf-8") == DESIGN
-    [remark] = rp.pending(state.run_dir(run.run_id), "design")
-    assert remark.text == "убери поиск"
+    rd = state.run_dir(run.run_id)
+    assert rp.pending(rd, "design") == []
+
+    author2 = _author()
+    check = checker("PASS")
+    read2 = _lines("дальше")
+    assert _advance(run, FakeOps(run), read=read2, launch=author2, check=check) == 0
+    assert author2.prompts == []  # type: ignore[attr-defined]
+    assert read2.seen == ["> "]  # type: ignore[attr-defined]
+    assert run.step == "code-pr"
+
+
+def test_stop_at_removal_question_is_pause_without_retry(tmp_path) -> None:
+    """`/стоп` на вопросе удаления — пауза (код 0), файл возвращён, без
+    платного повтора; замечание остаётся недоигранным."""
+    run = _run(tmp_path, ("design",))
+    author = _author(NO_D02)
+    read = _lines("убери поиск", "", "/стоп")
+    assert _advance(run, FakeOps(run), read=read, launch=author) == 0
+    assert len(author.prompts) == 1  # type: ignore[attr-defined]
+    assert run.step == "design" and run.stop_reason.endswith(flow.RETRY)
+    assert (_bundle(run) / "20-design.md").read_text(encoding="utf-8") == DESIGN
+    rd = state.run_dir(run.run_id)
+    assert [r.text for r in rp.pending(rd, "design")] == ["убери поиск"]
 
 
 class _Crash(Exception):
