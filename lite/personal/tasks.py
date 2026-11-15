@@ -8,6 +8,13 @@ from lite.personal.state import PersonalRun
 
 TASKS_PATH = "spec/{ws_id}-tasks.md"
 
+# Literal of the shared header in `task_bridge._render_header` (concatenated
+# across two string pieces there); keep in sync with it.
+_DRAFT_SENTENCE = "Draft: исполнение только после человеческого approve."
+_PERSONAL_SENTENCE = (
+    "Личный путь: бриф одобрен владельцем в разговоре, задачи исполняются сразу."
+)
+
 
 def _strip_frontmatter(text: str) -> str:
     """Срезает ведущий блок `---…---` (Ruling 3: файл не управляемый)."""
@@ -37,4 +44,8 @@ def render_personal_tasks(
         anchor_blob=None,
         design_text=design_text,
     )
-    return _strip_frontmatter(text)
+    if _DRAFT_SENTENCE not in text:
+        raise RuntimeError(
+            "шапка task_bridge изменилась: строка про approve не найдена"
+        )
+    return _strip_frontmatter(text.replace(_DRAFT_SENTENCE, _PERSONAL_SENTENCE))

@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from lite.personal import state, tasks
 
 FIXTURES = Path(__file__).parent / "fixtures" / "personal"
@@ -41,3 +43,12 @@ def test_no_frontmatter() -> None:
 
 def test_tasks_path_template() -> None:
     assert tasks.TASKS_PATH.format(ws_id="w") == "spec/w-tasks.md"
+
+
+def test_no_draft_approval_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    text = _render()
+    assert "человеческого approve" not in text
+    assert "Личный путь: бриф одобрен владельцем в разговоре" in text
+    monkeypatch.setattr(tasks, "_DRAFT_SENTENCE", "нет такой строки")
+    with pytest.raises(RuntimeError):
+        _render()
