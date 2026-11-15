@@ -1027,8 +1027,11 @@ def _report_state(state: rs.RunState) -> int:
     Перечня продолжаемых статусов здесь намеренно нет: он уже устарел молча
     один раз (E2 добавил `waiting_interview`/`stopped_interview`, а фраза
     осталась про два), и устареет снова. Продолжаемость решает `_dispatch`,
-    сюда попадает то, что он не взял.
+    сюда попадает то, что он не взял. Пауза просмотра этапа (#768) — не
+    стоп: подсказка `dfl run` и код 0.
     """
+    if state.status == runner.WAITING_OWNER_REVIEW:
+        return _owner_review_wait(state)
     if state.mode == "test" and _test_resumable(state.status):
         # В test повтор кнопки продолжает этот статус (`_dispatch`) — звать
         # `make behaviour-run` незачем, у `dfl` его и нет.
@@ -1073,11 +1076,27 @@ def _brief_ready(state: rs.RunState) -> int:
     return 0
 
 
+def _owner_review_wait(state: rs.RunState) -> int:
+    """Пауза просмотра этапа (#768): кнопка не продолжает, ждёт `dfl`."""
+    print(
+        f"spec-loop: прогон {state.run_id!r} (волна {state.wave}) ждёт "
+        "просмотра этапа: dfl run"
+    )
+    return 0
+
+
 def _dispatch(state: rs.RunState, ops, lock: run_lock.RunLock) -> int:
-    """Действие по фактическому статусу найденного прогона."""
+    """Действие по фактическому статусу найденного прогона.
+
+    Пауза просмотра (`WAITING_OWNER_REVIEW`) продолжается только после
+    записи `dfl` «пауза пройдена»; до неё — подсказка и код 0."""
     rs.require_mode(state)
     if state.status == "brief_ready":
         return _brief_ready(state)
+    if state.status == runner.WAITING_OWNER_REVIEW:
+        if not runner.review_pause_passed(state):
+            return _owner_review_wait(state)
+        return _after_resume(runner.resume(state.run_id, ops, lock=lock), ops)
     if state.status in WAVE_PAUSES:
         after = runner.resume(state.run_id, ops, lock=lock)
         if after.status in WAVE_PAUSES:
@@ -1161,6 +1180,11 @@ def _after_resume(after: rs.RunState, ops) -> int:
     return _report_state(after)
 
 
+def _review_pause(value: str) -> tuple[str, ...]:
+    """`--review-pause a,b` → этапы; имена проверяет `dfl` (`lite.review_pause`)."""
+    return tuple(name.strip() for name in value.split(",") if name.strip())
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI кнопки: `--subject` + `--repo`, остальное выводится."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -1226,6 +1250,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--plan-item",
         help="пункт плана todo://<repo>/<id> — charter схемы 2; вместе с --code",
+    )
+    parser.add_argument(
+        "--review-pause",
+        default="",
+        help="этапы с паузой на просмотр владельцем через запятую (#768) — "
+        "только для нового прогона; ставит dfl run --review",
     )
     # --merge-authority НАМЕРЕННО отсутствует: кнопка всегда передаёт
     # "human" (решение владельца 2026-09-07) — argparse отвергнет попытку.
@@ -1405,6 +1435,13 @@ def main(argv: list[str] | None = None) -> int:
             recovered = state is not None
             if state is not None:
                 state = hold(state.run_id)
+        if state is not None and args.review_pause:
+            raise SpecLoopError(
+                "--review-pause задаётся только новому прогону: этапы с паузой "
+                f"прогона {state.run_id} зафиксированы стартом "
+                f"({', '.join(state.review_pause) or 'без пауз'}) — уберите "
+                "--review-pause"
+            )
         if recovered and supplied_brief is not None:
             raise SpecLoopError(
                 "восстановленный из GitHub прогон не принимает --brief "
@@ -1559,6 +1596,7 @@ def main(argv: list[str] | None = None) -> int:
             code=args.code,
             plan_item=args.plan_item,
             lock=held[run_id],
+            review_pause=_review_pause(args.review_pause),
         )
         print(f"статус прогона: {started.status}")
         if started.status == "waiting_interview":

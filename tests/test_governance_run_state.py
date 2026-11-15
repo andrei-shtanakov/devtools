@@ -231,3 +231,29 @@ def test_load_rejects_unknown_mode(runs_root) -> None:
     path.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(ValueError, match="fast"):
         rs.load("r-0001")
+
+
+def test_run_state_review_pause_default_empty(runs_root) -> None:
+    """#768: старый леджер без поля читается с пустым списком; новый —
+    несёт выбор этапов списком."""
+    state = _mk(runs_root)
+    assert state.review_pause == []
+    path = rs.run_dir(state.run_id) / "run.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.pop("review_pause")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert rs.load(state.run_id).review_pause == []
+    chosen = rs.new_run(
+        mode="strict",
+        subject="s",
+        repo="alpha",
+        repo_slug="owner/alpha",
+        ws_id="WS-T2",
+        target_dir="/tmp/alpha",
+        bundle_dir="workstreams/WS-T2/spec",
+        profile="profiles/team-exp.yaml",
+        run_id="r-0002",
+        review_pause=("design",),
+    )
+    rs.save(chosen)
+    assert rs.load("r-0002").review_pause == ["design"]

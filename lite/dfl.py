@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import argparse
 import functools
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -35,7 +37,7 @@ from governance import brief_tools as bt
 from governance import df_config, run_lock, runner, spec_loop, user_targets
 from governance import interview as iv
 from governance import run_state as rs
-from governance.author_launch import launch_author
+from governance.author_launch import AuthorCall, LaunchOutcome, launch_author
 from governance.edge_check.check import run_check
 from governance.facts import Outcome
 from governance.ops import Ops, RealOps
@@ -43,6 +45,8 @@ from lite import edge_resolve as er
 from lite import failure_log as fl
 from lite import interview_chat as ic
 from lite import interview_view as iview
+from lite import owner_review as orv
+from lite import review_pause as rp
 from lite import runlog
 from lite import stop_findings as sf
 from lite import structure as st
@@ -139,9 +143,31 @@ TRACK_NEEDS_SUBJECT = (
     "--track требует --subject: активного личного прогона в репо нет — "
     "dfl run --subject '<тема>' --track personal"
 )
+REVIEW_FIXED = (
+    "этапы с паузой на просмотр зафиксированы при старте прогона: {recorded} — "
+    "продолжить: dfl run без --review; другой выбор — сначала dfl abandon, "
+    "затем dfl run --subject '<тема>' --review <этапы>"
+)
 TRACK_NO_TTY_HINT = (
     "тип проекта не спрошен (нет терминала) — enterprise; личный проект: "
     "dfl run --subject '…' --track personal"
+)
+#: хэши файлов волны на момент показа паузы (экран или ссылки без терминала):
+#: «дальше» после ручной правки сверяется с ними (final review #768, I1)
+REVIEW_SHOWN = "review-shown.json"
+OWNER_REVIEW_PAUSED = "просмотр этапа «{label}» прерван — продолжить: dfl run"
+OWNER_NEEDS_CLAUDE = (
+    "замечания на паузе поддерживаются только с автором claude "
+    "(harness.author = claude); откройте {links} и продолжите: dfl run"
+)
+
+REVIEW_NEEDS_CLAUDE = (
+    "--review: пауза на просмотр этапа работает только с автором claude "
+    "(harness.author = claude) — поставьте его в конфиге или запустите без --review"
+)
+REVIEW_CONFIG_DROPPED = (
+    "[review] pause_after не действует: пауза на просмотр этапа работает только "
+    "с автором claude (harness.author = claude) — прогон идёт без пауз"
 )
 
 # лог текущего вызова; путь переживает закрытие лога — его читает `_record`,
@@ -423,7 +449,10 @@ def _dispatch(
             return interview(cwd, args.subject), None
         if args.command == "correct":
             return correct(cwd, args.text, args.subject), None
-        return run(cwd, args.subject, args.stakeholder, track=args.track), None
+        code = run(
+            cwd, args.subject, args.stakeholder, track=args.track, review=args.review
+        )
+        return code, None
     except REFUSALS as exc:
         say(refusal(f"dfl {args.command}", str(exc)), 0, err=True)
         return 2, exc
@@ -453,6 +482,11 @@ def _parser() -> argparse.ArgumentParser:
     p_run.add_argument("--stakeholder", default="customer")
     p_run.add_argument(
         "--track", choices=TRACKS, help="тип проекта (без него — вопрос)"
+    )
+    p_run.add_argument(
+        "--review",
+        help="этапы с паузой на просмотр: через запятую, all или none "
+        "(без него — из конфига); только для нового прогона",
     )
     p_ans = add("answer", help="ответ на вопрос интервью и dfl run")
     p_ans.add_argument(
@@ -528,6 +562,7 @@ def run(
     *,
     chat: bool = True,
     track: str | None = None,
+    review: str | None = None,
 ) -> int:
     """Один шаг конвейера для репо в `cwd`; код шага или 0/2 самого `dfl`.
 
@@ -535,22 +570,70 @@ def run(
     новая тема начинается вопросом о типе проекта (или `track`). Иначе — шаг
     enterprise-конвейера: в терминале (и `chat`) при `harness.author = claude`
     ждущий ответа прогон ведётся интервью разговором; иначе — подсказка
-    `dfl answer --file`."""
+    `dfl answer --file`. `review` — этапы с паузой нового прогона
+    (`resolve_review`); на продолжении он обязан совпасть с записанным.
+    С автором не claude выход с паузы невозможен — `--review` с этапами
+    отказывает сразу (RF-a)."""
+    if _review_selected(review) and not _author_is_claude():
+        raise DflError(REVIEW_NEEDS_CLAUDE)  # RF-a: до регистрации и эффектов
     target = user_targets.register(cwd)
-    code = _personal(target, subject, track)
+    code = _personal(target, subject, track, review)
     if code is not None:
         return code
     chatting = chat and _is_tty()
     if chatting and _author_is_claude():
-        return _run_chatting(target, subject, role)
-    code = _step(target, subject, role, chatting=False)
+        return _run_chatting(target, subject, role, review)
+    code = _step(target, subject, role, chatting=False, review=review)
     if chatting and _waiting_run(target.repo, subject) is not None:
         raise DflError(CHAT_HARNESS_REFUSAL)
+    _say_owner_review_wait(target.repo, subject, tty=chatting)
     return code
 
 
+def resolve_review(flag: str | None, stages: tuple[str, ...]) -> tuple[str, ...]:
+    """Этапы с паузой нового прогона: флаг `--review` сильнее конфига
+    (`[review] pause_after`); имя конфига, чужое пути, молча отбрасывается,
+    неизвестное флагу — отказ с перечнем допустимых. Паузы конфига при
+    авторе не claude отбрасываются с предупреждением (флаг отказывает `run`). Значение каноническое —
+    порядок этапов пути, без повторов: его записывают и с ним сравнивают."""
+    if flag is not None:
+        try:
+            chosen = rp.parse_flag(flag, stages)
+        except rp.ReviewError as exc:
+            raise DflError(str(exc)) from exc
+    else:
+        names = getattr(df_config.load(), "review_pause_after", ())
+        chosen = rp.from_config(tuple(names), stages)
+        if chosen and not _author_is_claude():
+            say(REVIEW_CONFIG_DROPPED)  # RF-a: не блокирует прогон
+            return ()
+    return tuple(stage for stage in stages if stage in chosen)
+
+
+def _review_selected(flag: str | None) -> bool:
+    """Флаг `--review` выбирает хоть один этап (не пусто и не `none`)."""
+    return flag is not None and flag.strip().casefold() not in ("", "none")
+
+
+def _check_review(
+    flag: str | None, recorded: tuple[str, ...] | list[str], stages: tuple[str, ...]
+) -> None:
+    """Продолжение прогона: `--review`, расходящийся с записанным, — отказ."""
+    if flag is None or resolve_review(flag, stages) == tuple(recorded):
+        return
+    raise DflError(REVIEW_FIXED.format(recorded=", ".join(recorded) or "без пауз"))
+
+
+def _review_argv(stages: tuple[str, ...] | list[str]) -> list[str]:
+    """`--review-pause a,b` для `spec_loop`; без пауз — argv прежний."""
+    return ["--review-pause", ",".join(stages)] if stages else []
+
+
 def _personal(
-    target: user_targets.UserTarget, subject: str | None, track: str | None
+    target: user_targets.UserTarget,
+    subject: str | None,
+    track: str | None,
+    review: str | None = None,
 ) -> int | None:
     """Код шага личного пути или `None` — дальше enterprise-путь.
 
@@ -570,6 +653,7 @@ def _personal(
                     subject=active.subject, run_id=active.run_id
                 )
             )
+        _check_review(review, active.review_pause, rp.PERSONAL_STAGES)
         return _advance_personal(active)
     if subject is None:
         if track == "personal":
@@ -589,7 +673,12 @@ def _personal(
     if track != "personal":
         return None
     run = personal_state.new_personal_run(
-        subject, target.repo, slug, str(target.path), date.today()
+        subject,
+        target.repo,
+        slug,
+        str(target.path),
+        date.today(),
+        resolve_review(review, rp.PERSONAL_STAGES),
     )
     personal_state.save(run)
     say(f"личный прогон {run.run_id}", 1)
@@ -664,7 +753,10 @@ class _QuietOps:
 
 
 def _run_chatting(
-    target: user_targets.UserTarget, subject: str | None, role: str
+    target: user_targets.UserTarget,
+    subject: str | None,
+    role: str,
+    review: str | None = None,
 ) -> int:
     """Шаг конвейера; ждёт ответа — интервью разговором и снова шаг.
 
@@ -673,15 +765,16 @@ def _run_chatting(
     пустыми. Подсказки раннера (`discovery answer …`, `make …`) не
     печатаются: вопрос показывает сам цикл."""
     with runner.quiet_interview_hints():
-        code = _step(target, subject, role, chatting=True)
+        code = _step(target, subject, role, chatting=True, review=review)
         incomplete = True
         while (state := _waiting_run(target.repo, subject, incomplete)) is not None:
             incomplete = False
             if _converse(state) is ic.ChatResult.STOPPED:
                 say(CHAT_STOPPED)
                 return 0
-            code = _step(target, subject, role, chatting=True)
-    return _resolve_rounds(target, subject, role, code)
+            code = _step(target, subject, role, chatting=True, review=review)
+    code = _resolve_rounds(target, subject, role, code)
+    return _owner_review_rounds(target, subject, role, code)
 
 
 def _resolve_rounds(
@@ -735,6 +828,12 @@ def _edge_ran(state: rs.RunState) -> bool:
 
 def _review_run(repo: str, subject: str | None) -> rs.RunState | None:
     """Прогон конвейера (engineer, иначе customer) в `stopped_review` или `None`."""
+    state = _current_run(repo, subject)
+    return state if state is not None and state.status == sf.EDGE else None
+
+
+def _current_run(repo: str, subject: str | None) -> rs.RunState | None:
+    """Текущий прогон конвейера темы: engineer, иначе customer; нет — `None`."""
     runs, _ = _repo_runs(repo)
     try:
         cust = _select_customer(runs, subject)
@@ -742,8 +841,232 @@ def _review_run(repo: str, subject: str | None) -> rs.RunState | None:
         return None
     if cust is None:
         return None
-    state = _engineer_of(cust, runs) or cust
-    return state if state.status == sf.EDGE else None
+    return _engineer_of(cust, runs) or cust
+
+
+# --- пауза просмотра enterprise-волны (#768) ---------------------------------
+
+
+def _owner_review_rounds(
+    target: user_targets.UserTarget, subject: str | None, role: str, code: int
+) -> int:
+    """Пауза просмотра волны (`WAITING_OWNER_REVIEW`): замечания владельца
+    к выбранным узлам, затем op паузы и шаг (resume) — пока прогон снова
+    встаёт на паузу. Кругов без ограничения: каждый — решение человека.
+
+    Правка сбрасывает проверку волны: повторный шаг проверяет её заново
+    (стоп проверки — разбор `_resolve_rounds`), и пауза показывается снова.
+    `/стоп` — код 0, стоп правки — 1; число платных вызовов печатается."""
+    calls = er.PaidCalls()
+    while (state := _owner_review_run(target.repo, subject)) is not None:
+        stopped = _owner_pause(state, calls)
+        if stopped is not None:
+            if calls.spent():
+                say(calls.line())
+            return stopped
+        revised = _pause_revised(state.run_id)
+        code = _step(target, subject, role, chatting=True)
+        if revised and _edge_ran(state):
+            calls.check += 1
+        if calls.spent():
+            say(calls.line())
+        code = _resolve_rounds(target, subject, role, code)
+    return code
+
+
+def _owner_review_run(repo: str, subject: str | None) -> rs.RunState | None:
+    """Прогон на паузе просмотра, ещё не пройденной, или `None`."""
+    state = _current_run(repo, subject)
+    if state is None or state.status != runner.WAITING_OWNER_REVIEW:
+        return None
+    return None if runner.review_pause_passed(state) else state
+
+
+def _pause_files(state: rs.RunState) -> list[tuple[str, Path]]:
+    """Выбранные для просмотра узлы волны и их файлы в рабочем дереве."""
+    bundle = Path(state.target_dir) / state.bundle_dir
+    return [
+        (kind, bundle / filename)
+        for _key, kind, filename in runner._author_steps_for(state)
+        if kind in state.review_pause
+    ]
+
+
+def _say_owner_review_wait(repo: str, subject: str | None, *, tty: bool) -> None:
+    """Пауза без цикла замечаний не пропускается: подсказка со ссылками на
+    файлы волны — без терминала или (`tty`) с автором не claude."""
+    state = _owner_review_run(repo, subject)
+    if state is None:
+        return
+    files = _pause_files(state)
+    _remember_shown(state, files)
+    links = orv.links(p for _k, p in files)
+    if tty:
+        say(OWNER_NEEDS_CLAUDE.format(links=links))
+        return
+    label = ", ".join(rp.STAGE_LABELS[kind] for kind, _path in files)
+    say(orv.NO_TTY.format(label=label, links=links))
+
+
+def _owner_pause(state: rs.RunState, calls: er.PaidCalls) -> int | None:
+    """Один показ паузы: узлы волны по очереди (W4 — оба подряд). `None` —
+    пауза пройдена и op записан; иначе код выхода."""
+    files = _pause_files(state)
+    _remember_shown(state, files)
+    for stage, path in files:
+        stopped = _owner_node(state, stage, path, calls)
+        if stopped is not None:
+            return stopped
+    _write_pause_op(state, complete=True)
+    return None
+
+
+def _owner_node(
+    state: rs.RunState, stage: str, path: Path, calls: er.PaidCalls
+) -> int | None:
+    """Узел на паузе: недоигранные замечания (RF-1: без вопроса) или ответ
+    на экране паузы; правка принята — op помечен «правлено», затем
+    замечания «применены». «Дальше» после ручной правки файла (хэш ≠
+    снятому при показе) — тоже «правлено»: перепроверка и пауза снова.
+    `None` — дальше; иначе код (0 — пауза)."""
+    rd = rs.run_dir(state.run_id)
+    label = rp.STAGE_LABELS[stage]
+    batch = rp.pending(rd, stage)
+    if not batch:
+        answer = rp.ask(label, [path], read=ic.stdin_read)
+        if answer is None:
+            say(OWNER_REVIEW_PAUSED.format(label=label))
+            return 0
+        if not answer:
+            if _edited_on_pause(state, stage, path):
+                _write_pause_op(state, complete=False)  # перепроверка и пауза снова
+            return None
+        rp.record(rd, stage, answer)
+        batch = rp.pending(rd, stage)
+    say(f"замечания к этапу «{label}» — правка")
+    outcome, detail = orv.revise_by_owner(
+        path,
+        orv.decisions(batch),
+        revise=functools.partial(_owner_revise, state, stage, path, calls),
+        read=ic.stdin_read,
+    )
+    if outcome == orv.ACCEPTED:
+        _write_pause_op(state, complete=False)  # до «применено»: правка не теряется
+        rp.mark_applied(rd, stage, len(batch))
+        return None
+    if outcome == orv.PAUSED:
+        say(OWNER_REVIEW_PAUSED.format(label=label))
+        return 0
+    if outcome == orv.UNCLEAR:
+        rp.mark_dropped(rd, stage, len(batch))
+        say(orv.UNCLEAR_REMARK.format(ids=detail))
+        return 1
+    say(f"{detail} — продолжить: dfl run")
+    return 1
+
+
+def _owner_revise(
+    state: rs.RunState,
+    stage: str,
+    path: Path,
+    calls: er.PaidCalls,
+    before: str,
+    decisions: str,
+) -> str | None:
+    """Один вызов автора по замечаниям владельца; сбой — причина."""
+    calls.revise += 1
+    call = AuthorCall(
+        run_id=state.run_id,
+        run_dir=os.path.realpath(rs.run_dir(state.run_id)),
+        target_dir=state.target_dir,
+        bundle_dir=state.bundle_dir,
+        filename=path.name,
+    )
+    outcome = _revise(call, stage, state.subject, before, "нет", decisions)
+    if outcome.code != 0:
+        return f"правка {path.name} не состоялась: {outcome.reason or outcome.code}"
+    return None
+
+
+def _revise(
+    call: AuthorCall,
+    kind: str,
+    subject: str,
+    current: str,
+    findings: str,
+    decisions: str,
+) -> LaunchOutcome:
+    """Граница автора (подменяется в тестах)."""
+    return RealOps().revise(call, kind, subject, current, findings, decisions)
+
+
+def _pause_revised(run_id: str) -> bool:
+    """Op паузы текущей волны несёт `revised` (правки за эту паузу)."""
+    state = rs.load(run_id)
+    op = state.ops.get(runner.wave_key(state, runner.REVIEW_PAUSE)) or {}
+    return bool(op.get("revised"))
+
+
+def _digest(path: Path) -> str:
+    """sha256 файла; нет файла — пустая строка."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _shown_digests(state: rs.RunState) -> dict[str, str]:
+    """Хэши узлов текущей волны, снятые при первом показе паузы."""
+    try:
+        data = json.loads((rs.run_dir(state.run_id) / REVIEW_SHOWN).read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("wave") != state.wave:
+        return {}
+    digests = data.get("digests")
+    return digests if isinstance(digests, dict) else {}
+
+
+def _remember_shown(state: rs.RunState, files: list[tuple[str, Path]]) -> None:
+    """Запомнить хэши узлов при первом показе паузы волны (повторный показ
+    их не переписывает: правка между показами — тоже правка). Сбрасывает
+    запись `_write_pause_op` при пройденной паузе."""
+    digests = _shown_digests(state)
+    for stage, path in files:
+        digests.setdefault(stage, _digest(path))
+    (rs.run_dir(state.run_id) / REVIEW_SHOWN).write_text(
+        json.dumps({"wave": state.wave, "digests": digests}) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _edited_on_pause(state: rs.RunState, stage: str, path: Path) -> bool:
+    """Файл узла изменён с первого показа паузы (ручная правка владельца)."""
+    shown = _shown_digests(state).get(stage)
+    return shown is not None and shown != _digest(path)
+
+
+def _write_pause_op(state: rs.RunState, *, complete: bool) -> None:
+    """Op паузы волны под блокировкой прогона: `started` с `revised=True`
+    сразу после принятой правки (переживает `/стоп` до конца паузы),
+    `completed` — когда пауза пройдена; `revised` не сбрасывается."""
+    try:
+        with run_lock.run_lock(state.run_id):
+            now = rs.load(state.run_id)
+            if now.status != runner.WAITING_OWNER_REVIEW or now.wave != state.wave:
+                raise DflError(
+                    f"прогон {state.run_id} уже не на паузе просмотра волны "
+                    f"{state.wave} — повторите dfl run"
+                )
+            key = runner.wave_key(now, runner.REVIEW_PAUSE)
+            revised = not complete or bool((now.ops.get(key) or {}).get("revised"))
+            if complete:
+                rs.op_complete(now, key, revised=revised)
+                (rs.run_dir(now.run_id) / REVIEW_SHOWN).unlink(missing_ok=True)
+            else:
+                rs.op_start(now, key, revised=True)
+    except run_lock.LockBusy as exc:
+        raise DflError(f"{exc} — дождитесь конца dfl run и повторите") from exc
 
 
 def _say_not_converged(
@@ -866,18 +1189,28 @@ def _sender(
 
 
 def _step(
-    target: user_targets.UserTarget, subject: str | None, role: str, *, chatting: bool
+    target: user_targets.UserTarget,
+    subject: str | None,
+    role: str,
+    *,
+    chatting: bool,
+    review: str | None = None,
 ) -> int:
+    """Шаг enterprise-конвейера. Выбор этапов с паузой (`review`) пишется в
+    новый customer-прогон и переходит в engineer-прогон (`_brief_step`)."""
     repo = target.repo
     loop = functools.partial(_loop, cwd=target.path, chatting=chatting)
     runs = _readable_runs(repo)
     cust = _select_customer(runs, subject)
     if cust is None:
+        pause = resolve_review(review, rp.ENTERPRISE_STAGES)
         _require_init_files(target.path)
         return loop(
             ["--subject", str(subject), "--repo", repo, "--need", "--frame",
-             "customer", "--stakeholder", role, "--brief-only"]
+             "customer", "--stakeholder", role, "--brief-only",
+             *_review_argv(pause)]
         )  # fmt: skip
+    _check_review(review, cust.review_pause, rp.ENTERPRISE_STAGES)
     eng = _engineer_of(cust, runs)
     if eng is not None:
         return _engineer_step(eng, repo, loop)
@@ -944,8 +1277,13 @@ def _report_step(
     line: str | None,
 ) -> None:
     """Итог шага по уровням для прогона `state`: строка итога `line`, вопрос,
-    состояние, следующий шаг (на уровне 0, если он — действие человека)."""
-    if line is not None:
+    состояние, следующий шаг (на уровне 0, если он — действие человека).
+
+    Пауза просмотра — без строки итога и следующего шага: за шагом идёт
+    экран паузы `_owner_review_rounds` (разговор) или строка со ссылками
+    `_say_owner_review_wait` (без терминала, автор не claude)."""
+    screen = _owner_pause_next(state, code)
+    if line is not None and not screen:
         say(line)
     stop = sf.load(state.run_id, state.status)
     for text, level in sf.shown(stop) if stop is not None else []:
@@ -961,7 +1299,19 @@ def _report_step(
         return  # как отвечать — уже сказано (вопрос) или скажет цикл
     if chatting and state.status == sf.EDGE:
         return  # вместо «поправьте» — разбор; не начнётся — скажет он
+    if screen:
+        return
     _say_next(state)
+
+
+def _owner_pause_next(state: rs.RunState, code: int) -> bool:
+    """За шагом в этом же `dfl run` последует экран паузы просмотра или
+    строка ожидания со ссылками (`run` печатает её после шага без разговора)."""
+    return (
+        code == 0
+        and state.status == runner.WAITING_OWNER_REVIEW
+        and not runner.review_pause_passed(state)
+    )
 
 
 def _say_next(state: rs.RunState) -> None:
@@ -999,6 +1349,8 @@ def _outcome(state: rs.RunState, code: int) -> str | None:
             return f"прогон {state.run_id} остановлен: {first}"
     if code != 0:
         return f"шаг завершился с кодом {code}"
+    if state.status == runner.WAITING_OWNER_REVIEW:
+        return f"прогон {state.run_id} ждёт просмотра этапа: dfl run"
     return f"прогон {state.run_id}: {state.status}"
 
 
@@ -1193,7 +1545,7 @@ def _brief_step(cust: rs.RunState, role: str, loop: Callable[[list[str]], int]) 
         if code != 0:
             say(f"бриф: approve завершился с кодом {code}")
             return code
-    return loop(bt.engineer_args(cust, pr, role))
+    return loop([*bt.engineer_args(cust, pr, role), *_review_argv(cust.review_pause)])
 
 
 def _refuse_closed_brief(cust: rs.RunState) -> None:
