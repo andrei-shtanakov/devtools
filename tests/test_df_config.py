@@ -701,3 +701,25 @@ def test_cli_test_approver_version_strict_refused(tmp_path: Path) -> None:
 def test_cli_usage_lists_mode_or_strict() -> None:
     res = _cli({}, "bogus")
     assert res.returncode == 2 and "mode-or-strict" in res.stderr
+
+
+def test_review_table_optional(tmp_path: Path) -> None:
+    cfg = _load_text(tmp_path, STRICT)
+    assert cfg.review_pause_after == ()
+
+
+def test_review_pause_after_parsed(tmp_path: Path) -> None:
+    text = STRICT + '\n[review]\npause_after = ["brief", "design"]\n'
+    cfg = _load_text(tmp_path, text)
+    assert cfg.review_pause_after == ("brief", "design")
+
+
+@pytest.mark.parametrize("value", ['"brief"', "[1]", '[""]', "7"])
+def test_review_pause_after_not_list_rejected(tmp_path: Path, value: str) -> None:
+    text = STRICT + f"\n[review]\npause_after = {value}\n"
+    assert "review.pause_after" in _refused(tmp_path, text)
+
+
+def test_review_unknown_key_rejected(tmp_path: Path) -> None:
+    text = STRICT + '\n[review]\npause_after = []\nextra = "x"\n'
+    assert "review.extra" in _refused(tmp_path, text)

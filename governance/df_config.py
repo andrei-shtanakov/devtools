@@ -94,13 +94,14 @@ TEST_BANNER_HEADER = "режим test: по сравнению со strict вы�
 _LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}")
 MODES = ("strict", "test")
 
-_TOP = {"schema", "mode", "accounts", "policy", "workspace", "harness", "app"}
+_TOP = {"schema", "mode", "accounts", "policy", "workspace", "harness", "app", "review"}
 _TABLES = {
     "accounts": ("human", "agent", "human_gh_config_dir", "agent_gh_config_dir"),
     "policy": ("repo", "ref", "path"),
     "workspace": ("root",),
     "harness": ("author", "model"),
     "app": ("id", "key_file"),
+    "review": ("pause_after",),
 }
 _GH_DIR_KEYS = ("human_gh_config_dir", "agent_gh_config_dir")
 
@@ -140,6 +141,7 @@ class DfConfig:
     author_model: str
     app_id: int | None
     app_key_file: Path | None
+    review_pause_after: tuple[str, ...] = ()
 
 
 def config_home(env: Mapping[str, str]) -> Path:
@@ -349,7 +351,21 @@ class _Parser:
             app_key_file=None
             if app is None
             else self.path_value(app, "key_file", "app.key_file"),
+            review_pause_after=self.review_pause_after(data),
         )
+
+    def review_pause_after(self, data: dict[str, object]) -> tuple[str, ...]:
+        if "review" not in data:
+            return ()
+        review = self.table(data, "review")
+        if "pause_after" not in review:
+            return ()
+        value = review["pause_after"]
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) and item for item in value
+        ):
+            raise self.fail("review.pause_after", "ожидается список непустых строк")
+        return tuple(value)
 
     def policy(self, data: dict[str, object], strict: bool) -> PolicySource | None:
         if "policy" not in data:
@@ -474,6 +490,7 @@ _GETTERS: dict[str, Callable[[DfConfig], str]] = {
     "workspace.root": lambda c: str(c.workspace_root),
     "harness.author": lambda c: c.author_harness,
     "harness.model": lambda c: c.author_model,
+    "review.pause_after": lambda c: ",".join(c.review_pause_after),
     "test.approver_version": _approver_version,
 }
 
