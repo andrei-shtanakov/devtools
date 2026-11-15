@@ -24,6 +24,7 @@ from governance.author_launch import AuthorCall, config_mode, launch_author
 from governance.auto_tasks import RUN_BRANCH_PREFIX, TUI_HINT, notice
 from governance.edge_check import override
 from governance.edge_check.check import run_check
+from governance.facts import Outcome as FactOutcome
 from governance.ops import Ops
 from lite import edge_journal as ej
 from lite import node_guard
@@ -422,12 +423,14 @@ def _open_spec_pr(ctx: _Ctx) -> bool:
     branch = _spec_branch(run)
     tasks = _tasks_rel(run)
     try:
-        if current != branch:  # на ветке прогона — возобновление, без switch
-            ops.checkout_and_pull(target, base)
-            ops.switch_to(target, branch, base)
+        # на ветке прогона — возобновление, без switch
+        if current != branch and not _enter_run_branch(ctx, branch):
+            return False
         path = Path(target) / tasks
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(tasks_text, encoding="utf-8")
+        run.spec_committed = True
+        save(run)  # write-ahead: ветка может нести коммит прогона
         # пустой индекс (уже закоммичено до падения) — commit_paths не коммитит
         ops.commit_paths(
             target, [run.bundle_dir, tasks], f"spec({run.ws_id}): личный путь"
@@ -448,6 +451,39 @@ def _open_spec_pr(ctx: _Ctx) -> bool:
         return ctx.stop(f"spec-PR не создан: {exc} — {RETRY}")
     run.spec_pr = pr
     save(run)  # write-ahead: повтор не создаёт второй PR
+    return True
+
+
+def _enter_run_branch(ctx: _Ctx, branch: str) -> bool:
+    """С базы — на ветку прогона; `False` — стоп до любого git-эффекта.
+
+    Ветки нет — создать от свежей базы. Ветка есть — перейти на неё КАК ЕСТЬ
+    (`ensure_branch`), не пересоздавать от базы: `switch_to` (`-C`) сбросил
+    бы уже сделанный коммит бандла (возобновление после упавшего push, когда
+    человек переключился на базу). Ветка, в которую прогон не коммитил, но
+    ушедшая от базы, — чужая история: стоп. Ошибки git летят вызывающему.
+    """
+    run, ops = ctx.run, ctx.ops
+    target, base = run.target_dir, ctx.base
+    fact = ops.local_branch_head_fact(target, branch)
+    if fact.outcome is FactOutcome.ABSENT:
+        if run.spec_committed:
+            return ctx.stop(
+                f"ветка прогона {branch} с коммитом бандла пропала — верните её "
+                f"(git reflog) и повторите dfl run ({ABANDON})"
+            )
+        ops.checkout_and_pull(target, base)
+        ops.switch_to(target, branch, base)
+        return True
+    if fact.outcome is not FactOutcome.FOUND or not fact.value:
+        return ctx.stop(f"ветка прогона {branch} не прочитана: {fact.detail} — {RETRY}")
+    if not run.spec_committed and ops.is_ancestor(target, fact.value, base) is not True:
+        return ctx.stop(
+            f"ветка прогона {branch} уже есть и несёт коммиты, которых прогон не "
+            f"делал (или это не установлено), — разберите её вручную (удалите или "
+            f"переименуйте) и повторите dfl run ({ABANDON})"
+        )
+    ops.ensure_branch(target, branch)
     return True
 
 

@@ -55,6 +55,9 @@ class PersonalRun:
     run_exit: int | None = None
     #: `spec-pr`: голова, которую запушил прогон; мерж — только по ней
     spec_head: str = ""
+    #: `spec-pr` (write-ahead): коммит бандла в ветку прогона начат — ветка
+    #: может нести коммит прогона; повтор не пересоздаёт её от базы
+    spec_committed: bool = False
 
 
 def _ws_id(subject: str, today: date) -> str:

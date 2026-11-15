@@ -51,6 +51,11 @@ class FakeOps:
         self.existing_pr: int | None = None
         self.spec_head = HEAD
         self.default: Fact = Fact(Outcome.FOUND, DefaultBranch("master", "s"))
+        #: голова локальной ветки прогона; None — ветки нет
+        self.run_head: str | None = None
+        self.run_head_fact: Fact | None = None  # переопределить факт целиком
+        self.ancestor: bool | None = False
+        self.push_fail = False
 
     def default_branch_fact(self, repo_slug: str) -> Fact:
         self.calls.append(("default_branch_fact", repo_slug))
@@ -66,15 +71,36 @@ class FakeOps:
 
     def checkout_and_pull(self, target_dir: str, branch: str) -> None:
         self.calls.append(("checkout_and_pull", target_dir, branch))
+        self.branch = branch
 
     def switch_to(self, target_dir: str, branch: str, start_point: str) -> None:
         self.calls.append(("switch_to", target_dir, branch, start_point))
+        self.branch, self.run_head = branch, "base-sha"
+
+    def local_branch_head_fact(self, target_dir: str, branch: str) -> Fact:
+        self.calls.append(("local_branch_head_fact", target_dir, branch))
+        if self.run_head_fact is not None:
+            return self.run_head_fact
+        if self.run_head is None:
+            return Fact(Outcome.ABSENT, None, "нет")
+        return Fact(Outcome.FOUND, self.run_head, "есть")
+
+    def is_ancestor(self, target_dir: str, sha: str, ref: str) -> bool | None:
+        self.calls.append(("is_ancestor", target_dir, sha, ref))
+        return self.ancestor
+
+    def ensure_branch(self, target_dir: str, branch: str) -> None:
+        self.calls.append(("ensure_branch", target_dir, branch))
+        self.branch = branch
 
     def commit_paths(self, target_dir, paths, message, force_paths=()) -> None:
         self.calls.append(("commit_paths", target_dir, list(paths)))
+        self.run_head = "bundle-sha"
 
     def push_branch(self, target_dir: str, branch: str) -> None:
         self.calls.append(("push_branch", target_dir, branch))
+        if self.push_fail:
+            raise RuntimeError("push отвергнут")
 
     def head_sha(self, target_dir: str, branch: str) -> str:
         self.calls.append(("head_sha", target_dir, branch))
@@ -213,6 +239,7 @@ def test_happy_path_to_code_pr(run, capsys) -> None:
         ("current_branch", target),
         ("dirty_paths", target),
         ("current_branch", target),
+        ("local_branch_head_fact", target, branch),
         ("checkout_and_pull", target, "master"),
         ("switch_to", target, branch, "master"),
         ("commit_paths", target, [run.bundle_dir, tasks_path]),
@@ -770,3 +797,63 @@ def test_design_rewrite_dropping_decision_restored(run, capsys) -> None:
     assert [p for p in author.prompts if "## Режим правки" in p]
     assert (_bundle(run) / "20-design.md").read_text(encoding="utf-8") == design
     assert "D-02" in capsys.readouterr().out
+
+
+def test_spec_pr_resume_from_base_keeps_committed_branch(run) -> None:
+    """Регрессия ревью #774: коммит бандла сделан, push упал, человек
+    переключился на базу — повтор не пересоздаёт ветку прогона от базы
+    (`switch -C` сбросил бы коммит), а переходит на неё как есть."""
+    _nodes_on_disk(run)
+    ops = FakeOps(run)
+    ops.push_fail = True
+    assert _advance(run, ops) == 1
+    assert "spec-PR не создан" in run.stop_reason and run.step == "spec-pr"
+    assert state.load(run.run_id).spec_committed is True
+    ops.branch, ops.push_fail = "master", False  # человек: git switch master
+    ops.calls.clear()
+    assert _advance(run, ops) == 0
+    names = ops.names()
+    assert "switch_to" not in names
+    assert names.index("ensure_branch") < names.index("push_branch")
+    assert "checkout_and_pull" not in names[: names.index("push_branch")]
+    assert ops.run_head == "bundle-sha" and run.step == "code-pr"
+
+
+def test_spec_pr_foreign_commits_on_existing_branch_stop(run) -> None:
+    """Ветка прогона есть, прогон в неё не коммитил, а она ушла от базы —
+    стоп с названной причиной до любого git-эффекта."""
+    _nodes_on_disk(run)
+    ops = FakeOps(run)
+    ops.run_head, ops.ancestor = "foreign-sha", False
+    assert _advance(run, ops) == 1
+    assert "уже есть" in run.stop_reason and run.step == "spec-pr"
+    effects = {"checkout_and_pull", "switch_to", "ensure_branch", "commit_paths"}
+    assert not effects & set(ops.names())
+
+
+def test_spec_pr_empty_existing_branch_entered_as_is(run) -> None:
+    """Ветка прогона есть, но пуста (падение между веткой и коммитом) —
+    переход как есть, без пересоздания."""
+    _nodes_on_disk(run)
+    ops = FakeOps(run)
+    ops.run_head, ops.ancestor = "base-sha", True
+    assert _advance(run, ops) == 0
+    assert "switch_to" not in ops.names() and "ensure_branch" in ops.names()
+
+
+def test_spec_pr_committed_branch_missing_stops(run) -> None:
+    _nodes_on_disk(run)
+    run.spec_committed = True
+    ops = FakeOps(run)
+    assert _advance(run, ops) == 1
+    assert "пропала" in run.stop_reason
+    assert not {"checkout_and_pull", "switch_to", "commit_paths"} & set(ops.names())
+
+
+def test_spec_pr_branch_fact_unavailable_stops(run) -> None:
+    _nodes_on_disk(run)
+    ops = FakeOps(run)
+    ops.run_head_fact = Fact(Outcome.UNAVAILABLE, None, "git сломан")
+    assert _advance(run, ops) == 1
+    assert "git сломан" in run.stop_reason
+    assert not {"checkout_and_pull", "switch_to", "commit_paths"} & set(ops.names())
