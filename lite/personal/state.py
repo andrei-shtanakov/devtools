@@ -58,6 +58,12 @@ class PersonalRun:
     #: `spec-pr` (write-ahead): коммит бандла в ветку прогона начат — ветка
     #: может нести коммит прогона; повтор не пересоздаёт её от базы
     spec_committed: bool = False
+    #: этапы с паузой на просмотр владельцем (#768) — выбор при старте
+    #: (`dfl run --review` / конфиг), дальше не меняется; в JSON — списком
+    review_pause: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        self.review_pause = tuple(self.review_pause)
 
 
 def _ws_id(subject: str, today: date) -> str:
@@ -75,7 +81,12 @@ def _ws_id(subject: str, today: date) -> str:
 
 
 def new_personal_run(
-    subject: str, repo: str, repo_slug: str, target_dir: str, today: date
+    subject: str,
+    repo: str,
+    repo_slug: str,
+    target_dir: str,
+    today: date,
+    review_pause: tuple[str, ...] = (),
 ) -> PersonalRun:
     """Новый прогон: `run_id` = ws-id + случайный суффикс."""
     ws_id = _ws_id(subject, today)
@@ -87,6 +98,7 @@ def new_personal_run(
         repo_slug=repo_slug,
         target_dir=target_dir,
         bundle_dir=f"workstreams/{ws_id}/spec",
+        review_pause=review_pause,
     )
 
 

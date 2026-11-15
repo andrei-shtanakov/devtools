@@ -1161,6 +1161,11 @@ def _after_resume(after: rs.RunState, ops) -> int:
     return _report_state(after)
 
 
+def _review_pause(value: str) -> tuple[str, ...]:
+    """`--review-pause a,b` → этапы; имена проверяет `dfl` (`lite.review_pause`)."""
+    return tuple(name.strip() for name in value.split(",") if name.strip())
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI кнопки: `--subject` + `--repo`, остальное выводится."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -1226,6 +1231,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--plan-item",
         help="пункт плана todo://<repo>/<id> — charter схемы 2; вместе с --code",
+    )
+    parser.add_argument(
+        "--review-pause",
+        default="",
+        help="этапы с паузой на просмотр владельцем через запятую (#768) — "
+        "только для нового прогона; ставит dfl run --review",
     )
     # --merge-authority НАМЕРЕННО отсутствует: кнопка всегда передаёт
     # "human" (решение владельца 2026-09-07) — argparse отвергнет попытку.
@@ -1559,6 +1570,7 @@ def main(argv: list[str] | None = None) -> int:
             code=args.code,
             plan_item=args.plan_item,
             lock=held[run_id],
+            review_pause=_review_pause(args.review_pause),
         )
         print(f"статус прогона: {started.status}")
         if started.status == "waiting_interview":

@@ -20,7 +20,7 @@ import json
 import os
 import re
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from governance import df_config
@@ -141,6 +141,10 @@ class RunState:
     # Режим конфига DarkFactory на момент старта прогона (plan 3a). Старые
     # run.json без поля читаются как strict — прежнее поведение.
     mode: str = "strict"
+    # Этапы с паузой на просмотр владельцем (#768): пишет `dfl` при старте
+    # (`--review` / конфиг) через `spec_loop --review-pause`, дальше не
+    # меняется. Пусто — пауз нет: прогон не через `dfl` и старые run.json.
+    review_pause: list[str] = field(default_factory=list)
 
 
 class ModeMismatchError(Exception):
@@ -232,6 +236,7 @@ def new_run(
     plan_item: str | None = None,
     *,
     mode: str,
+    review_pause: tuple[str, ...] = (),
 ) -> RunState:
     """Новый прогон (S0). `run_id` подаётся снаружи (вызывающая сторона)."""
     validate_mode(mode)
@@ -264,6 +269,7 @@ def new_run(
         code=code,
         plan_item=plan_item,
         mode=mode,
+        review_pause=list(review_pause),
     )
 
 

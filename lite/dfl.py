@@ -43,6 +43,7 @@ from lite import edge_resolve as er
 from lite import failure_log as fl
 from lite import interview_chat as ic
 from lite import interview_view as iview
+from lite import review_pause as rp
 from lite import runlog
 from lite import stop_findings as sf
 from lite import structure as st
@@ -138,6 +139,11 @@ TRACK_ENTERPRISE_TAKEN = (
 TRACK_NEEDS_SUBJECT = (
     "--track требует --subject: активного личного прогона в репо нет — "
     "dfl run --subject '<тема>' --track personal"
+)
+REVIEW_FIXED = (
+    "этапы с паузой на просмотр зафиксированы при старте прогона: {recorded} — "
+    "продолжить: dfl run без --review; другой выбор — сначала dfl abandon, "
+    "затем dfl run --subject '<тема>' --review <этапы>"
 )
 TRACK_NO_TTY_HINT = (
     "тип проекта не спрошен (нет терминала) — enterprise; личный проект: "
@@ -423,7 +429,10 @@ def _dispatch(
             return interview(cwd, args.subject), None
         if args.command == "correct":
             return correct(cwd, args.text, args.subject), None
-        return run(cwd, args.subject, args.stakeholder, track=args.track), None
+        code = run(
+            cwd, args.subject, args.stakeholder, track=args.track, review=args.review
+        )
+        return code, None
     except REFUSALS as exc:
         say(refusal(f"dfl {args.command}", str(exc)), 0, err=True)
         return 2, exc
@@ -453,6 +462,11 @@ def _parser() -> argparse.ArgumentParser:
     p_run.add_argument("--stakeholder", default="customer")
     p_run.add_argument(
         "--track", choices=TRACKS, help="тип проекта (без него — вопрос)"
+    )
+    p_run.add_argument(
+        "--review",
+        help="этапы с паузой на просмотр: через запятую, all или none "
+        "(без него — из конфига); только для нового прогона",
     )
     p_ans = add("answer", help="ответ на вопрос интервью и dfl run")
     p_ans.add_argument(
@@ -528,6 +542,7 @@ def run(
     *,
     chat: bool = True,
     track: str | None = None,
+    review: str | None = None,
 ) -> int:
     """Один шаг конвейера для репо в `cwd`; код шага или 0/2 самого `dfl`.
 
@@ -535,22 +550,53 @@ def run(
     новая тема начинается вопросом о типе проекта (или `track`). Иначе — шаг
     enterprise-конвейера: в терминале (и `chat`) при `harness.author = claude`
     ждущий ответа прогон ведётся интервью разговором; иначе — подсказка
-    `dfl answer --file`."""
+    `dfl answer --file`. `review` — этапы с паузой нового прогона
+    (`resolve_review`); на продолжении он обязан совпасть с записанным."""
     target = user_targets.register(cwd)
-    code = _personal(target, subject, track)
+    code = _personal(target, subject, track, review)
     if code is not None:
         return code
     chatting = chat and _is_tty()
     if chatting and _author_is_claude():
-        return _run_chatting(target, subject, role)
-    code = _step(target, subject, role, chatting=False)
+        return _run_chatting(target, subject, role, review)
+    code = _step(target, subject, role, chatting=False, review=review)
     if chatting and _waiting_run(target.repo, subject) is not None:
         raise DflError(CHAT_HARNESS_REFUSAL)
     return code
 
 
+def resolve_review(flag: str | None, stages: tuple[str, ...]) -> tuple[str, ...]:
+    """Этапы с паузой нового прогона: флаг `--review` сильнее конфига
+    (`[review] pause_after`); имя конфига, чужое пути, молча отбрасывается,
+    неизвестное флагу — отказ с перечнем допустимых."""
+    if flag is not None:
+        try:
+            return rp.parse_flag(flag, stages)
+        except rp.ReviewError as exc:
+            raise DflError(str(exc)) from exc
+    names = getattr(df_config.load(), "review_pause_after", ())
+    return rp.from_config(tuple(names), stages)
+
+
+def _check_review(
+    flag: str | None, recorded: tuple[str, ...] | list[str], stages: tuple[str, ...]
+) -> None:
+    """Продолжение прогона: `--review`, расходящийся с записанным, — отказ."""
+    if flag is None or resolve_review(flag, stages) == tuple(recorded):
+        return
+    raise DflError(REVIEW_FIXED.format(recorded=", ".join(recorded) or "без пауз"))
+
+
+def _review_argv(stages: tuple[str, ...] | list[str]) -> list[str]:
+    """`--review-pause a,b` для `spec_loop`; без пауз — argv прежний."""
+    return ["--review-pause", ",".join(stages)] if stages else []
+
+
 def _personal(
-    target: user_targets.UserTarget, subject: str | None, track: str | None
+    target: user_targets.UserTarget,
+    subject: str | None,
+    track: str | None,
+    review: str | None = None,
 ) -> int | None:
     """Код шага личного пути или `None` — дальше enterprise-путь.
 
@@ -570,6 +616,7 @@ def _personal(
                     subject=active.subject, run_id=active.run_id
                 )
             )
+        _check_review(review, active.review_pause, rp.PERSONAL_STAGES)
         return _advance_personal(active)
     if subject is None:
         if track == "personal":
@@ -589,7 +636,12 @@ def _personal(
     if track != "personal":
         return None
     run = personal_state.new_personal_run(
-        subject, target.repo, slug, str(target.path), date.today()
+        subject,
+        target.repo,
+        slug,
+        str(target.path),
+        date.today(),
+        resolve_review(review, rp.PERSONAL_STAGES),
     )
     personal_state.save(run)
     say(f"личный прогон {run.run_id}", 1)
@@ -664,7 +716,10 @@ class _QuietOps:
 
 
 def _run_chatting(
-    target: user_targets.UserTarget, subject: str | None, role: str
+    target: user_targets.UserTarget,
+    subject: str | None,
+    role: str,
+    review: str | None = None,
 ) -> int:
     """Шаг конвейера; ждёт ответа — интервью разговором и снова шаг.
 
@@ -673,14 +728,14 @@ def _run_chatting(
     пустыми. Подсказки раннера (`discovery answer …`, `make …`) не
     печатаются: вопрос показывает сам цикл."""
     with runner.quiet_interview_hints():
-        code = _step(target, subject, role, chatting=True)
+        code = _step(target, subject, role, chatting=True, review=review)
         incomplete = True
         while (state := _waiting_run(target.repo, subject, incomplete)) is not None:
             incomplete = False
             if _converse(state) is ic.ChatResult.STOPPED:
                 say(CHAT_STOPPED)
                 return 0
-            code = _step(target, subject, role, chatting=True)
+            code = _step(target, subject, role, chatting=True, review=review)
     return _resolve_rounds(target, subject, role, code)
 
 
@@ -866,18 +921,28 @@ def _sender(
 
 
 def _step(
-    target: user_targets.UserTarget, subject: str | None, role: str, *, chatting: bool
+    target: user_targets.UserTarget,
+    subject: str | None,
+    role: str,
+    *,
+    chatting: bool,
+    review: str | None = None,
 ) -> int:
+    """Шаг enterprise-конвейера. Выбор этапов с паузой (`review`) пишется в
+    новый customer-прогон и переходит в engineer-прогон (`_brief_step`)."""
     repo = target.repo
     loop = functools.partial(_loop, cwd=target.path, chatting=chatting)
     runs = _readable_runs(repo)
     cust = _select_customer(runs, subject)
     if cust is None:
+        pause = resolve_review(review, rp.ENTERPRISE_STAGES)
         _require_init_files(target.path)
         return loop(
             ["--subject", str(subject), "--repo", repo, "--need", "--frame",
-             "customer", "--stakeholder", role, "--brief-only"]
+             "customer", "--stakeholder", role, "--brief-only",
+             *_review_argv(pause)]
         )  # fmt: skip
+    _check_review(review, cust.review_pause, rp.ENTERPRISE_STAGES)
     eng = _engineer_of(cust, runs)
     if eng is not None:
         return _engineer_step(eng, repo, loop)
@@ -1193,7 +1258,7 @@ def _brief_step(cust: rs.RunState, role: str, loop: Callable[[list[str]], int]) 
         if code != 0:
             say(f"бриф: approve завершился с кодом {code}")
             return code
-    return loop(bt.engineer_args(cust, pr, role))
+    return loop([*bt.engineer_args(cust, pr, role), *_review_argv(cust.review_pause)])
 
 
 def _refuse_closed_brief(cust: rs.RunState) -> None:

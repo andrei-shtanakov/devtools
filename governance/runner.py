@@ -358,6 +358,7 @@ def start(
     plan_item: str | None = None,
     *,
     lock: rl.RunLock,
+    review_pause: tuple[str, ...] = (),
 ) -> RunState:
     """S0: новый прогон, затем сразу `advance()` до стопа/завершения.
 
@@ -452,6 +453,7 @@ def start(
         code=code,
         plan_item=plan_item,
         mode=cfg.mode,
+        review_pause=review_pause,
     )
     if engineer_intake is not None:
         _write_engineer_upstream(state, engineer_intake)
