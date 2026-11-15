@@ -302,6 +302,37 @@ def test_track_personal_refused_for_enterprise_subject(
     assert personal.runs == [] and env.spec_calls == []
 
 
+def test_abandon_personal_run(
+    env: Env,  # noqa: F811
+    personal: Advance,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`dfl abandon` бросает активный личный прогон: каталог — в брошенные,
+    следующий `dfl run --subject` той же темы начинает новый прогон."""
+    _run("WS-1-a", "WS-1", "customer", "waiting_interview", subject="t1")
+    live = _active(env)
+    assert env.run("abandon") == 0
+    out = capsys.readouterr().out
+    assert f"брошен: {live.run_id}" in out and "PR" in out
+    assert not ps.run_dir(live.run_id).exists()
+    gone = list((env.tmp / "personal-runs-abandoned").glob(f"*/{live.run_id}"))
+    assert len(gone) == 1 and (gone[0] / "run.json").is_file()
+    assert ps.active_for(SLUG) is None
+    assert [s.run_id for s in dfl._readable_runs(REPO)] == ["WS-1-a"]
+
+
+def test_abandon_personal_by_subject(
+    env: Env,  # noqa: F811
+    personal: Advance,
+) -> None:
+    live = _active(env)
+    other = ps.new_personal_run("Другое", REPO, SLUG, str(env.tmp / "t"), date.today())
+    ps.save(other)
+    assert env.run("abandon", "--subject", SUBJECT) == 0
+    assert not ps.run_dir(live.run_id).exists()
+    assert ps.run_dir(other.run_id).exists()
+
+
 TRACK_HINT_TEXT = (
     "тип проекта не спрошен (нет терминала) — enterprise; личный проект: "
     "dfl run --subject '…' --track personal"

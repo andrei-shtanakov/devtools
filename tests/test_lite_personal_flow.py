@@ -314,6 +314,7 @@ def test_not_converged_stops_after_max_rounds(run, monkeypatch, capsys) -> None:
     assert _advance(run, ops, checker("FAIL")) == 1
     assert rounds == list(range(1, er.MAX_ROUNDS + 1))
     assert run.step == "design" and "не сошлись" in run.stop_reason
+    assert flow.ABANDON in run.stop_reason
     assert state.load(run.run_id).stop_reason == run.stop_reason
     assert run.stop_reason in capsys.readouterr().out
     assert ops.names() == ["default_branch_fact", "dirty_paths", "current_branch"]
@@ -665,3 +666,12 @@ def test_fail_without_findings_names_criteria(run, monkeypatch) -> None:
     assert "C2 (fail): нет модулей" in run.stop_reason
     assert "not_applicable" not in run.stop_reason
     assert "20-design.md" in run.stop_reason
+
+
+def test_closed_spec_pr_mentions_abandon(run, monkeypatch) -> None:
+    _nodes_on_disk(run)
+    run.spec_pr, run.spec_head = SPEC_PR, HEAD
+    ops = FakeOps(run)
+    monkeypatch.setattr(ops, "pr_facts", lambda slug, pr: {"state": "CLOSED"})
+    assert _advance(run, ops) == 1
+    assert "закрыт без мержа" in run.stop_reason and flow.ABANDON in run.stop_reason

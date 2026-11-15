@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import shutil
 import tempfile
 from dataclasses import asdict, dataclass, fields
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from governance import run_state as rs
@@ -57,11 +58,17 @@ class PersonalRun:
 
 
 def _ws_id(subject: str, today: date) -> str:
-    """ws-id из subject; для не-ASCII темы (кириллица) — `personal-<дата>-<hex>`."""
+    """ws-id из subject + случайный 4-hex суффикс; для не-ASCII темы
+    (кириллица) — `personal-<дата>-<hex>`.
+
+    Суффикс у всех: перезапуск той же темы в тот же день (после
+    `dfl abandon`) не попадёт в старый бандл — иначе `flow._node` пропустил
+    бы авторинг, найдя прежний `20-design.md`."""
     try:
-        return spec_loop.ws_id_for(subject, today)
+        base = spec_loop.ws_id_for(subject, today)
     except spec_loop.SpecLoopError:
-        return f"personal-{today:%Y%m%d}-{secrets.token_hex(2)}"
+        base = f"personal-{today:%Y%m%d}"
+    return f"{base}-{secrets.token_hex(2)}"
 
 
 def new_personal_run(
@@ -137,3 +144,18 @@ def active_for(repo_slug: str, subject: str | None = None) -> PersonalRun | None
         if subject is None or run.subject == subject:
             return run
     return None
+
+
+def abandoned_root() -> Path:
+    """Каталог брошенных личных прогонов (рядом с `personal_root()`)."""
+    return personal_root().parent / "personal-runs-abandoned"
+
+
+def abandon(run: PersonalRun) -> Path:
+    """Перенести каталог прогона в `abandoned_root()/<время>/` (обратимо);
+    возвращает новое место."""
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    dest = abandoned_root() / stamp / run.run_id
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(run_dir(run.run_id)), str(dest))
+    return dest

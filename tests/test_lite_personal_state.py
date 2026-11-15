@@ -120,3 +120,10 @@ def test_active_for_skips_unreadable(
     assert state.active_for("o/r") == live
     out = capsys.readouterr().out
     assert all(n in out for n in ("bad id", "broken-1", "partial", "listed"))
+
+
+def test_ascii_ws_id_has_random_suffix() -> None:
+    """Перезапуск той же ASCII-темы в тот же день не берёт старый бандл."""
+    run = _new()
+    assert re.fullmatch(r"my-task-20261115-[0-9a-f]{4}", run.ws_id)
+    assert len({_new().ws_id for _ in range(20)}) > 1

@@ -40,6 +40,8 @@ BRIEF_JSON = "brief.json"
 APPROVALS = "approvals.jsonl"
 BRIEF_APPROVAL = {"node": "brief", "how": "подтверждено в разговоре"}
 RETRY = "продолжить: dfl run"
+#: хвост стопов, после которых прогон может быть проще начать заново
+ABANDON = "бросить прогон и начать заново — dfl abandon"
 _RECHECK = (Outcome.REVISED, Outcome.OVERRIDDEN)
 _GIT_ERRORS = (RuntimeError, subprocess.CalledProcessError, OSError)
 #: шаги до spec-PR: впереди платные интервью и авторинг — дерево и ветка
@@ -221,7 +223,7 @@ def _node(ctx: _Ctx, kind: str) -> bool:
         if round_no == MAX_ROUNDS:
             return ctx.stop(
                 f"замечания edge-check к {name} не сошлись за {MAX_ROUNDS} "
-                f"круга — поправьте узел и повторите dfl run"
+                f"круга — поправьте узел и повторите dfl run ({ABANDON})"
             )
         round_no += 1
         outcome = resolve_scope(
@@ -247,7 +249,7 @@ def _no_findings_reason(name: str, result: NodeCheck) -> str:
     return (
         f"edge-check {name}: вердикт {result.verdict} без блокирующих находок — "
         f"не пройдены критерии: {unmet}. Поправьте {name} по этим причинам и "
-        f"повторите dfl run (повтор платный; бросить прогон — dfl abandon)"
+        f"повторите dfl run (повтор платный; {ABANDON})"
     )
 
 
@@ -413,7 +415,7 @@ def _merge_spec_pr(ctx: _Ctx) -> bool:
         return False
     pr_state = facts.get("state")
     if pr_state == "CLOSED":
-        return ctx.stop(f"spec-PR #{pr} закрыт без мержа — решите вручную")
+        return ctx.stop(f"spec-PR #{pr} закрыт без мержа — решите вручную ({ABANDON})")
     if pr_state != "MERGED":
         refusal = _merge_refusal(run, str(facts.get("headRefOid") or ""))
         if refusal is not None:
@@ -505,7 +507,7 @@ def _step_code_run(ctx: _Ctx) -> bool:
             return ctx.stop(
                 f"исход spec-runner run не наблюдён, открыт integration-PR "
                 f"{partial} — он может быть частичным; закройте его и "
-                "повторите dfl run (повтор перезапустит раннер)"
+                f"повторите dfl run (повтор перезапустит раннер; {ABANDON})"
             )
         before = sorted(set(run.before_prs) | set(current))
     run.before_prs, run.run_exit = before, None

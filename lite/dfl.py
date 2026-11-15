@@ -8,7 +8,8 @@ engineer-прогон, затем проверенный PR с кодом. `dfl 
 интервью разговором (`lite.interview_chat`): вопрос, ответ своими словами,
 уточнения, отправка — до конца интервью, затем обычный шаг конвейера.
 `dfl abandon` — бросить незаконченный конвейер (каталоги прогонов уходят в
-`out/governance-runs-abandoned/<время>/`, обратимо). `dfl status` — только
+`out/governance-runs-abandoned/<время>/`, обратимо; активный личный прогон —
+первым, в `out/personal-runs-abandoned/<время>/`). `dfl status` — только
 журнал, без форджи и эффектов. Конвейер исполняется в процессе
 (`spec_loop.main`, `brief_tools.main`).
 """
@@ -1462,8 +1463,15 @@ def _interview_customers(
 
 
 def abandon(cwd: Path, subject: str | None) -> int:
-    """Бросить незаконченный конвейер: его прогоны — в каталог брошенных."""
+    """Бросить незаконченный конвейер: его прогоны — в каталог брошенных.
+
+    Активный личный прогон (по `subject`, без него — последний) бросается
+    первым, как `dfl run` первым продолжает его (RF-4)."""
     target = user_targets.register(cwd)
+    slug = user_targets.slug_from_url(target.repo_url)
+    personal = personal_state.active_for(slug, subject=subject)
+    if personal is not None:
+        return _abandon_personal(personal)
     runs = _readable_runs(target.repo)
     cust = _existing_customer(runs, subject)
     wss = {cust.ws_id, cust.ws_id + ENGINEER_SUFFIX}
@@ -1483,6 +1491,19 @@ def abandon(cwd: Path, subject: str | None) -> int:
     print(
         "открытые PR конвейера (бриф, задачи) не тронуты — закройте их сами; "
         f"вернуть прогон — перенести каталог обратно в {rs.RUNS_ROOT}"
+    )
+    return 0
+
+
+def _abandon_personal(run: personal_state.PersonalRun) -> int:
+    """Личный прогон — в брошенные; PR, ветку и файлы бандла не трогает."""
+    dest = personal_state.abandon(run)
+    print(f"брошен: {run.run_id} → {dest}")
+    print(
+        f"открытые PR прогона (spec-PR, integration-PR), ветка "
+        f"spec/{run.ws_id}-personal и файлы {run.bundle_dir} в репо не тронуты — "
+        "уберите их сами; вернуть прогон — перенести каталог обратно в "
+        f"{personal_state.personal_root()}"
     )
     return 0
 
