@@ -181,3 +181,21 @@ def test_fixture_decomposition_parses() -> None:
     brief = (FIXTURES / "00-brief.md").read_text(encoding="utf-8")
     assert "### FR-01:" in brief and "### FR-02:" in brief
     assert (FIXTURES / "20-design.md").read_text(encoding="utf-8").strip()
+
+
+def test_rules_forbid_declining_fr_and_define_criterion_ref() -> None:
+    """Регрессия ревью: дизайн не может отказаться от FR или сузить бриф
+    (иначе ребро декомпозиции невыполнимо); FR-NN/k объяснён ревьюеру."""
+    design = load_rules("personal-design-vs-brief", DEFAULT_CONTRACTS)
+    text = " ".join(it.text for it in design.items)
+    assert "с причиной" not in text
+    assert "без объявления" not in text
+    prompt = (nodes.PROMPTS / "design.md").read_text(encoding="utf-8")
+    assert "сознательно не делаешь" not in prompt
+    decomposition = load_rules(
+        "personal-decomposition-vs-design-brief", DEFAULT_CONTRACTS
+    )
+    texts = [it.text for it in decomposition.items]
+    assert "k — номер пункта" in texts[0]
+    assert any("только на существующие FR-NN/k" in t for t in texts)
+    assert any("не вводит обязательств" in t for t in texts)
