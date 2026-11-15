@@ -404,3 +404,42 @@ def test_one_run_output_no_duplicate_wait_hint(env: Env, monkeypatch, capfd) -> 
     assert "ждёт просмотра этапа" not in out
     assert out.count("этап «дизайн» готов и прошёл проверку") == 1
     assert out.rstrip().endswith(f"прогон {RUN_ID}: running")
+
+
+def test_manual_edit_on_pause_marks_revised(env: Env, monkeypatch, capfd) -> None:  # noqa: F811
+    """Final review I1: ручная правка файла на экране паузы + «дальше» — op
+    `revised=True` (раннер перепроверит волну и покажет паузу снова), а не
+    candidate-PR без правки."""
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch)
+    seen = _steps(env, monkeypatch)
+    calls = _author(monkeypatch)
+    queue = ["дальше", "дальше"]
+
+    def read(prompt: str) -> str | None:
+        if len(queue) == 2:
+            _design(env).write_text(DESIGN + "\nправка руками\n", encoding="utf-8")
+        return queue.pop(0) if queue else None
+
+    monkeypatch.setattr(ic, "stdin_read", read)
+    assert env.run("run", "--subject", "t") == 0
+    assert seen == [{"status": "completed", "revised": True}]
+    assert calls == []
+
+
+def test_manual_edit_after_no_tty_hint_marks_revised(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """Ссылки показаны без терминала, файл поправлен руками, затем `dfl run`
+    в терминале и «дальше» — правка не теряется (сверка с показом ссылок)."""
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch, False)
+    seen = _steps(env, monkeypatch)
+    assert env.run("run", "--subject", "t") == 0
+    _design(env).write_text(DESIGN + "\nправка руками\n", encoding="utf-8")
+    _tty(monkeypatch)
+    _lines(monkeypatch, "дальше", "дальше")
+    assert env.run("run", "--subject", "t") == 0
+    assert seen == [{"status": "completed", "revised": True}]

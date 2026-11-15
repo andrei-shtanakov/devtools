@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import argparse
 import functools
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -150,6 +152,9 @@ TRACK_NO_TTY_HINT = (
     "тип проекта не спрошен (нет терминала) — enterprise; личный проект: "
     "dfl run --subject '…' --track personal"
 )
+#: хэши файлов волны на момент показа паузы (экран или ссылки без терминала):
+#: «дальше» после ручной правки сверяется с ними (final review #768, I1)
+REVIEW_SHOWN = "review-shown.json"
 OWNER_REVIEW_PAUSED = "просмотр этапа «{label}» прерван — продолжить: dfl run"
 OWNER_NEEDS_CLAUDE = (
     "замечания на паузе поддерживаются только с автором claude "
@@ -872,6 +877,7 @@ def _say_owner_review_wait(repo: str, subject: str | None, *, tty: bool) -> None
     if state is None:
         return
     files = _pause_files(state)
+    _remember_shown(state, files)
     links = orv.links(p for _k, p in files)
     if tty:
         say(OWNER_NEEDS_CLAUDE.format(links=links))
@@ -883,7 +889,9 @@ def _say_owner_review_wait(repo: str, subject: str | None, *, tty: bool) -> None
 def _owner_pause(state: rs.RunState, calls: er.PaidCalls) -> int | None:
     """Один показ паузы: узлы волны по очереди (W4 — оба подряд). `None` —
     пауза пройдена и op записан; иначе код выхода."""
-    for stage, path in _pause_files(state):
+    files = _pause_files(state)
+    _remember_shown(state, files)
+    for stage, path in files:
         stopped = _owner_node(state, stage, path, calls)
         if stopped is not None:
             return stopped
@@ -896,7 +904,9 @@ def _owner_node(
 ) -> int | None:
     """Узел на паузе: недоигранные замечания (RF-1: без вопроса) или ответ
     на экране паузы; правка принята — op помечен «правлено», затем
-    замечания «применены». `None` — дальше; иначе код (0 — пауза)."""
+    замечания «применены». «Дальше» после ручной правки файла (хэш ≠
+    снятому при показе) — тоже «правлено»: перепроверка и пауза снова.
+    `None` — дальше; иначе код (0 — пауза)."""
     rd = rs.run_dir(state.run_id)
     label = rp.STAGE_LABELS[stage]
     batch = rp.pending(rd, stage)
@@ -906,6 +916,8 @@ def _owner_node(
             say(OWNER_REVIEW_PAUSED.format(label=label))
             return 0
         if not answer:
+            if _edited_on_pause(state, stage, path):
+                _write_pause_op(state, complete=False)  # перепроверка и пауза снова
             return None
         rp.record(rd, stage, answer)
         batch = rp.pending(rd, stage)
@@ -973,6 +985,45 @@ def _pause_revised(run_id: str) -> bool:
     return bool(op.get("revised"))
 
 
+def _digest(path: Path) -> str:
+    """sha256 файла; нет файла — пустая строка."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _shown_digests(state: rs.RunState) -> dict[str, str]:
+    """Хэши узлов текущей волны, снятые при первом показе паузы."""
+    try:
+        data = json.loads((rs.run_dir(state.run_id) / REVIEW_SHOWN).read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("wave") != state.wave:
+        return {}
+    digests = data.get("digests")
+    return digests if isinstance(digests, dict) else {}
+
+
+def _remember_shown(state: rs.RunState, files: list[tuple[str, Path]]) -> None:
+    """Запомнить хэши узлов при первом показе паузы волны (повторный показ
+    их не переписывает: правка между показами — тоже правка). Сбрасывает
+    запись `_write_pause_op` при пройденной паузе."""
+    digests = _shown_digests(state)
+    for stage, path in files:
+        digests.setdefault(stage, _digest(path))
+    (rs.run_dir(state.run_id) / REVIEW_SHOWN).write_text(
+        json.dumps({"wave": state.wave, "digests": digests}) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _edited_on_pause(state: rs.RunState, stage: str, path: Path) -> bool:
+    """Файл узла изменён с первого показа паузы (ручная правка владельца)."""
+    shown = _shown_digests(state).get(stage)
+    return shown is not None and shown != _digest(path)
+
+
 def _write_pause_op(state: rs.RunState, *, complete: bool) -> None:
     """Op паузы волны под блокировкой прогона: `started` с `revised=True`
     сразу после принятой правки (переживает `/стоп` до конца паузы),
@@ -989,6 +1040,7 @@ def _write_pause_op(state: rs.RunState, *, complete: bool) -> None:
             revised = not complete or bool((now.ops.get(key) or {}).get("revised"))
             if complete:
                 rs.op_complete(now, key, revised=revised)
+                (rs.run_dir(now.run_id) / REVIEW_SHOWN).unlink(missing_ok=True)
             else:
                 rs.op_start(now, key, revised=True)
     except run_lock.LockBusy as exc:
