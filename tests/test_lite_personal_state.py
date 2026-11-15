@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import date
 from pathlib import Path
 
@@ -84,10 +85,18 @@ def test_personal_root_outside_runs_root() -> None:
     assert rs.RUNS_ROOT not in fresh.PERSONAL_ROOT.parents
 
 
-def test_cyrillic_subject_falls_back() -> None:
-    run = state.new_personal_run(
+def _cyr() -> state.PersonalRun:
+    return state.new_personal_run(
         "Мой проект", "git@github.com:o/r.git", "o/r", "/tmp/t", date(2026, 11, 15)
     )
-    assert run.ws_id == "personal-20261115"
-    assert run.run_id.startswith("personal-20261115-")
-    assert run.bundle_dir == "workstreams/personal-20261115/spec"
+
+
+def test_cyrillic_subject_falls_back() -> None:
+    run = _cyr()
+    assert re.fullmatch(r"personal-20261115-[0-9a-f]{4}", run.ws_id)
+    assert run.run_id.startswith(f"{run.ws_id}-")
+    assert run.bundle_dir == f"workstreams/{run.ws_id}/spec"
+
+
+def test_two_cyrillic_runs_distinct_ws_ids() -> None:
+    assert len({_cyr().ws_id for _ in range(20)}) > 1

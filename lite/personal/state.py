@@ -45,11 +45,11 @@ class PersonalRun:
 
 
 def _ws_id(subject: str, today: date) -> str:
-    """ws-id из subject; для не-ASCII темы (кириллица) — `personal-<дата>`."""
+    """ws-id из subject; для не-ASCII темы (кириллица) — `personal-<дата>-<hex>`."""
     try:
         return spec_loop.ws_id_for(subject, today)
     except spec_loop.SpecLoopError:
-        return f"personal-{today:%Y%m%d}"
+        return f"personal-{today:%Y%m%d}-{secrets.token_hex(2)}"
 
 
 def new_personal_run(
