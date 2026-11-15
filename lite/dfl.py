@@ -160,6 +160,10 @@ OWNER_STAGE_LABELS = {
     "decomposition": "декомпозиция",
 }
 OWNER_REVIEW_PAUSED = "просмотр этапа «{label}» прерван — продолжить: dfl run"
+OWNER_NEEDS_CLAUDE = (
+    "замечания на паузе поддерживаются только с автором claude "
+    "(harness.author = claude); откройте {links} и продолжите: dfl run"
+)
 
 # лог текущего вызова; путь переживает закрытие лога — его читает `_record`,
 # который `cli` выполняет после выхода из `main`
@@ -573,7 +577,7 @@ def run(
     code = _step(target, subject, role, chatting=False, review=review)
     if chatting and _waiting_run(target.repo, subject) is not None:
         raise DflError(CHAT_HARNESS_REFUSAL)
-    _say_owner_review_wait(target.repo, subject)
+    _say_owner_review_wait(target.repo, subject, tty=chatting)
     return code
 
 
@@ -870,15 +874,19 @@ def _pause_files(state: rs.RunState) -> list[tuple[str, Path]]:
     ]
 
 
-def _say_owner_review_wait(repo: str, subject: str | None) -> None:
-    """Без терминала (или без автора claude) пауза не пропускается:
-    подсказка со ссылками на файлы волны."""
+def _say_owner_review_wait(repo: str, subject: str | None, *, tty: bool) -> None:
+    """Пауза без цикла замечаний не пропускается: подсказка со ссылками на
+    файлы волны — без терминала или (`tty`) с автором не claude."""
     state = _owner_review_run(repo, subject)
     if state is None:
         return
     files = _pause_files(state)
+    links = orv.links(p for _k, p in files)
+    if tty:
+        say(OWNER_NEEDS_CLAUDE.format(links=links))
+        return
     label = ", ".join(OWNER_STAGE_LABELS[kind] for kind, _path in files)
-    say(orv.NO_TTY.format(label=label, links=orv.links(p for _k, p in files)))
+    say(orv.NO_TTY.format(label=label, links=links))
 
 
 def _owner_pause(state: rs.RunState, calls: er.PaidCalls) -> int | None:

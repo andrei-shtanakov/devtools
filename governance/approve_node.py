@@ -48,7 +48,14 @@ from typing import TYPE_CHECKING, Any
 
 from governance import approval_facts as af
 from governance import approval_ledger as al
-from governance import brief_input, bundle_dag, bundle_inputs, df_config, pr_checks
+from governance import (
+    brief_input,
+    bundle_dag,
+    bundle_inputs,
+    df_config,
+    pr_checks,
+    review_remarks,
+)
 from governance import node_approval as na
 from governance import run_state as rs
 from governance.act_check import LegacyAccepted
@@ -1797,11 +1804,7 @@ def _candidate_body(state: RunState, op: dict, debt: na.NodeDebt | None) -> str:
     """Тело candidate-PR волны; применённые замечания владельца на паузе
     просмотра (#768) — разделом в конце, без замечаний тело прежнее."""
     body = _candidate_text(state, op, debt)
-    # Ленивый импорт: governance не зависит от lite при загрузке (цикл
-    # `lite.review_pause` → … → `governance.approve_node`).
-    from lite import review_pause
-
-    section = review_pause.pr_section(rs.run_dir(state.run_id))
+    section = review_remarks.pr_section(rs.run_dir(state.run_id))
     return f"{body}\n\n{section.rstrip()}" if section else body
 
 

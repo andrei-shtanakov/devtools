@@ -346,8 +346,9 @@ def test_changed_file_after_pause_is_rechecked(tmp_path) -> None:
 
 
 def test_no_tty_stops_with_link_hint(tmp_path) -> None:
+    """Без терминала пауза ждёт человека — не сбой: код 0 (ruling Task 6)."""
     run = _run(tmp_path, ("design",))
-    assert _advance(run, FakeOps(run), read=_no_read, tty=False) == 1
+    assert _advance(run, FakeOps(run), read=_no_read, tty=False) == 0
     assert run.step == "design"
     link = f"file://{(_bundle(run) / '20-design.md').resolve()}"
     assert "ждёт просмотра этапа «дизайн»" in run.stop_reason

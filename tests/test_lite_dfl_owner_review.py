@@ -351,3 +351,24 @@ def test_revised_wave_paused_again(env: Env, monkeypatch, capfd) -> None:  # noq
     assert out.count("этап «дизайн» готов") == 2
     assert out.count("этап «приёмка» готов") == 2
     assert "переписывание 1, проверка 1" in out
+
+
+def test_non_claude_author_at_terminal_hint(env: Env, monkeypatch, capfd) -> None:  # noqa: F811
+    """Терминал есть, автор не claude: цикл замечаний не идёт — подсказка
+    про harness.author со ссылками, код 0, пауза не пройдена."""
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch)
+    monkeypatch.setattr(dfl, "_author_is_claude", lambda: False)
+    seen = _steps(env, monkeypatch)
+    monkeypatch.setattr(ic, "stdin_read", lambda prompt: pytest.fail("без claude"))
+    assert env.run("run", "--subject", "t") == 0
+    out, _ = _read(capfd)
+    bundle = (env.tmp / "target" / "workstreams/WS-1/spec").resolve()
+    assert (
+        "замечания на паузе поддерживаются только с автором claude "
+        "(harness.author = claude); откройте "
+        f"file://{bundle / '20-design.md'}, file://{bundle / '25-acceptance.md'} "
+        "и продолжите: dfl run"
+    ) in out
+    assert "dfl run в терминале" not in out
+    assert seen == [] and rs.load(RUN_ID).status == runner.WAITING_OWNER_REVIEW

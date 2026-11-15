@@ -442,14 +442,18 @@ def _review(ctx: _Ctx, stage: str, files: list[str]) -> bool:
     Круг: недоигранные замечания (RF-1: применяются без вопроса) или новые
     с экрана паузы → правка (бриф — интервьюером, узел — автором с гвардом
     удалений) → «применено» → для узла проверка заново → снова пауза.
-    `/стоп`/EOF — пауза (код 0); без терминала — стоп со ссылкой.
+    `/стоп`/EOF — пауза (код 0); без терминала — тоже пауза (код 0)
+    с подсказкой-ссылкой: ждёт человека, не сбой.
     """
     rd = run_dir(ctx.run.run_id)
     paths = [ctx.bundle / name for name in files]
     label = STAGE_LABELS[stage]
     _remember_checked(ctx, stage)
     if not ctx.tty():
-        return ctx.stop(NO_TTY.format(label=label, links=orv.links(paths)))
+        # ждёт человека, не сбой: код 0, как `/стоп` на паузе
+        ctx.run.stop_reason = NO_TTY.format(label=label, links=orv.links(paths))
+        say(ctx.run.stop_reason)
+        return False
     round_no = 0
     while True:
         batch = rp.pending(rd, stage)
