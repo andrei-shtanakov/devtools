@@ -788,7 +788,10 @@ def reset_ops_for(state: RunState) -> tuple[str, ...]:
     `stopped_dirty`/`stopped_preflight` — ничего, только статус.
     """
     if state.status in ("stopped_gate", "stopped_review", "stopped_author"):
-        return _wave_edit_ops(state)
+        # Пройденная пауза просмотра (#768) снимается вместе с проверкой:
+        # правка на этом стопе иначе ушла бы в candidate без показа.
+        pause = (wave_key(state, REVIEW_PAUSE),) if _wave_has_pause(state) else ()
+        return _wave_edit_ops(state) + pause
     return ()
 
 
@@ -4458,11 +4461,16 @@ def _step_edge(state: RunState, ops: Ops) -> bool:
     return False
 
 
+def _wave_has_pause(state: RunState) -> bool:
+    """Узел текущей волны выбран для паузы просмотра (#768)."""
+    nodes = {kind for _key, kind, _fname in _author_steps_for(state)}
+    return not nodes.isdisjoint(state.review_pause)
+
+
 def _no_review_pause(state: RunState) -> bool:
     """После прошедшего edge-check: узел волны выбран для просмотра (#768) и
     пауза ещё не пройдена — стоп `WAITING_OWNER_REVIEW` до candidate-PR."""
-    nodes = {kind for _key, kind, _fname in _author_steps_for(state)}
-    if nodes.isdisjoint(state.review_pause) or review_pause_passed(state):
+    if not _wave_has_pause(state) or review_pause_passed(state):
         return True
     state.status = WAITING_OWNER_REVIEW
     save(state)

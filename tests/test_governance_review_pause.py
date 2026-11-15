@@ -16,18 +16,23 @@ from governance import run_lock as rl
 from governance import run_state as rs
 from governance import runner, spec_loop
 from tests import locked_runner
-from tests.test_governance_runner import (  # noqa: F401 — autouse-фикстуры
+from tests.test_governance_runner import (
     _OVR_KEYS,
     FakeOps,
-    _disp_harness_env,
     _fail_records,
     _fake_wave_adapters,
-    _hermetic_claude_home,
     _override_journal,
     _set_cfg_mode,
     _test_mode_ops,
     _waves_kwargs,
 )
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_claude_home(tmp_path_factory, monkeypatch) -> None:
+    """Трипвайр конфиг-поверхности не читает настоящий ~/.claude оператора."""
+    home = tmp_path_factory.mktemp("claude-home")
+    monkeypatch.setattr(runner, "_claude_home", lambda: home)
 
 
 @pytest.fixture()
@@ -228,3 +233,20 @@ def test_dfl_outcome_line_is_plain_russian(
     state, _ = _paused(tmp_path, monkeypatch, "r-rp-dfl")
     line = dfl._outcome(state, 0)
     assert line == "прогон r-rp-dfl ждёт просмотра этапа: dfl run"
+
+
+def test_later_stop_reset_pauses_again(tmp_path: Path, runs_root, monkeypatch) -> None:
+    """Пауза пройдена без правок, затем стоп волны до candidate: сброс
+    commit/gate/edge снимает и паузу — правка на стопе снова покажется."""
+    _, ops = _paused(tmp_path, monkeypatch, "r-rp-late")
+    _pass_review("r-rp-late", revised=False)
+    state = rs.load("r-rp-late")
+    state.status = "stopped_review"
+    rs.save(state)
+    assert "review-pause-1" in runner.reset_ops_for(state)
+    before = _names(ops)
+    state = locked_runner.resume("r-rp-late", ops)
+    after = _names(ops)[len(before) :]
+    assert "edge_check_level" in after and "propose_from_source" not in after
+    assert state.status == runner.WAITING_OWNER_REVIEW
+    assert "review-pause-1" not in state.ops
