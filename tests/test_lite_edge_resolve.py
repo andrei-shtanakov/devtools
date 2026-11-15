@@ -246,6 +246,57 @@ def test_decision_option_recorded_and_passed_to_revise(world: World) -> None:
     assert er.OVERRIDE_OFFER not in out  # круг 1, несогласия не было
 
 
+def test_resolve_scope_without_run_state(world: World) -> None:
+    """Ядро разбора зовётся без `RunState` — по `Scope` (#764, личный путь)."""
+    world.findings(_finding())
+    findings = ej.blocking_findings(world.run_dir, 2)
+    scope = er.Scope(
+        run_dir=world.run_dir,
+        target_dir=str(world.tmp / "target"),
+        bundle_dir=BUNDLE,
+        wave=2,
+        can_override=True,
+        filenames={NODE: FILE},
+    )
+    feed = iter(["1", ""])
+    outcome = er.resolve_scope(
+        scope,
+        findings,
+        read=lambda prompt: next(feed, None),
+        agent=world.agent(_decision_item()),
+        revise=world.revise(),
+        round_no=1,
+    )
+    assert outcome is er.Outcome.REVISED
+    [d] = ej.load(world.run_dir, 2)
+    assert d.key == (NODE, EDGE, "R1") and d.kind == "option"
+    assert world.node.read_text(encoding="utf-8") == FIXED
+    assert world.revisions[0]["call"].run_id == world.state.run_id
+
+
+def test_resolve_scope_foreign_file_not_applicable(world: World) -> None:
+    """Файл находки — не узел её вида по `scope.filenames`: разбирать нечего."""
+    world.findings(_finding())
+    scope = er.Scope(
+        run_dir=world.run_dir,
+        target_dir=str(world.tmp / "target"),
+        bundle_dir=BUNDLE,
+        wave=2,
+        can_override=True,
+        filenames={"design": "20-design.md"},
+    )
+    outcome = er.resolve_scope(
+        scope,
+        ej.blocking_findings(world.run_dir, 2),
+        read=lambda prompt: None,
+        agent=world.agent(FIX),
+        revise=world.revise(),
+        round_no=1,
+    )
+    assert outcome is er.Outcome.NOT_APPLICABLE
+    assert world.prompts == [] and world.revisions == []
+
+
 def test_option_number_sends_without_empty_line(world: World) -> None:
     """Номер варианта — ответ сразу, пустая строка не нужна (#762, двойной Enter)."""
     world.findings(_finding())
