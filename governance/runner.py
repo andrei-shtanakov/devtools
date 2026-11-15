@@ -48,6 +48,7 @@ from governance import (
     design_guard,
     df_config,
     halt_gate,
+    review_remarks,
 )
 from governance import approval_ledger as al
 from governance import approve_node as an
@@ -1664,6 +1665,11 @@ def reopen(
             # прогон на Linux 11.11: charter переоткрыт со стопа волны 4).
             state.ops.pop(author_key, None)
     save(state)
+    # Замечания владельца (#768) к переоткрытым этапам — от прежнего прохода:
+    # в новый candidate-PR и в правку нового текста они не идут.
+    review_remarks.reset(
+        run_dir(run_id), [kind for kind, lvl in levels.items() if lvl >= levels[node]]
+    )
     ops.checkout_and_pull(state.target_dir, base)
     state.branch = _wave_branch(state)
     ops.switch_to(state.target_dir, state.branch, base)

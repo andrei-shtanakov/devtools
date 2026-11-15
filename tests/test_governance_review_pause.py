@@ -250,3 +250,36 @@ def test_later_stop_reset_pauses_again(tmp_path: Path, runs_root, monkeypatch) -
     assert "edge_check_level" in after and "propose_from_source" not in after
     assert state.status == runner.WAITING_OWNER_REVIEW
     assert "review-pause-1" not in state.ops
+
+
+def test_reopen_resets_owner_remarks(tmp_path: Path, runs_root, monkeypatch) -> None:
+    """Final review #768 minor 3: `--reopen <node>` сбрасывает журнал замечаний
+    переоткрытых этапов — старые применённые не попадают в новый candidate-PR,
+    недоигранные не переигрываются над новым документом; ниже — не тронуты."""
+    from governance import approval_ledger as al
+    from governance import review_remarks as rr
+    from tests.test_governance_runner import _all_approved, _fake_approve_node_full
+
+    ops = FakeOps(facts={"state": "OPEN", "baseRefName": "master"})
+    _fake_wave_adapters(monkeypatch, ops)
+    _fake_approve_node_full(monkeypatch, ops)
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-rm", ops))
+    al.abandon_request(state, state.ops["candidate-1"]["request"], "стенд")
+    state.wave = 5
+    rs.save(state)
+    ops.base_files = _all_approved()
+    rd = rs.run_dir("r-rm")
+    rr.record(rd, "charter", "к уставу")
+    rr.mark_applied(rd, "charter", 1)
+    rr.record(rd, "requirements", "старое")
+    rr.mark_applied(rd, "requirements", 1)
+    rr.record(rd, "design", "недоигранное")
+    locked_runner.reopen("r-rm", "requirements", ops, manual=True)
+    assert rr.pr_section(rd, ["requirements"]) == ""
+    assert rr.pending(rd, "design") == []
+    assert "- устав: к уставу" in rr.pr_section(rd, ["charter"])
+    rr.record(rd, "requirements", "новое")
+    assert [r.text for r in rr.pending(rd, "requirements")] == ["новое"]
+    rr.mark_applied(rd, "requirements", 1)
+    assert "- требования: новое" in rr.pr_section(rd, ["requirements"])
+    assert "старое" not in rr.pr_section(rd)

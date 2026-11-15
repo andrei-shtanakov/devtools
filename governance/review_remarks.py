@@ -8,8 +8,10 @@
 `{"kind": "remark", "stage", "text", "ts"}` и `{"kind": "applied" | "dropped",
 "stage", "upto", "ts"}`. Строки `applied`/`dropped` этапа по порядку гасят
 следующие `upto` замечаний этапа: `applied` — правка внесена, `dropped` —
-отклонена (правка удаляла пункты); погашенное не недоиграно. Строки не
-переписываются, оборванная последняя строка игнорируется.
+отклонена (правка удаляла пункты); погашенное не недоиграно.
+`{"kind": "reset", "stage", "ts"}` — этап переоткрыт (`--reopen`): строки
+этапа до последнего сброса не действуют. Строки не переписываются,
+оборванная последняя строка игнорируется.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from pathlib import Path
 
 REMARKS = "review-remarks.jsonl"
 APPLIED, DROPPED, PENDING = "applied", "dropped", "pending"
+RESET = "reset"
 _CONSUMED = (APPLIED, DROPPED)
 #: русские названия этапов обоих путей (экран паузы, раздел PR)
 STAGE_LABELS = {
@@ -65,6 +68,21 @@ def _journal(run_dir: Path) -> list[dict[str, object]]:
     return rows
 
 
+def _current(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Строки, действующие сейчас: у каждого этапа — после его последнего
+    `reset`; сами строки сброса не возвращаются."""
+    last = {
+        str(row.get("stage", "")): i
+        for i, row in enumerate(rows)
+        if row.get("kind") == RESET
+    }
+    return [
+        row
+        for i, row in enumerate(rows)
+        if row.get("kind") != RESET and i > last.get(str(row.get("stage", "")), -1)
+    ]
+
+
 def _append(run_dir: Path, row: dict[str, object]) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     row["ts"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -92,8 +110,8 @@ def all_remarks(run_dir: Path) -> list[Remark]:
 
     N-е замечание этапа (с 1) получает N-й исход из строк `applied`/`dropped`
     этого этапа (каждая — `upto` исходов, по порядку журнала); исходов
-    меньше — `PENDING`."""
-    rows = _journal(run_dir)
+    меньше — `PENDING`. Строки до последнего сброса этапа не учитываются."""
+    rows = _current(_journal(run_dir))
     consumed = _consumed(rows)
     seen: dict[str, int] = {}
     result: list[Remark] = []
@@ -130,6 +148,15 @@ def mark_dropped(run_dir: Path, stage: str, upto: int) -> None:
     """Пометить отклонёнными ближайшие `upto` недоигранных замечаний этапа
     (правка по ним удаляла пункты); снимок — как у `mark_applied`."""
     _append(run_dir, {"kind": DROPPED, "stage": stage, "upto": upto})
+
+
+def reset(run_dir: Path, stages: Collection[str]) -> None:
+    """Этапы переоткрыты (`--reopen`): их прежние замечания больше не
+    недоиграны и не попадают в раздел PR. Нет журнала — нечего сбрасывать."""
+    if not (run_dir / REMARKS).is_file():
+        return
+    for stage in stages:
+        _append(run_dir, {"kind": RESET, "stage": stage})
 
 
 def pr_section(run_dir: Path, stages: Collection[str] | None = None) -> str:
