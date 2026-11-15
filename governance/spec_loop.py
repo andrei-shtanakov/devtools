@@ -1416,6 +1416,13 @@ def main(argv: list[str] | None = None) -> int:
             recovered = state is not None
             if state is not None:
                 state = hold(state.run_id)
+        if state is not None and args.review_pause:
+            raise SpecLoopError(
+                "--review-pause задаётся только новому прогону: этапы с паузой "
+                f"прогона {state.run_id} зафиксированы стартом "
+                f"({', '.join(state.review_pause) or 'без пауз'}) — уберите "
+                "--review-pause"
+            )
         if recovered and supplied_brief is not None:
             raise SpecLoopError(
                 "восстановленный из GitHub прогон не принимает --brief "

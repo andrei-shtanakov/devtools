@@ -17,6 +17,7 @@ from governance import brief_tools as bt
 from governance import df_config, runner, spec_loop
 from governance import run_state as rs
 from lite import dfl
+from lite import interview_chat as ic
 from lite import review_pause as rp
 from lite.personal import state as ps
 from tests.test_governance_spec_loop import _LoopEnv
@@ -64,6 +65,8 @@ def test_config_default_used(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
     _config_review(monkeypatch, "charter", "design")
     assert dfl.resolve_review(None, rp.PERSONAL_STAGES) == ("design",)
     assert dfl.resolve_review(None, rp.ENTERPRISE_STAGES) == ("charter", "design")
+    _config_review(monkeypatch, "design", "charter", "design")
+    assert dfl.resolve_review(None, rp.ENTERPRISE_STAGES) == ("charter", "design")
 
 
 def test_config_without_field_means_no_pause(env: Env) -> None:  # noqa: F811
@@ -101,9 +104,9 @@ def test_personal_run_stores_review(
     )
     assert code == 0
     [run] = personal.runs
-    assert run.review_pause == ("design", "brief")
+    assert run.review_pause == ("brief", "design")  # порядок этапов пути
     loaded = ps.load(run.run_id)
-    assert loaded.review_pause == ("design", "brief")
+    assert loaded.review_pause == ("brief", "design")
     raw = (ps.run_dir(run.run_id) / "run.json").read_text(encoding="utf-8")
     assert '"review_pause": [' in raw
 
@@ -216,6 +219,13 @@ def test_spec_loop_passes_review_pause_to_start(
     assert loop.calls[0][1]["review_pause"] == ("design", "charter")
 
 
+def _waiting(state: rs.RunState, ops: object, *, lock: object) -> rs.RunState:
+    """`advance`-заглушка: прогон ждёт интервью (кнопка выходит с кодом 0)."""
+    state.status = "waiting_interview"
+    rs.save(state)
+    return state
+
+
 def test_spec_loop_direct_run_has_no_pause(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -226,7 +236,95 @@ def test_spec_loop_direct_run_has_no_pause(
     _LoopEnv(monkeypatch, tmp_path)
     monkeypatch.setattr(spec_loop.runner, "start", real_start)
     monkeypatch.setattr(runner, "_HALT_GATE", lambda slug: None)
-    monkeypatch.setattr(runner, "advance", lambda state, ops, *, lock: state)
-    spec_loop.main(["--subject", "S", "--repo", "alpha"])  # итог шага не предмет
+    monkeypatch.setattr(runner, "advance", _waiting)
+    assert spec_loop.main(["--subject", "S", "--repo", "alpha"]) == 0
     [run_id] = rs.all_run_ids()
     assert rs.load(run_id).review_pause == []
+
+
+def test_resume_same_stages_other_order_ok(
+    env: Env,  # noqa: F811
+    personal: Advance,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _active(env)
+    run.review_pause = ("brief", "design")
+    ps.save(run)
+    _no_step(monkeypatch)
+    assert env.run("run", "--review", "design,brief") == 0
+    assert env.run("run", "--review", "design, brief,design") == 0
+    assert len(personal.runs) == 2
+
+
+def test_duplicate_stage_recorded_once(
+    env: Env,  # noqa: F811
+    personal: Advance,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_step(monkeypatch)
+    code = env.run(
+        "run", "--subject", SUBJECT, "--track", "personal", "--review", "design,design"
+    )
+    assert code == 0
+    assert ps.load(personal.runs[0].run_id).review_pause == ("design",)
+
+
+def test_spec_loop_review_pause_on_resume_refused(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
+    loop = _LoopEnv(monkeypatch, tmp_path)
+    state = rs.new_run(
+        mode="test",
+        subject="S",
+        repo="alpha",
+        repo_slug="owner/alpha",
+        ws_id="WS-R",
+        target_dir=str(loop.target),
+        bundle_dir="workstreams/WS-R/spec",
+        profile="profiles/team-exp.yaml",
+        run_id="WS-R-a",
+        review_pause=("design",),
+    )
+    rs.save(state)
+    argv = ["--subject", "S", "--repo", "alpha", "--review-pause", "design"]
+    assert spec_loop.main(argv) == 1
+    out = capsys.readouterr().out
+    assert "--review-pause задаётся только новому прогону" in out
+    assert loop.calls == []  # ни start, ни resume
+
+
+def test_chatting_with_review_resumes_without_refusal(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Разговорный режим: `_step` зовётся дважды с тем же `--review` —
+    второй вызов находит записанный выбор и не отказывает."""
+    monkeypatch.setattr(dfl, "_is_tty", lambda: True)
+    monkeypatch.setattr(dfl, "_author_is_claude", lambda: True)
+    monkeypatch.setattr(dfl, "_track_tty", lambda: False)
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        if not rs.all_run_ids():
+            pause = argv[argv.index("--review-pause") + 1].split(",")
+            cust = _run("WS-1-a", "WS-1", "customer", "waiting_interview")
+            cust.review_pause = pause
+            rs.save(cust)
+        return 0
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    waits = iter([True])
+    monkeypatch.setattr(
+        dfl,
+        "_waiting_run",
+        lambda repo, subject, incomplete=False: (
+            rs.load("WS-1-a") if next(waits, False) else None
+        ),
+    )
+    monkeypatch.setattr(dfl, "_converse", lambda state: ic.ChatResult.FINISHED)
+    code = env.run("run", "--subject", "тема", "--review", "acceptance,design")
+    assert code == 0
+    assert len(env.spec_calls) == 2
+    assert env.spec_calls[0][-2:] == ["--review-pause", "design,acceptance"]
+    assert "--review-pause" not in env.spec_calls[1]

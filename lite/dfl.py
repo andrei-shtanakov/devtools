@@ -568,14 +568,17 @@ def run(
 def resolve_review(flag: str | None, stages: tuple[str, ...]) -> tuple[str, ...]:
     """Этапы с паузой нового прогона: флаг `--review` сильнее конфига
     (`[review] pause_after`); имя конфига, чужое пути, молча отбрасывается,
-    неизвестное флагу — отказ с перечнем допустимых."""
+    неизвестное флагу — отказ с перечнем допустимых. Значение каноническое —
+    порядок этапов пути, без повторов: его записывают и с ним сравнивают."""
     if flag is not None:
         try:
-            return rp.parse_flag(flag, stages)
+            chosen = rp.parse_flag(flag, stages)
         except rp.ReviewError as exc:
             raise DflError(str(exc)) from exc
-    names = getattr(df_config.load(), "review_pause_after", ())
-    return rp.from_config(tuple(names), stages)
+    else:
+        names = getattr(df_config.load(), "review_pause_after", ())
+        chosen = rp.from_config(tuple(names), stages)
+    return tuple(stage for stage in stages if stage in chosen)
 
 
 def _check_review(
