@@ -329,6 +329,14 @@ def test_spec_run_argv_and_new_pr_found(state):
     }
 
 
+def test_spec_run_prints_tui_hint(state, capsys):
+    """Реализация идёт молча — подсказка, как смотреть прогресс (#765 б)."""
+    ops = _ops()
+    ops.prs = [_run_pr(5)]
+    auto_tasks._spec_run(state, ops)
+    assert f"spec-runner tui --spec-prefix={state.ws_id}-" in capsys.readouterr().out
+
+
 def test_spec_run_two_new_prs_stop(state, capsys):
     ops = _ops()
     ops.prs = [_run_pr(5)]

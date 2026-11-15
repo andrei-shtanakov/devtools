@@ -176,6 +176,13 @@ def _open_run_prs(state: RunState, ops: Ops) -> list[int] | None:
     return sorted(int(p["number"]) for p in prs if p.get("state") == "OPEN")
 
 
+#: реализация идёт долго и молча — как смотреть прогресс (devtools#765 б)
+TUI_HINT = (
+    "spec-loop (test): реализация задач запущена — прогресс в другом "
+    "терминале, в каталоге проекта: spec-runner tui --spec-prefix={ws}-"
+)
+
+
 def _run_args(state: RunState) -> list[str]:
     return [
         "run",
@@ -222,6 +229,7 @@ def _spec_run(state: RunState, ops: Ops) -> int | None:
             return None
         before = sorted(set(old) | set(current))
     op_start(state, key, before=before)
+    print(TUI_HINT.format(ws=state.ws_id))
     rc = ops.spec_runner(state.target_dir, _run_args(state))
     if rc != 0:
         return _record_run_failure(state, ops, key, rc, before)

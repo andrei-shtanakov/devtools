@@ -263,6 +263,14 @@ def test_read_answer_lines_until_empty() -> None:
     assert ic.is_skip("Не знаю") and not ic.is_skip("не знаю как")
 
 
+def test_read_answer_quick_line_sends_at_once() -> None:
+    quick = str.isdigit
+    assert ic.read_answer(_reader("2"), quick=quick) == "2"
+    assert ic.read_answer(_reader("", "2"), quick=quick) == "2"  # лишний Enter
+    assert ic.read_answer(_reader("своё: а", "б", ""), quick=quick) == "своё: а\nб"
+    assert ic.read_answer(_reader("а", "2", ""), quick=quick) == "а\n2"
+
+
 def test_stdin_read_ctrl_c_is_stop(monkeypatch, capsys) -> None:
     def interrupted(prompt: str) -> str:
         raise KeyboardInterrupt

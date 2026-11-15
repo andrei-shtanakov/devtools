@@ -268,15 +268,25 @@ BROKEN_INPUT_STOP = "ввод не читается — интервью ост�
 MAX_BROKEN_READS = 3
 
 
-def read_answer(read: Read) -> str | None:
-    """Ответ — строки до пустой; `None` — EOF или `/стоп`."""
+def read_answer(
+    read: Read, *, quick: Callable[[str], bool] | None = None
+) -> str | None:
+    """Ответ — строки до пустой; `None` — EOF или `/стоп`.
+
+    `quick` — короткий ответ (номер варианта, «пропустить»): если ПЕРВАЯ
+    строка ему отвечает, она уходит сразу, без пустой строки; пустые строки
+    до первой непустой при этом пропускаются (лишний Enter — не ответ)."""
     lines: list[str] = []
     while True:
         line = read(PROMPT)
         if line is None or line.strip() == STOP_WORD:
             return None
         if not line.strip():
+            if quick is not None and not lines:
+                continue
             return "\n".join(lines).strip()
+        if quick is not None and not lines and quick(line.strip()):
+            return line.strip()
         lines.append(line)
 
 
