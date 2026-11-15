@@ -161,6 +161,15 @@ OWNER_NEEDS_CLAUDE = (
     "(harness.author = claude); откройте {links} и продолжите: dfl run"
 )
 
+REVIEW_NEEDS_CLAUDE = (
+    "--review: пауза на просмотр этапа работает только с автором claude "
+    "(harness.author = claude) — поставьте его в конфиге или запустите без --review"
+)
+REVIEW_CONFIG_DROPPED = (
+    "[review] pause_after не действует: пауза на просмотр этапа работает только "
+    "с автором claude (harness.author = claude) — прогон идёт без пауз"
+)
+
 # лог текущего вызова; путь переживает закрытие лога — его читает `_record`,
 # который `cli` выполняет после выхода из `main`
 _LOG: runlog.RunLog | None = None
@@ -562,7 +571,11 @@ def run(
     enterprise-конвейера: в терминале (и `chat`) при `harness.author = claude`
     ждущий ответа прогон ведётся интервью разговором; иначе — подсказка
     `dfl answer --file`. `review` — этапы с паузой нового прогона
-    (`resolve_review`); на продолжении он обязан совпасть с записанным."""
+    (`resolve_review`); на продолжении он обязан совпасть с записанным.
+    С автором не claude выход с паузы невозможен — `--review` с этапами
+    отказывает сразу (RF-a)."""
+    if _review_selected(review) and not _author_is_claude():
+        raise DflError(REVIEW_NEEDS_CLAUDE)  # RF-a: до регистрации и эффектов
     target = user_targets.register(cwd)
     code = _personal(target, subject, track, review)
     if code is not None:
@@ -580,7 +593,8 @@ def run(
 def resolve_review(flag: str | None, stages: tuple[str, ...]) -> tuple[str, ...]:
     """Этапы с паузой нового прогона: флаг `--review` сильнее конфига
     (`[review] pause_after`); имя конфига, чужое пути, молча отбрасывается,
-    неизвестное флагу — отказ с перечнем допустимых. Значение каноническое —
+    неизвестное флагу — отказ с перечнем допустимых. Паузы конфига при
+    авторе не claude отбрасываются с предупреждением (флаг отказывает `run`). Значение каноническое —
     порядок этапов пути, без повторов: его записывают и с ним сравнивают."""
     if flag is not None:
         try:
@@ -590,7 +604,15 @@ def resolve_review(flag: str | None, stages: tuple[str, ...]) -> tuple[str, ...]
     else:
         names = getattr(df_config.load(), "review_pause_after", ())
         chosen = rp.from_config(tuple(names), stages)
+        if chosen and not _author_is_claude():
+            say(REVIEW_CONFIG_DROPPED)  # RF-a: не блокирует прогон
+            return ()
     return tuple(stage for stage in stages if stage in chosen)
+
+
+def _review_selected(flag: str | None) -> bool:
+    """Флаг `--review` выбирает хоть один этап (не пусто и не `none`)."""
+    return flag is not None and flag.strip().casefold() not in ("", "none")
 
 
 def _check_review(

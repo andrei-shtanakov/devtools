@@ -328,3 +328,77 @@ def test_chatting_with_review_resumes_without_refusal(
     assert len(env.spec_calls) == 2
     assert env.spec_calls[0][-2:] == ["--review-pause", "design,acceptance"]
     assert "--review-pause" not in env.spec_calls[1]
+
+
+# --- автор не claude (final review #768, I2, Ruling RF-a) ---
+
+
+def _not_claude(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dfl, "_author_is_claude", lambda: False)
+
+
+def test_flag_with_non_claude_author_refused_enterprise(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _not_claude(monkeypatch)
+    code = env.run(
+        "run", "--subject", "t1", "--track", "enterprise", "--review", "design"
+    )
+    assert code == 2
+    assert "harness.author = claude" in capsys.readouterr().err
+    assert env.spec_calls == []
+
+
+def test_flag_with_non_claude_author_refused_personal(
+    env: Env,  # noqa: F811
+    personal: Advance,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _not_claude(monkeypatch)
+    _no_step(monkeypatch)
+    code = env.run(
+        "run", "--subject", SUBJECT, "--track", "personal", "--review", "design"
+    )
+    assert code == 2
+    assert "harness.author = claude" in capsys.readouterr().err
+    assert personal.runs == [] and not (env.tmp / "personal-runs").exists()
+
+
+def test_flag_none_with_non_claude_author_ok(env: Env, monkeypatch) -> None:  # noqa: F811
+    _not_claude(monkeypatch)
+    code = env.run(
+        "run", "--subject", "t1", "--track", "enterprise", "--review", "none"
+    )
+    assert code == 0
+    assert "--review-pause" not in env.spec_calls[0]
+
+
+def test_config_with_non_claude_author_dropped_enterprise(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _not_claude(monkeypatch)
+    _config_review(monkeypatch, "design")
+    assert env.run("run", "--subject", "t1", "--track", "enterprise") == 0
+    assert "--review-pause" not in env.spec_calls[0]
+    out = capsys.readouterr().out
+    assert out.count("[review] pause_after не действует") == 1
+    assert "harness.author = claude" in out
+
+
+def test_config_with_non_claude_author_dropped_personal(
+    env: Env,  # noqa: F811
+    personal: Advance,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _not_claude(monkeypatch)
+    _config_review(monkeypatch, "design")
+    _no_step(monkeypatch)
+    assert env.run("run", "--subject", SUBJECT, "--track", "personal") == 0
+    assert personal.runs[0].review_pause == ()
+    assert capsys.readouterr().out.count("[review] pause_after не действует") == 1
