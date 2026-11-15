@@ -1,0 +1,94 @@
+"""Проверка узла личного пути и инварианты декомпозиции (спека §4.4).
+
+`check_node` проводит одно ребро edge-check (`nodes.EDGES`) и кладёт запись в
+раскладку, которую читает `lite.edge_journal` (`w{wave}/{kind}--{edge}.json`,
+`node` = вид узла). `decomposition_problems` — детерминированные инварианты
+декомпозиции: граф DT/BEH и покрытие каждого критерия брифа.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+from governance.decomposition_guard import graph_findings
+from governance.edge_check.author_rules import DEFAULT_CONTRACTS
+from governance.edge_check.check import run_check
+from governance.edge_check.coordinator import DEFAULT_MODEL
+from lite import edge_journal as ej
+from lite.personal.brief import Brief
+from lite.personal.nodes import EDGES, FILENAMES
+from lite.personal.state import PersonalRun, run_dir
+
+#: Волна записи: дизайн проверяется первой, декомпозиция второй.
+WAVES = {"personal-design": 1, "personal-decomposition": 2}
+
+_CRITERIA = re.compile(r"\*\*Критерии:\*\*\s*(.+)$", re.MULTILINE)
+_CHECKS = re.compile(r"^## Проверки\s*$(.*?)(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+
+
+@dataclass(frozen=True)
+class NodeCheck:
+    """Итог проверки узла; `failure` непуст при `ERROR`/сбое прибора."""
+
+    verdict: str
+    findings: list[ej.Finding]
+    failure: str
+
+
+def check_node(
+    run: PersonalRun, kind: str, *, check: Callable = run_check
+) -> NodeCheck:
+    """Провести ребро узла `kind` и записать результат для журнала."""
+    edge_id, bases = EDGES[kind]
+    wave = WAVES[kind]
+    bundle = Path(run.target_dir) / run.bundle_dir
+    try:
+        result = check(
+            edge_id,
+            bundle,
+            [bundle / FILENAMES[kind]],
+            [(role, bundle / name) for role, name in bases],
+            contracts_dir=DEFAULT_CONTRACTS,
+            model=DEFAULT_MODEL,
+        )
+    except Exception as exc:  # noqa: BLE001 - прибор не роняет прогон
+        return NodeCheck("ERROR", [], f"{type(exc).__name__}: {exc}")
+    out = run_dir(run.run_id) / "edge-check" / f"w{wave}"
+    out.mkdir(parents=True, exist_ok=True)
+    record = {**result, "node": kind, "wave": wave}
+    (out / f"{kind}--{edge_id}.json").write_text(
+        json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    verdict = str(result.get("verdict"))
+    if verdict == "ERROR":
+        reason = f"{result.get('error_code', '')}: {result.get('reason', '')}"
+        return NodeCheck(verdict, [], reason.strip(": ") or "ERROR")
+    findings = ej.blocking_findings(run_dir(run.run_id), wave)
+    return NodeCheck(verdict, findings, "")
+
+
+def split_decomposition(text: str) -> tuple[str, str]:
+    """(раздел `## Проверки`, весь текст); раздела нет — пустая строка."""
+    m = _CHECKS.search(text)
+    return (m.group(1) if m else ""), text
+
+
+def _cited(checks: str) -> set[str]:
+    return {c.strip() for m in _CRITERIA.finditer(checks) for c in m[1].split(",")}
+
+
+def decomposition_problems(text: str, brief: Brief) -> list[str]:
+    """Нарушения графа DT/BEH и критерии брифа, не покрытые ни одним BEH."""
+    checks, whole = split_decomposition(text)
+    problems = list(graph_findings(checks, whole))
+    cited = _cited(checks)
+    for fn in brief.functions:
+        for k in range(1, len(fn.criteria) + 1):
+            ref = f"{fn.id}/{k}"
+            if ref not in cited:
+                problems.append(f"критерий {ref} не покрыт ни одной проверкой BEH")
+    return problems
