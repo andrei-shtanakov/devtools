@@ -40,7 +40,7 @@ def test_journal_pending_then_applied(tmp_path: Path) -> None:
     rp.record(tmp_path, "design", "добавь X")
     rp.record(tmp_path, "brief", "другое")
     assert [r.text for r in rp.pending(tmp_path, "design")] == ["добавь X"]
-    rp.mark_applied(tmp_path, "design")
+    rp.mark_applied(tmp_path, "design", 1)
     assert rp.pending(tmp_path, "design") == []
     assert [r.text for r in rp.pending(tmp_path, "brief")] == ["другое"]
     rp.record(tmp_path, "design", "ещё")
@@ -95,9 +95,27 @@ def test_pr_section_lists_applied(tmp_path: Path) -> None:
     assert rp.pr_section(tmp_path) == ""
     rp.record(tmp_path, "design", "добавь X")
     assert rp.pr_section(tmp_path) == ""
-    rp.mark_applied(tmp_path, "design")
+    rp.mark_applied(tmp_path, "design", 1)
     rp.record(tmp_path, "design", "не применено")
     section = rp.pr_section(tmp_path)
     assert section.startswith("## Замечания владельца")
     assert "- design: добавь X" in section
     assert "не применено" not in section
+
+
+def test_record_between_pending_and_mark_stays_pending(tmp_path: Path) -> None:
+    rp.record(tmp_path, "design", "R1")
+    snapshot = rp.pending(tmp_path, "design")
+    rp.record(tmp_path, "design", "R2")
+    rp.mark_applied(tmp_path, "design", len(snapshot))
+    assert [r.text for r in rp.pending(tmp_path, "design")] == ["R2"]
+    rp.mark_applied(tmp_path, "design", 1)
+    assert rp.pending(tmp_path, "design") == []
+
+
+def test_append_after_torn_line_keeps_row(tmp_path: Path) -> None:
+    rp.record(tmp_path, "design", "a")
+    with (tmp_path / rp.REMARKS).open("a", encoding="utf-8") as fh:
+        fh.write('{"kind": "rem')
+    rp.record(tmp_path, "design", "b")
+    assert [r.text for r in rp.pending(tmp_path, "design")] == ["a", "b"]

@@ -69,11 +69,11 @@ def from_config(names: tuple[str, ...], stages: tuple[str, ...]) -> tuple[str, .
     return tuple(n for n in names if n in stages)
 
 
-def _journal(run_dir: Path) -> list[dict[str, str]]:
+def _journal(run_dir: Path) -> list[dict[str, object]]:
     path = run_dir / REMARKS
     if not path.is_file():
         return []
-    rows: list[dict[str, str]] = []
+    rows: list[dict[str, object]] = []
     for line in path.read_text(encoding="utf-8").splitlines():
         try:
             row = json.loads(line)
@@ -84,26 +84,45 @@ def _journal(run_dir: Path) -> list[dict[str, str]]:
     return rows
 
 
-def _append(run_dir: Path, row: dict[str, str]) -> None:
+def _append(run_dir: Path, row: dict[str, object]) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     row["ts"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-    with (run_dir / REMARKS).open("a", encoding="utf-8") as fh:
+    path = run_dir / REMARKS
+    data = path.read_bytes() if path.is_file() else b""
+    torn = bool(data) and not data.endswith(b"\n")
+    with path.open("a", encoding="utf-8") as fh:
+        if torn:
+            fh.write("\n")
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def _applied_counts(rows: list[dict[str, object]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        if row.get("kind") != "applied":
+            continue
+        stage, upto = str(row.get("stage", "")), row.get("upto", 0)
+        if isinstance(upto, int):
+            counts[stage] = counts.get(stage, 0) + upto
+    return counts
+
+
 def all_remarks(run_dir: Path) -> list[Remark]:
-    """Все замечания по порядку записи, с признаком «применено»."""
+    """Все замечания по порядку записи, с признаком «применено».
+
+    Замечание применено, если его номер среди замечаний своего этапа (с 1)
+    не больше суммы `upto` из строк `applied` этого этапа (применяются по порядку)."""
     rows = _journal(run_dir)
+    applied = _applied_counts(rows)
+    seen: dict[str, int] = {}
     result: list[Remark] = []
-    for i, row in enumerate(rows):
+    for row in rows:
         if row.get("kind") != "remark":
             continue
-        stage = row.get("stage", "")
-        applied = any(
-            r.get("kind") == "applied" and r.get("stage") == stage
-            for r in rows[i + 1 :]
-        )
-        result.append(Remark(stage, row.get("text", ""), applied))
+        stage = str(row.get("stage", ""))
+        seen[stage] = seen.get(stage, 0) + 1
+        done = seen[stage] <= applied.get(stage, 0)
+        result.append(Remark(stage, str(row.get("text", "")), done))
     return result
 
 
@@ -117,9 +136,12 @@ def record(run_dir: Path, stage: str, text: str) -> None:
     _append(run_dir, {"kind": "remark", "stage": stage, "text": text})
 
 
-def mark_applied(run_dir: Path, stage: str) -> None:
-    """Пометить применёнными все записанные к этому моменту замечания этапа."""
-    _append(run_dir, {"kind": "applied", "stage": stage})
+def mark_applied(run_dir: Path, stage: str, upto: int) -> None:
+    """Пометить применёнными ближайшие `upto` неприменённых замечаний этапа.
+
+    `upto` = `len(pending(...))` того снимка, который потребила переписка;
+    записанные после снимка остаются неприменёнными."""
+    _append(run_dir, {"kind": "applied", "stage": stage, "upto": upto})
 
 
 def ask(stage_label: str, paths: list[Path], *, read: Read) -> str | None:
