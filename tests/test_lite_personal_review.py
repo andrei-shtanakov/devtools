@@ -499,3 +499,29 @@ def test_paid_calls_line_printed_once(tmp_path, capsys) -> None:
     read = _lines("добавь логи", "", "дальше")
     assert _advance(run, FakeOps(run), read=read, launch=author) == 0
     assert capsys.readouterr().out.count("платных вызовов:") == 1
+
+
+def test_brief_hand_edit_restored_and_explained(tmp_path, capsys) -> None:
+    """Ruling on concern 2: ручная правка `00-brief.md` на паузе + «дальше» —
+    файл возвращён к рендеру `brief.json`, подсказка, пауза снова, без
+    платных вызовов на этапе брифа."""
+    run = _run(tmp_path, ("brief",))
+    path = _bundle(run) / "00-brief.md"
+    queue = ["дальше", "дальше"]
+
+    def read(prompt: str) -> str | None:
+        if len(queue) == 2:
+            path.write_text(render_brief(BRIEF) + "\nправка руками\n", "utf-8")
+        return queue.pop(0) if queue else None
+
+    check = checker("PASS")
+    assert _advance(run, FakeOps(run), read=read, check=check) == 0
+    assert run.step == "code-pr"
+    assert path.read_text(encoding="utf-8") == render_brief(BRIEF)
+    out = capsys.readouterr().out
+    assert (
+        "бриф правится словами: опишите правку как замечание — файл возвращён "
+        "к согласованной версии"
+    ) in out
+    assert out.count(PAUSE_HEAD.format("бриф")) == 2
+    assert check.calls == [DESIGN_EDGE, DECOMP_EDGE]  # type: ignore[attr-defined]

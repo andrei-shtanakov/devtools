@@ -65,6 +65,10 @@ REVIEW_PASSED = "review-passed.json"
 REVIEW_PAUSED = "просмотр этапа «{label}» прерван — " + RETRY
 UNCLEAR_REMARK = orv.UNCLEAR_REMARK
 NO_TTY = orv.NO_TTY
+BRIEF_EDIT_RESTORED = (
+    "бриф правится словами: опишите правку как замечание — файл возвращён "
+    "к согласованной версии"
+)
 
 
 def _stdin_is_tty() -> bool:
@@ -443,7 +447,9 @@ def _review(ctx: _Ctx, stage: str, files: list[str]) -> bool:
     с экрана паузы → правка (бриф — интервьюером, узел — автором с гвардом
     удалений) → «применено» → для узла проверка заново → снова пауза.
     «Дальше» после ручной правки файла на экране — тоже проверка заново
-    и снова пауза (файл сверяется с хэшем, снятым при показе).
+    и снова пауза (файл сверяется с хэшем, снятым при показе); бриф правится
+    только словами: файл, разошедшийся с `brief.json`, возвращается к его
+    рендеру с подсказкой, и пауза снова (дальше читают `brief.json`).
     `/стоп`/EOF — пауза (код 0); без терминала — тоже пауза (код 0)
     с подсказкой-ссылкой: ждёт человека, не сбой.
     """
@@ -473,6 +479,15 @@ def _review(ctx: _Ctx, stage: str, files: list[str]) -> bool:
                 return False
             if answer:
                 rp.record(rd, stage, answer)
+                continue
+            if stage == "brief":
+                agreed = _load_brief(ctx)
+                if agreed is None:
+                    return False
+                if not _restore_brief(ctx, agreed):
+                    return True
+                say(BRIEF_EDIT_RESTORED)
+                _remember_checked(ctx, stage)
                 continue
             if not _edited_on_pause(ctx, stage):
                 return True
@@ -567,6 +582,20 @@ def _remember_checked(ctx: _Ctx, stage: str) -> None:
     marks[stage] = _node_digest(ctx, stage)
     path = run_dir(ctx.run.run_id) / REVIEW_PASSED
     path.write_text(json.dumps(marks, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _restore_brief(ctx: _Ctx, agreed: Brief) -> bool:
+    """`00-brief.md` разошёлся с рендером согласованного `brief.json` —
+    переписать рендером; `True` — файл отличался и возвращён."""
+    path = ctx.bundle / FILENAMES["brief"]
+    text = render_brief(agreed)
+    try:
+        if path.read_text(encoding="utf-8") == text:
+            return False
+    except OSError:
+        pass
+    path.write_text(text, encoding="utf-8")
+    return True
 
 
 def _edited_on_pause(ctx: _Ctx, stage: str) -> bool:
