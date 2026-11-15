@@ -14,6 +14,9 @@
 (`{"role": "agent"|"human"|"check", "text": ...}`; у реплик агента ещё `kind`:
 `ask` | `brief` | `summary`, у `ask` — `options`). При старте разговор читается
 оттуда и продолжается (RF-1): незаданный ответ на вопрос — без нового вызова.
+Битая строка журнала пропускается с предупреждением. Бриф без целей или функций
+(после переноса в «Уточнить») на подтверждение не идёт: человека спрашивают,
+что должно работать, и разговор продолжается.
 """
 
 from __future__ import annotations
@@ -51,6 +54,11 @@ UNAVAILABLE_STOP = (
     "агент недоступен ({reason}) — интервью остановлено; продолжить: dfl run"
 )
 PAID_CALLS = "платных вызовов агента: {n}"
+NOTHING_TO_BUILD = (
+    "строить пока нечего: нет ни одной функции с критерием приёмки — "
+    "расскажите, что должно работать (или /стоп)"
+)
+CORRUPT_LINE = "строка журнала интервью не прочитана — пропущена"
 _FIX_PREFIX = re.compile(
     r"^\s*(?:2\s*[.):](?!\d)\s*)?(?:поправить\s*:?\s*)?", re.IGNORECASE
 )
@@ -92,13 +100,30 @@ class _Log:
         self.entries: list[Entry] = []
         if path.exists():
             lines = path.read_text(encoding="utf-8").splitlines()
-            self.entries = [json.loads(ln) for ln in lines if ln.strip()]
+            parsed = [_parse_entry(ln) for ln in lines if ln.strip()]
+            self.entries = [e for e in parsed if e is not None]
 
     def append(self, entry: Entry) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
         self.entries.append(entry)
+
+
+def _parse_entry(line: str) -> Entry | None:
+    """Реплика из строки журнала; битая строка — `None` и предупреждение."""
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        entry = None
+    if (
+        isinstance(entry, dict)
+        and isinstance(entry.get("role"), str)
+        and isinstance(entry.get("text"), str)
+    ):
+        return entry
+    say(CORRUPT_LINE)
+    return None
 
 
 def interview(run_dir: Path, subject: str, *, read: Read, agent: Agent) -> Brief | None:
@@ -143,9 +168,27 @@ def _converse(log: _Log, subject: str, read: Read, agent: Agent) -> Brief:
         brief = _settle_brief(turn, log)
         if brief is None:
             continue
+        if not brief.goals or not brief.functions:
+            _nothing_to_build(turn, log, read)
+            continue
         log.append({"role": "agent", "kind": "summary", "text": render_brief(brief)})
         if _confirmed(brief, log, read):
             return brief
+
+
+def _nothing_to_build(turn: BriefTurn, log: _Log, read: Read) -> None:
+    """Бриф без целей или функций не на подтверждение: спросить человека, что
+    должно работать; бриф и ответ уходят в разговор (агент их увидит)."""
+    while True:
+        say(NOTHING_TO_BUILD)
+        text = read_answer(read)
+        if text is None:
+            raise _Stop
+        if text:
+            break
+    brief_text = json.dumps(turn.data, ensure_ascii=False)
+    log.append({"role": "agent", "kind": "brief", "text": brief_text})
+    log.append({"role": "human", "text": text})
 
 
 def _pending_ask(entries: list[Entry]) -> AskTurn | None:

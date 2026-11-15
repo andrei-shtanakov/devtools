@@ -290,3 +290,34 @@ def test_free_text_correction_keeps_leading_number(tmp_path: Path) -> None:
     replies = [brief(GOOD), brief(GOOD)]
     _, agent, _ = run(tmp_path, replies, ["20 файлов в день, не 2", "", "1"])
     assert "Человек: поправить: 20 файлов в день, не 2" in agent.prompts[1]
+
+
+def test_empty_brief_not_offered_for_confirmation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    only_bare = copy.deepcopy(bare_fr())
+    only_bare["functions"] = only_bare["functions"][1:]
+    only_bare["functions"][0]["id"] = "FR-01"
+    replies = [ask(f"Вопрос {n}?", ["да"]) for n in range(iv.MAX_QUESTIONS)]
+    replies += [brief(only_bare), brief(GOOD)]
+    lines = ["1"] * iv.MAX_QUESTIONS + ["экспорт в csv за секунду", "", "1"]
+    result, agent, _ = run(tmp_path, replies, lines)
+    out = capsys.readouterr().out
+    assert iv.NOTHING_TO_BUILD in out
+    assert out.count(iv.CONFIRM) == 1
+    assert "Человек: экспорт в csv за секунду" in agent.prompts[-1]
+    assert result is not None and result.functions[0].id == "FR-01"
+
+
+def test_corrupt_transcript_line_skipped(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    good = json.dumps({"role": "human", "text": "только я"}, ensure_ascii=False)
+    (tmp_path / iv.TRANSCRIPT).write_text(
+        '{"role": "agent", "te\n' + good + "\n[1, 2]\n", encoding="utf-8"
+    )
+    result, agent, _ = run(tmp_path, [brief(GOOD)], ["1"])
+    assert result is not None
+    out = capsys.readouterr().out
+    assert out.count(iv.CORRUPT_LINE) == 2
+    assert "Человек: только я" in agent.prompts[0]
