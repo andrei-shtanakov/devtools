@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import subprocess
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -19,12 +20,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from governance import df_config
-from governance.author_launch import config_mode, launch_author
+from governance.author_launch import AuthorCall, config_mode, launch_author
 from governance.auto_tasks import RUN_BRANCH_PREFIX, TUI_HINT, notice
 from governance.edge_check import override
 from governance.edge_check.check import run_check
 from governance.ops import Ops
 from lite import edge_journal as ej
+from lite import node_guard
 from lite.edge_resolve import MAX_ROUNDS, Outcome, PaidCalls, Scope, resolve_scope
 from lite.interview_chat import Read
 from lite.output import say
@@ -179,22 +181,81 @@ def _step_design(ctx: _Ctx) -> bool:
 
 
 def _step_decomposition(ctx: _Ctx) -> bool:
+    """Узел декомпозиции и её инварианты (граф DT/BEH, покрытие критериев).
+
+    Нарушения правит автор (спека §4.4/§8: человек отвечает только на
+    решения): до `MAX_ROUNDS` кругов правки, после каждого — снова ребро
+    edge-check и инварианты; стоп, только если нарушения не сошлись.
+    """
     kind = "personal-decomposition"
     if not _node(ctx, kind):
         return False
     brief = _load_brief(ctx)
     if brief is None:
         return False
-    text = (ctx.bundle / FILENAMES[kind]).read_text(encoding="utf-8")
-    problems = decomposition_problems(text, brief)
-    if problems:
-        return ctx.stop(
-            "декомпозиция нарушает инварианты: "
-            + "; ".join(problems)
-            + f" — поправьте {FILENAMES[kind]} и повторите dfl run"
+    path = ctx.bundle / FILENAMES[kind]
+    for round_no in range(1, MAX_ROUNDS + 2):
+        text = path.read_text(encoding="utf-8")
+        problems = decomposition_problems(text, brief)
+        if not problems:
+            ctx.run.step = "spec-pr"
+            return True
+        if round_no > MAX_ROUNDS:
+            break
+        say(f"декомпозиция нарушает инварианты — правка автором, круг {round_no}")
+        if not _fix_invariants(ctx, kind, text, problems):
+            return False
+        ctx.calls.check += 1
+        if not _node(ctx, kind):
+            return False
+    return ctx.stop(
+        f"декомпозиция нарушает инварианты после {MAX_ROUNDS} кругов правки: "
+        + "; ".join(problems)
+        + f" — поправьте {FILENAMES[kind]} вручную и повторите dfl run ({ABANDON})"
+    )
+
+
+def _fix_invariants(ctx: _Ctx, kind: str, before: str, problems: list[str]) -> bool:
+    """Один круг правки нарушений автором; сбой или ослабление узла — файл
+    возвращается, стоп."""
+    run, name = ctx.run, FILENAMES[kind]
+    path = ctx.bundle / name
+    call = AuthorCall(
+        run_id=run.run_id,
+        run_dir=os.path.realpath(run_dir(run.run_id)),
+        target_dir=run.target_dir,
+        bundle_dir=run.bundle_dir,
+        filename=name,
+    )
+    ctx.calls.revise += 1
+    try:
+        outcome = revise_node(
+            call,
+            kind,
+            run.subject,
+            before,
+            "\n".join(f"- инвариант декомпозиции: {p}" for p in problems),
+            "нет",
+            launch=ctx.launch,
         )
-    ctx.run.step = "spec-pr"
-    return True
+        reason = None
+        if outcome.code != 0:
+            reason = f"правка {name} не состоялась: {outcome.reason or outcome.code}"
+        else:
+            after = path.read_text(encoding="utf-8")
+            bad = node_guard.weakened(before, after, set(), set())
+            if bad:
+                reason = (
+                    f"правка {name} отклонена — ослабляет узел: {', '.join(bad)}; "
+                    "файл возвращён"
+                )
+    except BaseException:
+        path.write_text(before, encoding="utf-8")
+        raise
+    if reason is None:
+        return True
+    path.write_text(before, encoding="utf-8")
+    return ctx.stop(f"{reason} — {RETRY} ({ABANDON})")
 
 
 def _load_brief(ctx: _Ctx) -> Brief | None:

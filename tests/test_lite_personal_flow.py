@@ -375,7 +375,10 @@ def test_edge_error_on_recheck_stops(run, monkeypatch) -> None:
     assert run.stop_reason.startswith("проверка ребра не состоялась: ")
 
 
-def test_decomposition_problems_stop(run) -> None:
+def _wider_brief_at_decomposition(run: state.PersonalRun) -> None:
+    """Бриф с FR-03, которого эталонная декомпозиция не покрывает."""
+    from dataclasses import asdict
+
     rd = state.run_dir(run.run_id)
     rd.mkdir(parents=True, exist_ok=True)
     wider = Brief(
@@ -383,14 +386,74 @@ def test_decomposition_problems_stop(run) -> None:
         (*BRIEF.functions, Function("FR-03", "ещё", ("G-01",), ("x",), "w")),
         BRIEF.context,
     )
-    from dataclasses import asdict
-
     (rd / "brief.json").write_text(json.dumps(asdict(wider)), encoding="utf-8")
     run.step = "decomposition"
     _bundle(run).mkdir(parents=True)
     (_bundle(run) / "20-design.md").write_text("d", encoding="utf-8")
-    assert _advance(run, FakeOps(run)) == 1
+
+
+DECOMP = NODE_TEXT["30-decomposition.md"]
+FIXED = DECOMP.replace("**Критерии:** FR-02/1", "**Критерии:** FR-02/1, FR-03/1")
+
+
+def _reviser(revised: str | None):
+    """Автор: первый вызов пишет эталон, правка (режим правки) — `revised`."""
+    prompts: list[str] = []
+
+    def fake(call, prompt) -> LaunchOutcome:
+        text = prompt("/tmp/out.md")
+        prompts.append(text)
+        body = NODE_TEXT[call.filename]
+        if "## Режим правки" in text and revised is not None:
+            body = revised
+        path = Path(call.target_dir) / call.bundle_dir / call.filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return LaunchOutcome(0)
+
+    fake.prompts = prompts  # type: ignore[attr-defined]
+    return fake
+
+
+def _advance_with(run, ops, launch_fn, check) -> int:
+    return flow.advance(
+        run, ops, read=lambda: None, agent=lambda p: "", launch=launch_fn, check=check
+    )
+
+
+def test_decomposition_problems_revised_by_agent(run) -> None:
+    """Нарушения инвариантов уходят автору (не человеку); после правки —
+    снова edge-check и инварианты, затем дальше."""
+    _wider_brief_at_decomposition(run)
+    author = _reviser(FIXED)
+    check = checker("PASS")
+    assert _advance_with(run, FakeOps(run), author, check) == 0
+    assert run.step == "code-pr"
+    revisions = [p for p in author.prompts if "## Режим правки" in p]
+    assert len(revisions) == 1 and "FR-03/1" in revisions[0]
+    edge = "personal-decomposition-vs-design-brief"
+    assert check.calls.count(edge) == 2  # type: ignore[attr-defined]
+
+
+def test_decomposition_problems_persist_stop(run) -> None:
+    _wider_brief_at_decomposition(run)
+    author = _reviser(None)  # правка ничего не чинит
+    assert _advance_with(run, FakeOps(run), author, checker("PASS")) == 1
+    revisions = [p for p in author.prompts if "## Режим правки" in p]
+    assert len(revisions) == er.MAX_ROUNDS
     assert "FR-03/1" in run.stop_reason and run.step == "decomposition"
+    assert f"после {er.MAX_ROUNDS} кругов правки" in run.stop_reason
+
+
+def test_decomposition_revision_weakening_restored(run) -> None:
+    """Правка, удалившая проверку BEH-02, отклоняется, файл возвращается."""
+    _wider_brief_at_decomposition(run)
+    cut = DECOMP.split("#### BEH-02")[0] + "## Задачи" + DECOMP.split("## Задачи")[1]
+    author = _reviser(cut)
+    assert _advance_with(run, FakeOps(run), author, checker("PASS")) == 1
+    assert "BEH-02" in run.stop_reason and run.step == "decomposition"
+    node = _bundle(run) / "30-decomposition.md"
+    assert node.read_text(encoding="utf-8") == DECOMP
 
 
 def test_interview_failed_stops(run, monkeypatch) -> None:
