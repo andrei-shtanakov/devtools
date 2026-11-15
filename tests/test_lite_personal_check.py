@@ -147,3 +147,12 @@ def test_unmet_criteria_from_record(tmp_path: Path) -> None:
     res = check.check_node(run, "personal-design", check=fake)
     assert res.verdict == "FAIL" and res.findings == []
     assert res.unmet == ("C2 (fail): нет модулей",)
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["FR-01/1 и FR-02/1", "FR-01/1 FR-02/1", "`FR-01/1`, FR-02/1.", "FR-01/1; FR-02/1"],
+)
+def test_cited_refs_any_separator(line: str) -> None:
+    text = f"## Проверки\n\n#### BEH-01: x\n**Критерии:** {line}\n"
+    assert check._cited(check.split_decomposition(text)[0]) == {"FR-01/1", "FR-02/1"}

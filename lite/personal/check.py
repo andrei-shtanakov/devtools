@@ -27,6 +27,7 @@ from lite.personal.state import PersonalRun, run_dir
 WAVES = {"personal-design": 1, "personal-decomposition": 2}
 
 _CRITERIA = re.compile(r"\*\*Критерии:\*\*\s*(.+)$", re.MULTILINE)
+_REF = re.compile(r"FR-\d+/\d+")
 _CHECKS = re.compile(r"^## Проверки\s*$(.*?)(?=^## |\Z)", re.MULTILINE | re.DOTALL)
 
 
@@ -97,9 +98,9 @@ def split_decomposition(text: str) -> tuple[str, str]:
 
 
 def _cited(checks: str) -> set[str]:
-    return {
-        c.strip() for m in _CRITERIA.finditer(checks) for c in re.split(r"[,;]", m[1])
-    }
+    """Все ссылки `FR-NN/k` строк `**Критерии:**` — при любом разделителе
+    («,», «;», « и », пробел, обратные кавычки)."""
+    return {ref for m in _CRITERIA.finditer(checks) for ref in _REF.findall(m[1])}
 
 
 def decomposition_problems(text: str, brief: Brief) -> list[str]:
