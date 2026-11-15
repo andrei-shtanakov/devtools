@@ -246,6 +246,17 @@ def test_decision_option_recorded_and_passed_to_revise(world: World) -> None:
     assert er.OVERRIDE_OFFER not in out  # круг 1, несогласия не было
 
 
+def test_option_number_sends_without_empty_line(world: World) -> None:
+    """Номер варианта — ответ сразу, пустая строка не нужна (#762, двойной Enter)."""
+    world.findings(_finding())
+    outcome = world.resolve(["1"], world.agent(_decision_item()), world.revise())
+    assert outcome is er.Outcome.REVISED
+    [d] = ej.load(world.run_dir, 2)
+    assert d.kind == "option" and d.answer == "покрыть требованием"
+    assert er.ANSWER_HELP in world.out()
+    assert "пустая строка" in er.ANSWER_HELP
+
+
 def test_disagree_recorded(world: World) -> None:
     world.findings(_finding())
     outcome = world.resolve(

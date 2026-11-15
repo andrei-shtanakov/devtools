@@ -10,6 +10,8 @@ write-ahead: повтор `make spec-loop` продолжает с места о
 
 from __future__ import annotations
 
+import contextlib
+import os
 import subprocess
 
 from governance import accept_pr
@@ -176,6 +178,28 @@ def _open_run_prs(state: RunState, ops: Ops) -> list[int] | None:
     return sorted(int(p["number"]) for p in prs if p.get("state") == "OPEN")
 
 
+#: реализация идёт долго и молча — как смотреть прогресс (devtools#765 б)
+TUI_HINT = (
+    "spec-loop (test): реализация задач запущена — прогресс в другом "
+    "терминале, в каталоге проекта: spec-runner tui --spec-prefix={ws}-"
+)
+
+
+#: см. `lite.runlog.SCREEN_FD_ENV` (governance не импортирует lite)
+SCREEN_FD_ENV = "DFL_SCREEN_FD"
+
+
+def notice(text: str) -> None:
+    """Строка в stdout (под `dfl` — это лог) и, если `dfl` увёл вывод в лог,
+    ещё и на экран оператора: подсказку нужно видеть сразу, не в `dfl log`."""
+    print(text, flush=True)
+    fd = os.environ.get(SCREEN_FD_ENV, "")
+    if not fd.isdigit():
+        return
+    with contextlib.suppress(OSError):
+        os.write(int(fd), f"{text}\n".encode())
+
+
 def _run_args(state: RunState) -> list[str]:
     return [
         "run",
@@ -222,6 +246,7 @@ def _spec_run(state: RunState, ops: Ops) -> int | None:
             return None
         before = sorted(set(old) | set(current))
     op_start(state, key, before=before)
+    notice(TUI_HINT.format(ws=state.ws_id))
     rc = ops.spec_runner(state.target_dir, _run_args(state))
     if rc != 0:
         return _record_run_failure(state, ops, key, rc, before)

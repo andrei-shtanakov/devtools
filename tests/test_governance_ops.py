@@ -1029,6 +1029,23 @@ def test_is_dirty_false_on_empty_porcelain(monkeypatch):
     assert result is False
 
 
+def test_is_dirty_ignores_harness_owned_spec_gitignore(monkeypatch):
+    """`spec/.gitignore` пишет сам spec-runner (spec-runner#96) — не грязь (#770)."""
+    _install_fake_run(monkeypatch, returncode=0, stdout="?? spec/.gitignore\n")
+    assert RealOps().is_dirty("/tmp/devtools") is False
+
+
+def test_is_dirty_spec_gitignore_plus_other_is_dirty(monkeypatch):
+    out = "?? spec/.gitignore\n M foo.py\n"
+    _install_fake_run(monkeypatch, returncode=0, stdout=out)
+    assert RealOps().is_dirty("/tmp/devtools") is True
+
+
+def test_is_dirty_tracked_spec_gitignore_change_is_dirty(monkeypatch):
+    _install_fake_run(monkeypatch, returncode=0, stdout=" M spec/.gitignore\n")
+    assert RealOps().is_dirty("/tmp/devtools") is True
+
+
 # --- Кейс 11: checkout_and_pull — S8 на default-ветке (круг 5) -------------
 
 

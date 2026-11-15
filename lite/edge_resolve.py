@@ -52,7 +52,10 @@ REVIEW_STATUS = sf.EDGE
 REVISE_DIR = "edge-revise"
 OWN_PREFIX = "своё:"
 DISAGREE_PREFIX = "не согласен:"
-ANSWER_HELP = "«своё: …» · «не согласен: <почему>» · «пропустить» — остановиться"
+ANSWER_HELP = (
+    "номер варианта — отправится сразу · «своё: …» · «не согласен: <почему>» "
+    "(пустая строка — отправить) · «пропустить» — остановиться"
+)
 REASK = "не понял ответ — номер варианта, «своё: …», «не согласен: …» или «пропустить»"
 NO_REASON = "напишите причину после «не согласен:»"
 KIND_LABELS = {
@@ -387,7 +390,7 @@ def _ask(q: _Question, question: str, read: Read, round_no: int) -> ej.Decision 
         say(f"  {len(item.options) + 1}. {offer}")
     say(ANSWER_HELP)
     for attempt in range(2):
-        text = read_answer(read)
+        text = read_answer(read, quick=_quick)
         if text is None or is_skip(text):
             return None
         decision = _parse(item, question, text, offer, round_no)
@@ -396,6 +399,11 @@ def _ask(q: _Question, question: str, read: Read, round_no: int) -> ej.Decision 
         if attempt == 0:
             say(NO_REASON if _starts(text, DISAGREE_PREFIX) else REASK)
     return None
+
+
+def _quick(line: str) -> bool:
+    """Ответ из одной строки: номер варианта или «пропустить»."""
+    return line.isdigit() or is_skip(line)
 
 
 def _option_line(o: Option) -> str:

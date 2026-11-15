@@ -81,6 +81,30 @@ def test_captured_level0_hides_python_and_child(tmp_path, capfd, monkeypatch) ->
     assert text.rstrip().endswith("# код выхода: 0")
 
 
+def test_captured_notice_reaches_screen_and_log(tmp_path, capfd, monkeypatch) -> None:
+    """Подсказка из-под перехвата видна на экране и остаётся в логе (#772)."""
+    from governance import auto_tasks
+
+    _bind_streams(monkeypatch)
+    log = open_log(tmp_path, "run", "dfl run", protect=None)
+    with captured(log, 0):
+        auto_tasks.notice("tui-hint")
+        sys.stdout.flush()
+    assert runlog.SCREEN_FD_ENV not in os.environ  # окружение восстановлено
+    close_log(log, 0)
+    out, _ = capfd.readouterr()
+    assert out.count("tui-hint") == 1
+    assert "tui-hint" in read_log(log.path)
+
+
+def test_notice_without_capture_prints_once(capfd) -> None:
+    from governance import auto_tasks
+
+    assert auto_tasks.SCREEN_FD_ENV == runlog.SCREEN_FD_ENV  # имя дублировано
+    auto_tasks.notice("plain")
+    assert capfd.readouterr().out.count("plain") == 1
+
+
 def test_captured_level3_passes_through(tmp_path, capfd) -> None:
     log = open_log(tmp_path, "run", "h", protect=None)
     with captured(log, 3):

@@ -47,6 +47,12 @@ from governance.facts import Fact, Outcome, unavailable
 
 DEVTOOLS_ROOT = Path(__file__).resolve().parent.parent
 
+#: строки `git status --porcelain`, которые грязью не считаются: служебный
+#: `spec/.gitignore` пишет сам spec-runner и сам же его исключает из своих
+#: гардов (spec-runner#96); только неотслеживаемый — правка отслеживаемого
+#: остаётся грязью (devtools#770)
+HARNESS_UNTRACKED = frozenset({"?? spec/.gitignore"})
+
 _PR_URL_RE = re.compile(r"/pull/(\d+)")
 _ISSUE_URL_RE = re.compile(r"/issues/(\d+)")
 #: Форма `repo_slug` продукта: `owner/repo` по правилам имён GitHub — ничего,
@@ -1166,7 +1172,8 @@ class RealOps(BriefFactsMixin):
             text=True,
             check=True,
         )
-        return bool(done.stdout.strip())
+        lines = [ln for ln in done.stdout.splitlines() if ln.strip()]
+        return any(ln not in HARNESS_UNTRACKED for ln in lines)
 
     def current_branch(self, target_dir: str) -> str | None:
         """Имя текущей ветки в target_dir; None — detached HEAD."""
