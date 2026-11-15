@@ -45,6 +45,8 @@ class FakeOps:
         self.spec_rc = 0
         self.code_state = "OPEN"
         self.prs: list[dict] = []
+        self.existing_pr: int | None = None
+        self.spec_head = HEAD
 
     def dirty_paths(self, target_dir: str) -> list[str]:
         self.calls.append(("dirty_paths", target_dir))
@@ -65,6 +67,14 @@ class FakeOps:
 
     def push_branch(self, target_dir: str, branch: str) -> None:
         self.calls.append(("push_branch", target_dir, branch))
+
+    def head_sha(self, target_dir: str, branch: str) -> str:
+        self.calls.append(("head_sha", target_dir, branch))
+        return self.spec_head
+
+    def find_pr(self, repo_slug: str, branch: str, *, any_state=False) -> int | None:
+        self.calls.append(("find_pr", repo_slug, branch))
+        return self.existing_pr
 
     def create_pr(
         self,
@@ -112,6 +122,7 @@ def personal_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "personal-runs"
     monkeypatch.setattr(state, "PERSONAL_ROOT", root)
     monkeypatch.setattr(flow, "interview", lambda *a, **k: BRIEF)
+    monkeypatch.setattr(flow, "config_mode", lambda: "test")
     return root
 
 
@@ -195,6 +206,8 @@ def test_happy_path_to_code_pr(run, capsys) -> None:
         ("switch_to", target, branch, "master"),
         ("commit_paths", target, [run.bundle_dir, tasks_path]),
         ("push_branch", target, branch),
+        ("head_sha", target, branch),
+        ("find_pr", "o/repo", branch),
         ("create_pr", "o/repo", branch, "", "master"),
         ("pr_facts", "o/repo", SPEC_PR),
         ("human_merge", "repo", SPEC_PR, HEAD),
@@ -395,7 +408,8 @@ def test_merge_refused_stops(run) -> None:
     ops.merge_rc = 3
     assert _advance(run, ops) == 1
     assert run.step == "spec-pr" and run.spec_pr == SPEC_PR
-    assert "повторите dfl run" in run.stop_reason
+    assert "проверки PR ещё идут или не прошли" in run.stop_reason
+    assert "повторите dfl run позже" in run.stop_reason
     # Resume: the PR is not created again.
     ops.merge_rc = 0
     ops.calls.clear()
@@ -482,3 +496,71 @@ def test_overridden_then_recheck_fail_accepted_passes(run, monkeypatch) -> None:
     assert run.step == "code-pr"
     assert len(check.calls) == 3  # type: ignore[attr-defined]
     assert "personal-design/personal-design-vs-brief R1" in bodies[0]
+
+
+def _nodes_on_disk(run: state.PersonalRun) -> None:
+    _bundle(run).mkdir(parents=True, exist_ok=True)
+    for name, text in NODE_TEXT.items():
+        (_bundle(run) / name).write_text(text, encoding="utf-8")
+    run.step = "spec-pr"
+
+
+def test_spec_pr_resume_after_commit_before_pr(run) -> None:
+    """Падение после коммита/push до PR: ветка прогона — не стоп, без switch."""
+    _nodes_on_disk(run)
+    ops = FakeOps(run)
+    ops.branch = f"spec/{run.ws_id}-personal"
+    assert _advance(run, ops) == 0
+    names = ops.names()
+    assert "switch_to" not in names and "checkout_and_pull" in names
+    assert names.index("commit_paths") < names.index("push_branch")
+    assert names.count("find_pr") == 1 and names.count("create_pr") == 1
+    assert names.index("find_pr") < names.index("create_pr")
+    assert run.spec_pr == SPEC_PR and run.step == "code-pr"
+
+
+def test_spec_pr_resume_existing_pr(run) -> None:
+    _nodes_on_disk(run)
+    ops = FakeOps(run)
+    ops.branch = f"spec/{run.ws_id}-personal"
+    ops.existing_pr = 7
+    _advance(run, ops)
+    assert "create_pr" not in ops.names()
+    assert run.spec_pr == 7 and state.load(run.run_id).spec_pr == 7
+
+
+def test_spec_pr_merge_pinned_to_pushed_sha(run) -> None:
+    _nodes_on_disk(run)
+    ops = FakeOps(run)
+    assert _advance(run, ops) == 0
+    assert run.spec_head == HEAD and state.load(run.run_id).spec_head == HEAD
+    merges = [c for c in ops.calls if c[0] == "human_merge"]
+    assert merges == [("human_merge", "repo", SPEC_PR, HEAD)]
+    names = ops.names()
+    assert names.index("head_sha") < names.index("create_pr")
+
+
+def test_spec_pr_head_moved_refuses_merge(run) -> None:
+    _nodes_on_disk(run)
+    ops = FakeOps(run)
+    ops.spec_head = "0000000000ff"  # we pushed this; the PR head is HEAD
+    assert _advance(run, ops) == 1
+    assert "human_merge" not in ops.names()
+    assert "голова PR" in run.stop_reason and run.step == "spec-pr"
+
+
+def test_spec_pr_not_test_mode_refuses(run, monkeypatch) -> None:
+    monkeypatch.setattr(flow, "config_mode", lambda: "strict")
+    _nodes_on_disk(run)
+    ops = FakeOps(run)
+    assert _advance(run, ops) == 1
+    assert "human_merge" not in ops.names()
+    assert "режиме test" in run.stop_reason and run.spec_pr == SPEC_PR
+
+
+def test_approval_not_duplicated_on_rerun(run) -> None:
+    rd = state.run_dir(run.run_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    flow._approve_brief(rd / flow.APPROVALS)
+    flow._approve_brief(rd / flow.APPROVALS)
+    assert len((rd / flow.APPROVALS).read_text(encoding="utf-8").splitlines()) == 1

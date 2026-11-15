@@ -18,7 +18,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from governance.author_launch import launch_author
+from governance import df_config
+from governance.author_launch import config_mode, launch_author
 from governance.auto_tasks import RUN_BRANCH_PREFIX, TUI_HINT, notice
 from governance.edge_check import override
 from governance.edge_check.check import run_check
@@ -112,10 +113,21 @@ def _step_interview(ctx: _Ctx) -> bool:
     )
     ctx.bundle.mkdir(parents=True, exist_ok=True)
     (ctx.bundle / FILENAMES["brief"]).write_text(render_brief(brief), encoding="utf-8")
-    with (rd / APPROVALS).open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(BRIEF_APPROVAL, ensure_ascii=False) + "\n")
+    _approve_brief(rd / APPROVALS)
     run.step = "design"
     return True
+
+
+def _approve_brief(path: Path) -> None:
+    """Запись одобрения брифа; та же последняя строка уже есть — не дублировать
+    (повтор шага после падения до `save`)."""
+    line = json.dumps(BRIEF_APPROVAL, ensure_ascii=False)
+    if path.is_file():
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if lines and lines[-1] == line:
+            return
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
 
 
 # --- design / decomposition --------------------------------------------------
@@ -240,11 +252,17 @@ def _tasks_rel(run: PersonalRun) -> str:
     return TASKS_PATH.format(ws_id=run.ws_id)
 
 
-def _guard(ctx: _Ctx) -> bool:
+def _spec_branch(run: PersonalRun) -> str:
+    return f"spec/{run.ws_id}-personal"
+
+
+def _guard(ctx: _Ctx) -> str | None:
     """RF-3: чужая грязь или не та ветка — стоп до любого git-эффекта.
 
     Узлы бандла и `tasks.md` — свои файлы прогона (написаны в рабочее
-    дерево до ветки), грязью не считаются.
+    дерево до ветки), грязью не считаются. Ветка прогона допустима
+    (возобновление после падения между веткой и PR). Возвращает текущую
+    ветку; стоп — `None`.
     """
     run, ops = ctx.run, ctx.ops
     own = run.bundle_dir.strip("/") + "/"
@@ -256,22 +274,25 @@ def _guard(ctx: _Ctx) -> bool:
     ]
     if foreign:
         shown = ", ".join(foreign[:5]) + (" …" if len(foreign) > 5 else "")
-        return ctx.stop(
+        ctx.stop(
             f"в {run.target_dir} незакоммиченные чужие изменения: {shown} — "
             f"уберите их и повторите dfl run"
         )
+        return None
     branch = ops.current_branch(run.target_dir)
-    if branch != run.base_ref:
-        return ctx.stop(
+    if branch not in (run.base_ref, _spec_branch(run)):
+        ctx.stop(
             f"{run.target_dir} на ветке {branch or '(detached)'}, ожидалась "
             f"{run.base_ref} — переключитесь и повторите dfl run"
         )
-    return True
+        return None
+    return branch
 
 
 def _open_spec_pr(ctx: _Ctx) -> bool:
     run, ops = ctx.run, ctx.ops
-    if not _guard(ctx):
+    current = _guard(ctx)
+    if current is None:
         return False
     try:
         tasks_text = render_personal_tasks(
@@ -283,19 +304,23 @@ def _open_spec_pr(ctx: _Ctx) -> bool:
     except (OSError, RuntimeError, ValueError) as exc:
         return ctx.stop(f"tasks.md не построен: {exc}")
     target, base = run.target_dir, run.base_ref
-    branch = f"spec/{run.ws_id}-personal"
+    branch = _spec_branch(run)
     tasks = _tasks_rel(run)
     try:
-        ops.checkout_and_pull(target, base)
-        ops.switch_to(target, branch, base)
+        if current != branch:  # на ветке прогона — возобновление, без switch
+            ops.checkout_and_pull(target, base)
+            ops.switch_to(target, branch, base)
         path = Path(target) / tasks
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(tasks_text, encoding="utf-8")
+        # пустой индекс (уже закоммичено до падения) — commit_paths не коммитит
         ops.commit_paths(
             target, [run.bundle_dir, tasks], f"spec({run.ws_id}): личный путь"
         )
         ops.push_branch(target, branch)
-        pr = ops.create_pr(
+        run.spec_head = ops.head_sha(target, branch)
+        save(run)  # write-ahead: мерж пинуется на запушенную голову
+        pr = ops.find_pr(run.repo_slug, branch) or ops.create_pr(
             target,
             run.repo_slug,
             branch,
@@ -343,14 +368,14 @@ def _merge_spec_pr(ctx: _Ctx) -> bool:
     if pr_state == "CLOSED":
         return ctx.stop(f"spec-PR #{pr} закрыт без мержа — решите вручную")
     if pr_state != "MERGED":
-        head = str(facts.get("headRefOid") or "")
-        if not head:
-            return ctx.stop(f"spec-PR #{pr}: голова PR не установлена — {RETRY}")
-        rc = ops.human_merge(run.repo, pr, head, target_dir=run.target_dir)
+        refusal = _merge_refusal(run, str(facts.get("headRefOid") or ""))
+        if refusal is not None:
+            return ctx.stop(f"spec-PR #{pr} не вмержен — {refusal}")
+        rc = ops.human_merge(run.repo, pr, run.spec_head, target_dir=run.target_dir)
         if rc != 0:
             return ctx.stop(
-                f"spec-PR #{pr} не вмержен — human-merge.sh вернул {rc}; "
-                "повторите dfl run"
+                f"spec-PR #{pr} не вмержен — human-merge.sh вернул {rc}: "
+                "проверки PR ещё идут или не прошли — повторите dfl run позже"
             )
         say(f"spec-PR #{pr} вмержен")
     try:
@@ -359,6 +384,28 @@ def _merge_spec_pr(ctx: _Ctx) -> bool:
         return ctx.stop(f"checkout/pull {run.base_ref} не удался: {exc} — {RETRY}")
     run.step = "code-run"
     return True
+
+
+def _merge_refusal(run: PersonalRun, head: str) -> str | None:
+    """Причина не мержить spec-PR агентом; можно — `None`.
+
+    Мерж от имени человека — только в режиме `test` конфига DarkFactory и
+    только по голове, которую запушил сам прогон (`run.spec_head`).
+    """
+    try:
+        mode = config_mode()
+    except df_config.ConfigError as exc:
+        return f"конфиг DarkFactory не прочитан: {exc}"
+    if mode != "test":
+        return f"мерж агентом только в режиме test, конфиг: {mode} — смержите сами"
+    if not run.spec_head:
+        return f"запушенная голова не записана — {RETRY}"
+    if head != run.spec_head:
+        return (
+            f"голова PR {head[:8] or '(нет)'} ≠ запушенной прогоном "
+            f"{run.spec_head[:8]} — ветку меняли снаружи; разберите вручную"
+        )
+    return None
 
 
 def _facts(ctx: _Ctx, pr: int) -> dict | None:

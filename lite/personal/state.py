@@ -46,6 +46,8 @@ class PersonalRun:
     #: (`None` — запуск не начинался) и наблюдённый код выхода (write-ahead).
     before_prs: list[int] | None = None
     run_exit: int | None = None
+    #: `spec-pr`: голова, которую запушил прогон; мерж — только по ней
+    spec_head: str = ""
 
 
 def _ws_id(subject: str, today: date) -> str:
