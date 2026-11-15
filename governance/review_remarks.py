@@ -26,6 +26,15 @@ REMARKS = "review-remarks.jsonl"
 APPLIED, DROPPED, PENDING = "applied", "dropped", "pending"
 RESET = "reset"
 _CONSUMED = (APPLIED, DROPPED)
+#: этапы enterprise-пути (узлы бандла), допустимые для паузы просмотра
+ENTERPRISE_STAGES = (
+    "charter",
+    "requirements",
+    "behaviour-spec",
+    "design",
+    "acceptance",
+    "decomposition",
+)
 #: русские названия этапов обоих путей (экран паузы, раздел PR)
 STAGE_LABELS = {
     "brief": "бриф",

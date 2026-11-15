@@ -397,6 +397,7 @@ def start(
     _print_test_banner(cfg)
     validate_merge_authority(merge_authority)
     validate_author_backend(author_backend)
+    validate_review_pause(review_pause)
     _check_author_config(target_dir, bundle_dir, author_backend)
     validate_authoring(authoring)
     if authoring != "waves":
@@ -4467,8 +4468,25 @@ def _step_edge(state: RunState, ops: Ops) -> bool:
     return False
 
 
+def validate_review_pause(review_pause: tuple[str, ...]) -> None:
+    """Этапы паузы просмотра — узлы enterprise-бандла; опечатка — отказ до
+    леджера, иначе прогон молча шёл бы без пауз (ревью PR #777)."""
+    unknown = [n for n in review_pause if n not in review_remarks.ENTERPRISE_STAGES]
+    if unknown:
+        raise ValueError(
+            f"review_pause: неизвестный этап {', '.join(unknown)}; "
+            f"допустимы: {', '.join(review_remarks.ENTERPRISE_STAGES)}"
+        )
+
+
 def _wave_has_pause(state: RunState) -> bool:
-    """Узел текущей волны выбран для паузы просмотра (#768)."""
+    """Узел текущей волны выбран для паузы просмотра (#768).
+
+    Волна `reapprove` паузы не получает: она одобряет байты base без
+    авторинга и push, правка владельца в candidate не попала бы (ревью PR
+    #777); менять такой узел — через переоткрытие (`--reopen`)."""
+    if _wave_mode(state) == "reapprove":
+        return False
     nodes = {kind for _key, kind, _fname in _author_steps_for(state)}
     return not nodes.isdisjoint(state.review_pause)
 

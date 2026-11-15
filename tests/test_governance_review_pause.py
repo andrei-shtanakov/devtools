@@ -283,3 +283,24 @@ def test_reopen_resets_owner_remarks(tmp_path: Path, runs_root, monkeypatch) -> 
     rr.mark_applied(rd, "requirements", 1)
     assert "- требования: новое" in rr.pr_section(rd, ["requirements"])
     assert "старое" not in rr.pr_section(rd)
+
+
+def test_reapprove_wave_gets_no_pause(tmp_path, runs_root, monkeypatch) -> None:
+    """Ревью PR #777 (major): волна `reapprove` одобряет байты base — правка
+    владельца в candidate не попала бы, поэтому пауза не ставится."""
+    state, _ = _paused(tmp_path, monkeypatch, "r-reapprove")
+    assert runner._wave_has_pause(state)
+    branch = state.ops.setdefault(runner.wave_key(state, "branch"), {})
+    branch["mode"] = "reapprove"
+    assert not runner._wave_has_pause(state)
+
+
+def test_start_rejects_unknown_review_stage(tmp_path, runs_root, monkeypatch) -> None:
+    """Ревью PR #777 (minor): опечатка в `--review-pause` — отказ до леджера,
+    а не прогон без единой паузы."""
+    ops = _ops()
+    _fake_wave_adapters(monkeypatch, ops)
+    kwargs = _waves_kwargs(tmp_path, "r-typo", ops, review_pause=("desgin",))
+    with pytest.raises(ValueError, match="desgin"):
+        locked_runner.start(**kwargs)
+    assert not (runs_root / "r-typo" / "run.json").exists()

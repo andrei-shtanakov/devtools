@@ -14,6 +14,7 @@ from governance.auto_tasks import notice
 from governance.review_remarks import (  # noqa: F401 — публичные имена `lite`
     APPLIED,
     DROPPED,
+    ENTERPRISE_STAGES,
     PENDING,
     REMARKS,
     STAGE_LABELS,
@@ -28,14 +29,6 @@ from governance.review_remarks import (  # noqa: F401 — публичные и�
 from lite.interview_chat import STOP_WORD, Read, read_answer
 
 PERSONAL_STAGES = ("brief", "design", "decomposition")
-ENTERPRISE_STAGES = (
-    "charter",
-    "requirements",
-    "behaviour-spec",
-    "design",
-    "acceptance",
-    "decomposition",
-)
 DONE_WORDS = frozenset({"дальше", "да", "ок", "1"})
 _YES_WORDS = frozenset({"1", "да"})
 _NO_WORDS = frozenset({"2", "нет"})
