@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
+
+import pytest
 
 from governance import run_progress as rp
 
@@ -249,3 +254,102 @@ def test_event_line_strips_terminal_controls() -> None:
     assert len(line) < 260
     title = rp.event_line("started", "TASK-2", "a\x1b[1mb")
     assert title == "▶ TASK-2 «a[1mb» — начата"
+
+
+# --- Task 3: экран и обёртка вызова раннера ---------------------------------
+
+
+def _emit_list():
+    out: list[str] = []
+    return out, out.append
+
+
+def _running_then_done(db: Path, code: int = 0):
+    def call() -> int:
+        _db(db)
+        _task(db, "TASK-001", "running", datetime.now().isoformat())
+        time.sleep(0.15)
+        _task(db, "TASK-001", "success", datetime.now().isoformat(),
+              datetime.now().isoformat())  # fmt: skip
+        time.sleep(0.15)
+        return code
+
+    return call
+
+
+def _tasks_file(target: Path) -> str:
+    rel = "spec/WS-1-tasks.md"
+    (target / "spec").mkdir(parents=True, exist_ok=True)
+    (target / rel).write_text("### TASK-001: Команда add\nP1 | TODO\n", "utf-8")
+    return rel
+
+
+def test_screen_fd_env_matches_runlog() -> None:
+    from governance import auto_tasks
+    from lite import runlog
+
+    assert rp.SCREEN_FD_ENV == auto_tasks.SCREEN_FD_ENV == runlog.SCREEN_FD_ENV
+
+
+def test_watched_returns_runner_code_and_stops(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv(rp.SCREEN_FD_ENV, raising=False)
+    rel = _tasks_file(tmp_path)
+    db = tmp_path / "spec" / ".executor-WS-1-state.db"
+    out, emit = _emit_list()
+    code = rp.watched(_running_then_done(db, 3), target_dir=str(tmp_path),
+                      prefix="WS-1-", tasks_rel=rel, emit=emit, period=0.05)  # fmt: skip
+    assert code == 3
+    assert not [t for t in threading.enumerate() if t.name == rp.THREAD_NAME]
+    assert "▶ TASK-001 «Команда add» — начата" in out
+    assert out[-2].startswith("✓ TASK-001 готова")
+    assert out[-1].startswith("реализация: сделано 1 из 1 · ")
+
+
+def test_watched_propagates_exception_and_stops(tmp_path: Path) -> None:
+    def call() -> int:
+        raise RuntimeError("раннер упал")
+
+    _, emit = _emit_list()
+    with pytest.raises(RuntimeError, match="раннер упал"):
+        rp.watched(call, target_dir=str(tmp_path), prefix="WS-1-",
+                   tasks_rel="spec/x.md", emit=emit, period=0.05)  # fmt: skip
+    assert not [t for t in threading.enumerate() if t.name == rp.THREAD_NAME]
+
+
+def test_no_tty_no_live_line(tmp_path: Path, monkeypatch) -> None:
+    r, w = os.pipe()
+    monkeypatch.setenv(rp.SCREEN_FD_ENV, str(w))
+    rel = _tasks_file(tmp_path)
+    db = tmp_path / "spec" / ".executor-WS-1-state.db"
+    _, emit = _emit_list()
+    rp.watched(_running_then_done(db), target_dir=str(tmp_path), prefix="WS-1-",
+               tasks_rel=rel, emit=emit, period=0.05)  # fmt: skip
+    os.close(w)
+    assert b"\r" not in os.read(r, 65536)
+    os.close(r)
+
+
+def test_no_screen_fd_no_live_line(tmp_path: Path, monkeypatch, capfd) -> None:
+    """Без перехвата (`-vvv`, прямой вызов) живой строки нет."""
+    monkeypatch.delenv(rp.SCREEN_FD_ENV, raising=False)
+    rel = _tasks_file(tmp_path)
+    db = tmp_path / "spec" / ".executor-WS-1-state.db"
+    _, emit = _emit_list()
+    rp.watched(_running_then_done(db), target_dir=str(tmp_path), prefix="WS-1-",
+               tasks_rel=rel, emit=emit, period=0.05)  # fmt: skip
+    assert "\r" not in capfd.readouterr().out
+
+
+def test_live_line_on_tty(tmp_path: Path, monkeypatch) -> None:
+    master, slave = os.openpty()
+    monkeypatch.setenv(rp.SCREEN_FD_ENV, str(slave))
+    rel = _tasks_file(tmp_path)
+    db = tmp_path / "spec" / ".executor-WS-1-state.db"
+    _, emit = _emit_list()
+    rp.watched(_running_then_done(db), target_dir=str(tmp_path), prefix="WS-1-",
+               tasks_rel=rel, emit=emit, period=0.05)  # fmt: skip
+    got = os.read(master, 65536)
+    os.close(slave)
+    os.close(master)
+    assert b"\r  TASK-001 \xc2\xb7 1 \xd0\xb8\xd0\xb7 1 \xc2\xb7 00:00" in got
+    assert got.endswith(b"\r\x1b[K")

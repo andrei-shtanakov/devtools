@@ -10,8 +10,12 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
 import re
 import sqlite3
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -270,3 +274,95 @@ class Watcher:
         """Итог: сделано (включая до старта) из всех задач, время запуска."""
         done = sum(1 for r in self.prev.values() if r.status in _DONE)
         return summary_line(done, self.total, t - self.began)
+
+
+#: экранный fd под перехватом вывода `dfl` (то же имя, что
+#: `auto_tasks.SCREEN_FD_ENV` и `lite.runlog.SCREEN_FD_ENV`; равенство — тест)
+SCREEN_FD_ENV = "DFL_SCREEN_FD"
+THREAD_NAME = "dfl-run-progress"
+
+
+class _LiveScreen:
+    """Живая строка в экранный fd: только под перехватом (fd в окружении —
+    вывод раннера уходит в лог) и только в терминал. fd читается при каждой
+    записи: перехват включается внутри вызова раннера."""
+
+    def __init__(self) -> None:
+        self.drawn = False
+
+    @staticmethod
+    def _fd() -> int | None:
+        raw = os.environ.get(SCREEN_FD_ENV, "")
+        if not raw.isdigit():
+            return None
+        fd = int(raw)
+        try:
+            return fd if os.isatty(fd) else None
+        except OSError:
+            return None
+
+    def __call__(self, text: str) -> None:
+        fd = self._fd()
+        if fd is None:
+            return
+        with contextlib.suppress(OSError):
+            os.write(fd, f"\r{text}\x1b[K".encode())
+            self.drawn = True
+
+    def clear(self) -> None:
+        fd = self._fd()
+        if fd is None or not self.drawn:
+            return
+        with contextlib.suppress(OSError):
+            os.write(fd, b"\r\x1b[K")
+        self.drawn = False
+
+
+def watched(
+    call: Callable[[], int],
+    *,
+    target_dir: str,
+    prefix: str,
+    tasks_rel: str,
+    emit: Callable[[str], None],
+    period: float = 1.0,
+) -> int:
+    """Вызвать раннер (`call`) под наблюдателем прогресса.
+
+    Код возврата и исключение `call` — как есть; поток наблюдателя
+    останавливается в любом исходе, живая строка стирается, затем итог.
+    """
+    try:
+        text = (Path(target_dir) / tasks_rel).read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    live = _LiveScreen()
+
+    def emit_line(line: str) -> None:
+        live.clear()  # строка события не дописывается в хвост живой
+        emit(line)
+
+    watcher = Watcher(
+        state_db_path(target_dir, prefix),
+        read_tasks(text),
+        emit=emit_line,
+        live=live,
+    )
+    watcher.begin(time.time())
+    stop = threading.Event()
+
+    def loop() -> None:
+        while not stop.wait(period):
+            watcher.tick(time.time())
+
+    thread = threading.Thread(target=loop, name=THREAD_NAME, daemon=True)
+    thread.start()
+    try:
+        return call()
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+        watcher.tick(time.time())
+        live.clear()
+        with contextlib.suppress(Exception):
+            emit(watcher.summary(time.time()))
