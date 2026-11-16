@@ -720,6 +720,33 @@ def test_review_pause_after_not_list_rejected(tmp_path: Path, value: str) -> Non
     assert "review.pause_after" in _refused(tmp_path, text)
 
 
+@pytest.mark.parametrize("name", ["desgin", "design,brief", "Design"])
+def test_review_pause_after_unknown_stage_rejected(tmp_path: Path, name: str) -> None:
+    """Имя, неизвестное обоим путям, — отказ при загрузке (спека #768 §7.5);
+    запятая в имени исказила бы значение CLI-getter (#778)."""
+    text = STRICT + f'\n[review]\npause_after = ["{name}"]\n'
+    refusal = _refused(tmp_path, text)
+    assert "review.pause_after" in refusal and "неизвестный этап" in refusal
+
+
+def test_review_stages_match_both_paths() -> None:
+    """Перечень df_config (stdlib-only, своя копия) == этапы обоих путей."""
+    from lite import review_pause as rp
+
+    assert set(df_config.REVIEW_STAGES) == set(
+        rp.PERSONAL_STAGES + rp.ENTERPRISE_STAGES
+    )
+
+
+@pytest.mark.parametrize(
+    ("table", "expected"),
+    [('pause_after = ["brief", "design"]', "brief,design"), ("pause_after = []", "")],
+)
+def test_review_pause_after_getter(tmp_path: Path, table: str, expected: str) -> None:
+    cfg = _load_text(tmp_path, STRICT + f"\n[review]\n{table}\n")
+    assert df_config.get_value(cfg, "review.pause_after") == expected
+
+
 def test_review_unknown_key_rejected(tmp_path: Path) -> None:
     text = STRICT + '\n[review]\npause_after = []\nextra = "x"\n'
     assert "review.extra" in _refused(tmp_path, text)
