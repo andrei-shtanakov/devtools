@@ -10,6 +10,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -2243,3 +2244,252 @@ def test_log_list_shows_local_time(monkeypatch) -> None:
     finally:
         monkeypatch.delenv("TZ")
         time.tzset()
+
+
+# --- ручные проверки в конце прогона (#771) --------------------------------
+
+MANUAL_BEH = """#### BEH-01: порог надёжности ≥ 9/10
+- **checked_by**: `kind: manual` `target: docs/reliability.md`
+"""
+MANUAL_DT = """#### DT-01: Надёжность · type: verify · owner: qa
+scenarios: [BEH-01]
+depends_on: []
+parallel_group: solo
+"""
+
+
+class ManualForge(Forge):
+    """Форджа для шага ручных проверок: issue, комментарий, состояние issue."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[tuple] = []
+        self.issue_states: dict[int, str] = {}
+
+    def caller_login(self) -> str:
+        return "me"
+
+    def find_issue(self, slug, prefix, **kw):
+        self.calls.append(("find_issue", prefix, kw))
+        return None
+
+    def create_issue(self, slug, title, body, **kw):
+        self.calls.append(("create_issue", title, kw))
+        return 24
+
+    def pr_comments_fact(self, slug, pr):
+        return Fact(Outcome.FOUND, [], "комментарии")
+
+    def comment(self, slug, pr, body):
+        self.calls.append(("comment", pr, body.splitlines()[0]))
+
+    def issue_state(self, slug, number):
+        return self.issue_states.get(number)
+
+    def names(self) -> list[str]:
+        return [c[0] for c in self.calls]
+
+
+def _manual_eng(env: Env, *, manual: bool = True, **result) -> rs.RunState:
+    """Engineer-прогон с принятым PR и бандлом с одной ручной проверкой."""
+    _run("WS-1-a", "WS-1", "customer", "brief_ready")
+    eng = _run("WS-1-eng-b", "WS-1-eng", "engineer", "completed")
+    eng.target_dir = str(env.tmp / "target")
+    bundle = env.tmp / "target" / eng.bundle_dir
+    bundle.mkdir(parents=True, exist_ok=True)
+    (bundle / "15-behaviour-spec.md").write_text(MANUAL_BEH, encoding="utf-8")
+    (bundle / "30-decomposition.md").write_text(MANUAL_DT, encoding="utf-8")
+    eng.manual_checks = manual
+    url = "https://github.com/o/alpha/pull/9"
+    eng.ops["code-accept"] = {"status": "completed", "result": {"url": url, **result}}
+    rs.save(eng)
+    env.forge = ManualForge()
+    return eng
+
+
+def _answers(monkeypatch, *lines: str) -> list[str]:
+    asked: list[str] = []
+    it = iter(lines)
+
+    def read(prompt: str) -> str | None:
+        asked.append(prompt)
+        return next(it, None)
+
+    monkeypatch.setattr(dfl.ic, "stdin_read", read)
+    return asked
+
+
+def test_old_run_finished_without_questions(env: Env, monkeypatch, capsys) -> None:
+    _manual_eng(env, manual=False)
+    _tty(monkeypatch)
+    asked = _answers(monkeypatch, "1")
+    assert env.run("run", "--subject", "тема") == 0
+    out = capsys.readouterr().out
+    assert (
+        "PR с кодом проверен: https://github.com/o/alpha/pull/9; мерж — за вами" in out
+    )
+    assert "Ручная проверка" not in out and asked == []
+
+
+def test_new_run_asks_before_finished(env: Env, monkeypatch, capsys) -> None:
+    _manual_eng(env)
+    _tty(monkeypatch)
+    _answers(monkeypatch, "1")
+    assert env.run("run", "--subject", "тема") == 0
+    out = capsys.readouterr().out
+    assert out.index("Ручная проверка BEH-01 (TASK-001)") < out.index(
+        "PR с кодом проверен"
+    )
+    eng = rs.load("WS-1-eng-b")
+    assert eng.ops["manual-checks"]["status"] == "completed"
+    assert env.forge.names() == ["comment"]
+
+
+def test_new_run_no_tty_stops_with_hint(env: Env, capsys) -> None:
+    _manual_eng(env)
+    assert env.run("run", "--subject", "тема") == 0
+    out = capsys.readouterr().out
+    assert "ждут ответа 1 ручных проверок — запустите dfl run в терминале" in out
+    assert "PR с кодом проверен" not in out
+    assert rs.load("WS-1-eng-b").ops["manual-checks"]["status"] == "started"
+
+
+def test_unanswered_blocks_new_subject(env: Env, capsys) -> None:
+    _manual_eng(env)
+    assert env.run("run", "--subject", "другая") == 2
+    assert "конвейер репо не закончен" in capsys.readouterr().err
+
+
+def test_not_done_creates_issue_and_honest_line(env: Env, monkeypatch, capsys) -> None:
+    _manual_eng(env)
+    _tty(monkeypatch)
+    _answers(monkeypatch, "2", "5/10", "")
+    assert env.run("run", "--subject", "тема") == 0
+    out = capsys.readouterr().out
+    title = "Ручная проверка не выполнена: BEH-01 — порог надёжности ≥ 9/10"
+    assert ("create_issue", title, {"labels": ()}) in env.forge.calls
+    assert (
+        "мерж — за вами; ручные проверки — не выполнено: 1 (BEH-01 → issue #24)" in out
+    )
+
+
+def test_merged_unreviewed_also_asks(env: Env, monkeypatch, capsys) -> None:
+    _manual_eng(env, merged=True, reviewed=False)
+    _tty(monkeypatch)
+    _answers(monkeypatch, "1")
+    assert env.run("run", "--subject", "тема") == 0
+    out = capsys.readouterr().out
+    assert out.index("Ручная проверка") < out.index("вмержен без автоматической")
+
+
+def test_hint_while_pending(env: Env, monkeypatch, capsys) -> None:
+    _status_target(env, monkeypatch)
+    _manual_eng(env)
+    assert env.run("status") == 0
+    assert "дальше: ждут ответа ручные проверки — dfl run" in capsys.readouterr().out
+
+
+def test_status_verbose_shows_issue_state(env: Env, monkeypatch, capsys) -> None:
+    _manual_eng(env)
+    _tty(monkeypatch)
+    _answers(monkeypatch, "2", "5/10", "")
+    assert env.run("run", "--subject", "тема") == 0
+    capsys.readouterr()
+    env.forge.issue_states[24] = "CLOSED"
+    _status_target(env, monkeypatch)
+    assert env.run("-v", "status") == 0
+    out = capsys.readouterr().out
+    assert "BEH-01 (TASK-001): не выполнено — 5/10 → issue #24 (закрыт" in out
+    assert "выполнено позже" in out
+
+
+def test_manual_answers_keep_concurrent_ops(env: Env, monkeypatch, capsys) -> None:
+    """Ревью I1: запись ответов — под блокировкой поверх свежего run.json."""
+    _manual_eng(env)
+    _tty(monkeypatch)
+    seen = iter(["1"])
+
+    def read(prompt: str) -> str | None:
+        fresh = rs.load("WS-1-eng-b")
+        fresh.ops["other"] = {"status": "completed"}
+        rs.save(fresh)  # чужая запись, пока человек думает
+        return next(seen, None)
+
+    monkeypatch.setattr(dfl.ic, "stdin_read", read)
+    assert env.run("run", "--subject", "тема") == 0
+    eng = rs.load("WS-1-eng-b")
+    assert eng.ops["other"] == {"status": "completed"}
+    assert eng.ops["manual-checks"]["status"] == "completed"
+
+
+def _loop_accepts(monkeypatch, env: Env, *, manual: bool) -> None:
+    """Шаг конвейера сам завершает приёмку (самый частый путь)."""
+    eng = _manual_eng(env, manual=manual)
+    del eng.ops["code-accept"]
+    rs.save(eng)
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        _accepted(rs.load("WS-1-eng-b"))
+        return 0
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+
+
+def test_loop_accepts_then_asks_same_step(env: Env, monkeypatch, capsys) -> None:
+    """Ревью I5: приёмка завершилась этим шагом — вопросы сейчас же."""
+    _loop_accepts(monkeypatch, env, manual=True)
+    _tty(monkeypatch)
+    _answers(monkeypatch, "1")
+    assert env.run("run", "--subject", "тема") == 0
+    out = capsys.readouterr().out
+    assert len(env.spec_calls) == 1
+    assert out.index("Ручная проверка BEH-01") < out.index("PR с кодом проверен")
+    assert rs.load("WS-1-eng-b").ops["manual-checks"]["status"] == "completed"
+
+
+def test_loop_accepts_old_run_unchanged(env: Env, monkeypatch, capsys) -> None:
+    _loop_accepts(monkeypatch, env, manual=False)
+    _tty(monkeypatch)
+    asked = _answers(monkeypatch, "1")
+    assert env.run("run", "--subject", "тема") == 0
+    out = capsys.readouterr().out
+    assert asked == [] and "Ручная проверка" not in out
+    assert "PR с кодом проверен" not in out  # итог печатает сам шаг, как раньше
+
+
+def test_loop_nonzero_code_skips_questions(env: Env, monkeypatch, capsys) -> None:
+    _loop_accepts(monkeypatch, env, manual=True)
+    monkeypatch.setattr(spec_loop, "main", lambda argv: 3)
+    _tty(monkeypatch)
+    asked = _answers(monkeypatch, "1")
+    assert env.run("run", "--subject", "тема") == 3
+    assert asked == []
+
+
+def test_status_shows_done_personal_run_summary(env: Env, monkeypatch, capsys) -> None:
+    """Ревью I2: законченный личный прогон с непройденной проверкой виден."""
+    from lite.personal import state as pstate
+
+    _status_target(env, monkeypatch)
+    monkeypatch.setattr(pstate, "PERSONAL_ROOT", env.tmp / "personal")
+    run = pstate.new_personal_run(
+        "тема", REPO, SLUG, str(env.tmp / "target"), date.today()
+    )
+    run.step = "done"
+    check = {"beh_id": "BEH-01", "title": "t", "task_id": "TASK-001", "steps": None}
+    run.manual = {
+        "status": "completed",
+        "checks": [check],
+        "answers": {"BEH-01": {"verdict": "not_done", "note": "", "issue": 24}},
+    }
+    pstate.save(run)
+    env.forge = ManualForge()
+    env.forge.issue_states[24] = "OPEN"
+    assert env.run("-v", "status") == 0
+    out = capsys.readouterr().out
+    assert (
+        f"личный прогон {run.run_id}: закончен; ручные проверки — не выполнено: 1"
+        in out
+    )
+    assert "BEH-01 (TASK-001): не выполнено → issue #24 (открыт)" in out

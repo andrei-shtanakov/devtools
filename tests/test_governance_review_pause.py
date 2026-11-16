@@ -304,3 +304,11 @@ def test_start_rejects_unknown_review_stage(tmp_path, runs_root, monkeypatch) ->
     with pytest.raises(ValueError, match="desgin"):
         locked_runner.start(**kwargs)
     assert not (runs_root / "r-typo" / "run.json").exists()
+
+
+def test_start_marks_manual_checks(tmp_path: Path, runs_root, monkeypatch) -> None:
+    """#771: прогон, созданный `start`, — «новый»: ручные проверки спросят."""
+    ops = _ops()
+    _fake_wave_adapters(monkeypatch, ops)
+    state = locked_runner.start(**_waves_kwargs(tmp_path, "r-mc", ops))
+    assert state.manual_checks is True

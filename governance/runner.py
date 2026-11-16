@@ -463,6 +463,7 @@ def start(
         plan_item=plan_item,
         mode=cfg.mode,
         review_pause=review_pause,
+        manual_checks=True,
     )
     if engineer_intake is not None:
         _write_engineer_upstream(state, engineer_intake)

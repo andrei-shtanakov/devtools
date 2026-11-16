@@ -13,6 +13,7 @@ from governance.author_launch import LaunchOutcome
 from governance.brief_facts import DefaultBranch
 from governance.facts import Fact, Outcome
 from lite import edge_resolve as er
+from lite import manual_ask as ma
 from lite.personal import flow, state
 from lite.personal.brief import Brief, Context, Function, Goal, brief_from_json
 from lite.personal.interviewer import Halt
@@ -1002,3 +1003,112 @@ def test_finding_on_basis_file_names_file_and_action(run, monkeypatch) -> None:
     assert run.step == "design" and "not_applicable" not in reason
     assert "00-brief.md:3" in reason and "R1 major" in reason and "плохо" in reason
     assert "dfl abandon" in reason and "20-design.md" in reason
+
+
+# --- ручные проверки перед «конвейер закончен» (#771) ----------------------
+
+MANUAL_DECOMP = """#### BEH-01: порог надёжности ≥ 9/10
+- **checked_by**: `kind: manual` `target: docs/reliability.md`
+
+#### DT-01: Надёжность · type: verify · owner: qa
+scenarios: [BEH-01]
+depends_on: []
+parallel_group: solo
+"""
+
+
+class ManualOps(FakeOps):
+    def caller_login(self) -> str:
+        return "me"
+
+    def find_issue(self, slug, prefix, **kw):
+        self.calls.append(("find_issue",))
+        return None
+
+    def create_issue(self, slug, title, body, **kw):
+        self.calls.append(("create_issue", title, kw))
+        return 24
+
+    def pr_comments_fact(self, slug, pr):
+        from governance.facts import Fact, Outcome
+
+        return Fact(Outcome.FOUND, [], "комментарии")
+
+    def comment(self, slug, pr, body):
+        self.calls.append(("comment", pr))
+
+
+def _manual_run(run, *, manual: bool = True, merged: bool = False) -> ManualOps:
+    bundle = _bundle(run)
+    bundle.mkdir(parents=True, exist_ok=True)
+    (bundle / "30-decomposition.md").write_text(MANUAL_DECOMP, encoding="utf-8")
+    run.manual_checks = manual
+    run.step = "code-pr"
+    run.code_pr = CODE_PR
+    ops = ManualOps(run)
+    ops.calls = []
+    if merged:
+        ops.code_state = "MERGED"
+    return ops
+
+
+def _go(run, ops, lines=(), tty: bool = True) -> int:
+    it = iter(lines)
+    return flow.advance(
+        run,
+        ops,
+        read=lambda _p: next(it, None),
+        agent=lambda p: "",
+        launch=launch,
+        check=checker("PASS"),
+        tty=lambda: tty,
+    )
+
+
+def test_old_personal_run_merged_without_questions(run, capsys) -> None:
+    ops = _manual_run(run, manual=False, merged=True)
+    assert _go(run, ops, ["1"]) == 0
+    out = capsys.readouterr().out
+    assert f"integration-PR #{CODE_PR} вмержен — конвейер закончен\n" in out
+    assert "Ручная проверка" not in out
+
+
+def test_personal_asks_before_merge_line(run, capsys) -> None:
+    ops = _manual_run(run)
+    assert _go(run, ops, ["1"]) == 0
+    out = capsys.readouterr().out
+    assert out.index("Ручная проверка BEH-01 (TASK-001)") < out.index("смержите")
+    assert run.manual["status"] == "completed"
+    assert ("comment", CODE_PR) in ops.calls
+
+
+def test_personal_no_tty_stops(run, capsys) -> None:
+    ops = _manual_run(run)
+    assert _go(run, ops, tty=False) == 0
+    assert run.stop_reason == ma.NO_TTY.format(n=1)
+    assert run.step == "code-pr" and "смержите" not in capsys.readouterr().out
+
+
+def test_personal_merged_line_has_summary(run, capsys) -> None:
+    ops = _manual_run(run, merged=True)
+    assert _go(run, ops, ["2", "5/10", ""]) == 0
+    out = capsys.readouterr().out
+    assert (
+        f"integration-PR #{CODE_PR} вмержен — конвейер закончен; ручные "
+        "проверки — не выполнено: 1 (BEH-01 → issue #24)"
+    ) in out
+    assert run.step == "done"
+
+
+def test_personal_state_roundtrip_manual(run) -> None:
+    run.manual_checks = True
+    run.manual = {"status": "started", "checks": [], "answers": {}}
+    state.save(run)
+    loaded = state.load(run.run_id)
+    assert loaded.manual_checks is True and loaded.manual == run.manual
+    path = state.run_dir(run.run_id) / "run.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw.pop("manual_checks"), raw.pop("manual")
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    old = state.load(run.run_id)
+    assert old.manual_checks is False and old.manual == {}

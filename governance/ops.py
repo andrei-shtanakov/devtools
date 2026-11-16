@@ -429,9 +429,26 @@ class Ops(Protocol):
         self, state: object, run_dir: Path, wave: int, profile_path: Path
     ) -> object: ...
 
-    def create_issue(self, repo_slug: str, title: str, body: str) -> int: ...
+    def create_issue(
+        self,
+        repo_slug: str,
+        title: str,
+        body: str,
+        *,
+        labels: tuple[str, ...] = ("inbox",),
+    ) -> int: ...
 
-    def find_issue(self, repo_slug: str, body_prefix: str) -> int | None: ...
+    def find_issue(
+        self,
+        repo_slug: str,
+        body_prefix: str,
+        *,
+        labels: tuple[str, ...] = ("inbox",),
+        state: str = "open",
+        author: str | None = None,
+    ) -> int | None: ...
+
+    def issue_state(self, repo_slug: str, number: int) -> str | None: ...
 
     def last_commit_touching(self, target_dir: str, rel_path: str) -> str | None: ...
 
@@ -2772,8 +2789,20 @@ class RealOps(BriefFactsMixin):
             model=edge_check_model(),
         )
 
-    def create_issue(self, repo_slug: str, title: str, body: str) -> int:
-        """gh issue create -R <slug> --label inbox; номер из URL stdout."""
+    def create_issue(
+        self,
+        repo_slug: str,
+        title: str,
+        body: str,
+        *,
+        labels: tuple[str, ...] = ("inbox",),
+    ) -> int:
+        """gh issue create -R <slug> [--label …]; номер из URL stdout.
+
+        Метки по умолчанию — `inbox` (запрос соседа, ADR-ECO-006); issue
+        ручной проверки в чужом репо идёт без меток (`labels=()`, #771).
+        """
+        flags = [f for label in labels for f in ("--label", label)]
         done = subprocess.run(
             [
                 "gh",
@@ -2781,8 +2810,7 @@ class RealOps(BriefFactsMixin):
                 "create",
                 "-R",
                 repo_slug,
-                "--label",
-                "inbox",
+                *flags,
                 "--title",
                 title,
                 "--body",
@@ -2797,8 +2825,19 @@ class RealOps(BriefFactsMixin):
             raise RuntimeError(f"create_issue: no issue URL in {done.stdout!r}")
         return int(match.group(1))
 
-    def find_issue(self, repo_slug: str, body_prefix: str) -> int | None:
-        """Номер открытого inbox-issue, чьё body начинается с body_prefix.
+    def find_issue(
+        self,
+        repo_slug: str,
+        body_prefix: str,
+        *,
+        labels: tuple[str, ...] = ("inbox",),
+        state: str = "open",
+        author: str | None = None,
+    ) -> int | None:
+        """Номер issue (по умолчанию открытого inbox-issue), чьё body
+        начинается с body_prefix; `labels`/`state`/`author` — фильтр списка
+        (#771: issue ручной проверки — без меток, любого состояния, только
+        свой, `author="@me"`: маркер в чужом issue не принимается за свой).
 
         `None` ТОЛЬКО когда такого issue нет; сбой самого запроса — rc != 0,
         битый или неожиданный по форме JSON — поднимает `RuntimeError` (как
@@ -2813,10 +2852,12 @@ class RealOps(BriefFactsMixin):
                 "list",
                 "-R",
                 repo_slug,
-                "--label",
-                "inbox",
+                *[f for label in labels for f in ("--label", label)],
                 "--state",
-                "open",
+                state,
+                *(["--author", author] if author else []),
+                "--limit",
+                "500",
                 "--json",
                 "number,body",
             ],
@@ -2839,6 +2880,23 @@ class RealOps(BriefFactsMixin):
             if body.startswith(body_prefix):
                 return item["number"]
         return None
+
+    def issue_state(self, repo_slug: str, number: int) -> str | None:
+        """`OPEN`/`CLOSED` issue; любой сбой — `None` (украшение статуса)."""
+        done = subprocess.run(
+            ["gh", "issue", "view", str(number), "-R", repo_slug, "--json", "state"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if done.returncode != 0:
+            return None
+        try:
+            found = json.loads(done.stdout)
+        except json.JSONDecodeError:
+            return None
+        value = found.get("state") if isinstance(found, dict) else None
+        return value if isinstance(value, str) else None
 
     def last_commit_touching(self, target_dir: str, rel_path: str) -> str | None:
         """SHA последнего коммита, изменившего rel_path; None — не менялся.

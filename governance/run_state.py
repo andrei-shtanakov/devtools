@@ -145,6 +145,10 @@ class RunState:
     # (`--review` / конфиг) через `spec_loop --review-pause`, дальше не
     # меняется. Пусто — пауз нет: прогон не через `dfl` и старые run.json.
     review_pause: list[str] = field(default_factory=list)
+    # Ручные проверки в конце прогона (#771): `True` ставит `runner.start`
+    # (создание прогона новым кодом); старые run.json без поля — `False`,
+    # вопросов им нет (решение владельца: только новые прогоны).
+    manual_checks: bool = False
 
 
 class ModeMismatchError(Exception):
@@ -237,6 +241,7 @@ def new_run(
     *,
     mode: str,
     review_pause: tuple[str, ...] = (),
+    manual_checks: bool = False,
 ) -> RunState:
     """Новый прогон (S0). `run_id` подаётся снаружи (вызывающая сторона)."""
     validate_mode(mode)
@@ -270,6 +275,7 @@ def new_run(
         plan_item=plan_item,
         mode=mode,
         review_pause=list(review_pause),
+        manual_checks=manual_checks,
     )
 
 

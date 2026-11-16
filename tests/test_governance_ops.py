@@ -1006,6 +1006,54 @@ def test_find_issue_invalid_json_raises_runtime_error(monkeypatch):
         ops.find_issue(REPO_SLUG, "slug: beh-remediation-WS-1")
 
 
+# --- devtools#771: issue ручной проверки — без метки, любого состояния -----
+
+
+def test_create_issue_without_labels_has_no_label_flag(monkeypatch):
+    calls = _install_fake_run(
+        monkeypatch, returncode=0, stdout="https://github.com/o/r/issues/24\n"
+    )
+    assert RealOps().create_issue(REPO_SLUG, "t", "b", labels=()) == 24
+    assert "--label" not in calls[0].argv
+
+
+def test_create_issue_default_keeps_inbox(monkeypatch):
+    calls = _install_fake_run(
+        monkeypatch, returncode=0, stdout="https://github.com/o/r/issues/24\n"
+    )
+    RealOps().create_issue(REPO_SLUG, "t", "b")
+    argv = calls[0].argv
+    assert argv[argv.index("--label") + 1] == "inbox"
+
+
+def test_find_issue_all_states_without_label(monkeypatch):
+    payload = [{"number": 24, "body": "<!-- m -->\nx"}]
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout=json.dumps(payload))
+    assert RealOps().find_issue(REPO_SLUG, "<!-- m -->", labels=(), state="all") == 24
+    argv = calls[0].argv
+    assert "--label" not in argv and "--author" not in argv
+    assert argv[argv.index("--state") + 1] == "all"
+
+
+def test_find_issue_author_filter(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="[]")
+    RealOps().find_issue(REPO_SLUG, "<!-- m -->", labels=(), author="@me")
+    argv = calls[0].argv
+    assert argv[argv.index("--author") + 1] == "@me"
+
+
+def test_issue_state_reads_state(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout='{"state":"CLOSED"}')
+    assert RealOps().issue_state(REPO_SLUG, 24) == "CLOSED"
+    assert calls[0].argv[:4] == ["gh", "issue", "view", "24"]
+
+
+@pytest.mark.parametrize("rc,stdout", [(1, ""), (0, "not json"), (0, "[]")])
+def test_issue_state_error_is_none(monkeypatch, rc, stdout):
+    _install_fake_run(monkeypatch, returncode=rc, stdout=stdout)
+    assert RealOps().issue_state(REPO_SLUG, 24) is None
+
+
 # --- Кейс 10: is_dirty — fail-closed гард S1 (круг 5) -----------------------
 
 
