@@ -14,7 +14,7 @@ import contextlib
 import os
 import subprocess
 
-from governance import accept_pr, run_resume
+from governance import accept_pr, run_progress, run_resume
 from governance import approve_node as an
 from governance import run_state as rs
 from governance import task_bridge as tb
@@ -292,7 +292,13 @@ def _spec_run(state: RunState, ops: Ops) -> int | None:
         before = sorted(set(old) | set(current))
     op_start(state, key, before=before)
     notice(TUI_HINT.format(ws=state.ws_id))
-    rc = ops.spec_runner(state.target_dir, _run_args(state))
+    rc = run_progress.watched(
+        lambda: ops.spec_runner(state.target_dir, _run_args(state)),
+        target_dir=state.target_dir,
+        prefix=f"{state.ws_id}-",
+        tasks_rel=f"spec/{state.ws_id}-tasks.md",
+        emit=notice,
+    )  # события задач и живой отсчёт на экране (#765)
     if rc != 0:
         return _record_run_failure(state, ops, key, rc, before)
     # Write-ahead наблюдённого успеха: повтор подхватит PR без перезапуска.

@@ -273,7 +273,8 @@ class Watcher:
     def summary(self, t: float) -> str:
         """Итог: сделано (включая до старта) из всех задач, время запуска."""
         done = sum(1 for r in self.prev.values() if r.status in _DONE)
-        return summary_line(done, self.total, t - self.began)
+        total = self.total or len(self.prev)  # tasks.md не прочитался — из БД
+        return summary_line(done, total, t - self.began)
 
 
 #: экранный fd под перехватом вывода `dfl` (то же имя, что

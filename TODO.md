@@ -3115,3 +3115,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 
 - [x] Перед «конвейер закончен» вопрос по каждой проверке `kind: manual` (выполнено / не выполнено / с оговоркой), один комментарий в PR с кодом, issue в репо проекта на «не выполнено», сводка в финальной строке и `dfl status -v` (оба пути, только новые прогоны; `governance/manual_checks.py`, `lite/manual_ask.py`) @owner:github:andrei-shtanakov @id:dfl-manual-checks
 - [ ] Журнал требований проекта после прогона: отложенное, баги эксплуатации, issues (devtools#792) @owner:github:andrei-shtanakov @id:dfl-requirements-ledger
+
+## dfl run: видимый прогресс реализации (devtools#765)
+
+- [x] Строки событий задач (начата / готова / попытка N / не прошла) и живой посекундный отсчёт текущей задачи «N из M» в окне `dfl`; итог «сделано N из M · время»; без стоимости (оба пути; `governance/run_progress.py`) @owner:github:andrei-shtanakov @id:dfl-run-progress

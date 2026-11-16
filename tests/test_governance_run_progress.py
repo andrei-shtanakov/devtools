@@ -353,3 +353,13 @@ def test_live_line_on_tty(tmp_path: Path, monkeypatch) -> None:
     os.close(master)
     assert b"\r  TASK-001 \xc2\xb7 1 \xd0\xb8\xd0\xb7 1 \xc2\xb7 00:00" in got
     assert got.endswith(b"\r\x1b[K")
+
+
+def test_summary_total_falls_back_to_db(tmp_path: Path) -> None:
+    """tasks.md не прочитался — M из БД, не «1 из 0»."""
+    db = _db(tmp_path / "s.db")
+    w = rp.Watcher(db, [], emit=lambda _l: None, live=None)
+    w.begin(_at(0))
+    _task(db, "TASK-001", "success", _ts(0), _ts(5))
+    w.tick(_at(6))
+    assert w.summary(_at(6)) == "реализация: сделано 1 из 1 · 00:06"
