@@ -2804,8 +2804,18 @@ class RealOps(BriefFactsMixin):
         """
         flags = [f for label in labels for f in ("--label", label)]
         done = subprocess.run(
-            ["gh", "issue", "create", "-R", repo_slug, *flags]
-            + ["--title", title, "--body", body],
+            [
+                "gh",
+                "issue",
+                "create",
+                "-R",
+                repo_slug,
+                *flags,
+                "--title",
+                title,
+                "--body",
+                body,
+            ],
             capture_output=True,
             text=True,
             check=True,
