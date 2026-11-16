@@ -161,6 +161,9 @@ OWNER_NEEDS_CLAUDE = (
     "(harness.author = claude); откройте {links} и продолжите: dfl run"
 )
 
+#: этапы с паузой по пути (`--track`); без пути — оба
+TRACK_STAGES = {"personal": rp.PERSONAL_STAGES, "enterprise": rp.ENTERPRISE_STAGES}
+ALL_STAGES = tuple(dict.fromkeys(rp.PERSONAL_STAGES + rp.ENTERPRISE_STAGES))
 REVIEW_NEEDS_CLAUDE = (
     "--review: пауза на просмотр этапа работает только с автором claude "
     "(harness.author = claude) — поставьте его в конфиге или запустите без --review"
@@ -574,7 +577,7 @@ def run(
     (`resolve_review`); на продолжении он обязан совпасть с записанным.
     С автором не claude выход с паузы невозможен — `--review` с этапами
     отказывает сразу (RF-a)."""
-    if _review_selected(review) and not _author_is_claude():
+    if _review_selected(review, track) and not _author_is_claude():
         raise DflError(REVIEW_NEEDS_CLAUDE)  # RF-a: до регистрации и эффектов
     target = user_targets.register(cwd)
     code = _personal(target, subject, track, review)
@@ -610,19 +613,28 @@ def resolve_review(flag: str | None, stages: tuple[str, ...]) -> tuple[str, ...]
     return tuple(stage for stage in stages if stage in chosen)
 
 
-def _review_selected(flag: str | None) -> bool:
+def _review_selected(flag: str | None, track: str | None = None) -> bool:
     """Флаг `--review` выбирает хоть один этап (`all` или непустой список, не
-    `none`); имя, неизвестное обоим путям, — отказ «неизвестный этап» раньше
-    проверки автора (путь здесь ещё не выбран)."""
+    `none`); неизвестное имя — отказ «неизвестный этап» раньше проверки
+    автора. Перечень допустимых — этапы пути `track`; путь не выбран — по
+    обоим путям раздельно."""
     if flag is None or flag.strip().casefold() == "none":
         return False
     if flag.strip().casefold() == "all":
         return True
-    known = tuple(dict.fromkeys(rp.PERSONAL_STAGES + rp.ENTERPRISE_STAGES))
+    stages = TRACK_STAGES.get(track or "")
     try:
-        return bool(rp.parse_flag(flag, known))
+        return bool(rp.parse_flag(flag, stages or ALL_STAGES))
     except rp.ReviewError as exc:
-        raise DflError(str(exc)) from exc
+        if stages:
+            raise DflError(str(exc)) from exc
+        names = [n.strip() for n in flag.split(",") if n.strip()]
+        unknown = ", ".join(n for n in names if n not in ALL_STAGES)
+        raise DflError(
+            f"неизвестный этап: {unknown}; допустимы: личный путь: "
+            f"{', '.join(rp.PERSONAL_STAGES)}; enterprise: "
+            f"{', '.join(rp.ENTERPRISE_STAGES)}"
+        ) from exc
 
 
 def _check_review(
