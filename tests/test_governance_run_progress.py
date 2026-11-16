@@ -256,6 +256,23 @@ def test_event_line_strips_terminal_controls() -> None:
     assert title == "▶ TASK-2 «a[1mb» — начата"
 
 
+def _drain(master: int) -> bytes:
+    """Всё, что pty успел отдать: на Linux записи читаются кусками."""
+    import select
+
+    chunks = []
+    os.set_blocking(master, False)
+    while select.select([master], [], [], 0.2)[0]:
+        try:
+            data = os.read(master, 65536)
+        except (BlockingIOError, OSError):
+            break
+        if not data:
+            break
+        chunks.append(data)
+    return b"".join(chunks)
+
+
 # --- Task 3: экран и обёртка вызова раннера ---------------------------------
 
 
@@ -348,7 +365,7 @@ def test_live_line_on_tty(tmp_path: Path, monkeypatch) -> None:
     _, emit = _emit_list()
     rp.watched(_running_then_done(db), target_dir=str(tmp_path), prefix="WS-1-",
                tasks_rel=rel, emit=emit, period=0.05)  # fmt: skip
-    got = os.read(master, 65536)
+    got = _drain(master)
     os.close(slave)
     os.close(master)
     assert b"\r  TASK-001 \xc2\xb7 1 \xd0\xb8\xd0\xb7 1 \xc2\xb7 00:00" in got
@@ -376,7 +393,7 @@ def test_live_clear_after_capture_ends(monkeypatch) -> None:
     live("  TASK-001 · 00:01")
     monkeypatch.delenv(rp.SCREEN_FD_ENV)
     live.clear()
-    got = os.read(master, 4096)
+    got = _drain(master)
     os.close(slave)
     os.close(master)
     assert got.endswith(b"\r\x1b[K")
