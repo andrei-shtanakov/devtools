@@ -90,6 +90,16 @@ def test_flag_unknown_stage_refused(
     assert personal.runs == [] and not (env.tmp / "personal-runs").exists()
 
 
+def test_resolve_review_foreign_stage_is_dfl_refusal() -> None:
+    """Этап чужого пути в `resolve_review` — `DflError` с перечнем этапов
+    пути, а не голый `ReviewError` (маршрут без `--track`: путь известен
+    только по прогону; ревью #785)."""
+    with pytest.raises(dfl.DflError, match="допустимы: brief, design, decomposition"):
+        dfl.resolve_review("charter", rp.PERSONAL_STAGES)
+    with pytest.raises(dfl.DflError, match="допустимы: charter, requirements"):
+        dfl.resolve_review("brief", rp.ENTERPRISE_STAGES)
+
+
 # --- личный путь ---
 
 
