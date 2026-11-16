@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from lite import node_guard
 from lite import review_pause as rp
 
 
@@ -85,6 +86,54 @@ def test_ask_stop_returns_none() -> None:
 def test_confirm_removals_yes_no() -> None:
     got = rp.confirm_removals(["D-01", "D-02"], read=scripted("1", "нет"))
     assert got == {"D-01"}
+
+
+def test_confirm_removals_words() -> None:
+    """Ответ словами варианта: «удалить»/«снять» — да, «оставить» — нет."""
+    got = rp.confirm_removals(
+        ["D-01", "D-02", "D-03"], read=scripted("Удалить", "оставить", "снять")
+    )
+    assert got == {"D-01", "D-03"}
+
+
+def test_confirm_removals_shows_id_and_title(capsys) -> None:
+    """Номер и название пункта: искать D-02 в прошлых ответах не нужно."""
+    rp.confirm_removals(
+        ["D-02"], read=scripted("2"), titles={"D-02": "Экспорт отчётов в CSV"}
+    )
+    assert (
+        "Удалить D-02 — «Экспорт отчётов в CSV»? 1. удалить · 2. оставить"
+        in capsys.readouterr().out
+    )
+
+
+def test_confirm_removals_downgrade_asks_about_must(capsys) -> None:
+    """Пункт остался, но потерял Must — вопрос не «удалить»."""
+    rp.confirm_removals(
+        ["FR-01"], read=scripted("2"), titles={"FR-01": "Вход"}, downgraded={"FR-01"}
+    )
+    out = capsys.readouterr().out
+    assert "Снять Must с FR-01 — «Вход»? 1. снять · 2. оставить" in out
+    assert "Удалить" not in out
+
+
+def test_confirm_removals_without_title_keeps_id(capsys) -> None:
+    rp.confirm_removals(["D-09"], read=scripted("2"))
+    assert "Удалить D-09? 1. удалить · 2. оставить" in capsys.readouterr().out
+
+
+def test_item_titles_heading_or_body_start() -> None:
+    text = (
+        "#### D-01: Экспорт отчётов в CSV `traces: [FR-01]`\nтело\n\n"
+        "#### D-02\n\n**Priority**: Must\nПоиск по названию без учёта регистра, "
+        "с подсветкой совпадений и сортировкой по дате изменения\n"
+        "#### D-03 — Кэш\n"
+    )
+    titles = node_guard.item_titles(text)
+    assert titles["D-01"] == "Экспорт отчётов в CSV"
+    assert titles["D-02"].startswith("Поиск по названию без учёта регистра")
+    assert titles["D-02"].endswith("…") and len(titles["D-02"]) <= 61
+    assert titles["D-03"] == "Кэш"
 
 
 def test_confirm_removals_stop_is_none() -> None:

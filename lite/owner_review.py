@@ -81,7 +81,12 @@ def _round(
             )
         ]
     else:
-        answer = rp.confirm_removals(bad, read=read)
+        answer = rp.confirm_removals(
+            bad,
+            read=read,
+            titles=node_guard.item_titles(before),
+            downgraded=set(node_guard.node_items(after)),
+        )
         if answer is None:
             return PAUSED, ""
         allowed = answer

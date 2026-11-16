@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection, Mapping
 from pathlib import Path
 
 from governance.auto_tasks import notice
@@ -30,8 +31,8 @@ from lite.interview_chat import STOP_WORD, Read, read_answer
 
 PERSONAL_STAGES = ("brief", "design", "decomposition")
 DONE_WORDS = frozenset({"дальше", "да", "ок", "1"})
-_YES_WORDS = frozenset({"1", "да"})
-_NO_WORDS = frozenset({"2", "нет"})
+_YES_WORDS = frozenset({"1", "да", "удалить", "снять"})
+_NO_WORDS = frozenset({"2", "нет", "оставить"})
 
 
 class ReviewError(Exception):
@@ -74,17 +75,32 @@ def ask(stage_label: str, paths: list[Path], *, read: Read) -> str | None:
     return "" if answer.casefold() in DONE_WORDS else answer
 
 
-def confirm_removals(ids: list[str], *, read: Read) -> set[str] | None:
-    """Спросить по каждому id, можно ли удалить: разрешённые id; `None` —
-    `/стоп`/EOF (человек прервал — пауза у вызывающего, не «нет»)."""
+def confirm_removals(
+    ids: list[str],
+    *,
+    read: Read,
+    titles: Mapping[str, str] | None = None,
+    downgraded: Collection[str] = (),
+) -> set[str] | None:
+    """Спросить по каждому id, можно ли удалить (или снять Must у пункта из
+    `downgraded`): разрешённые id; `None` — `/стоп`/EOF (человек прервал —
+    пауза у вызывающего, не «нет»). Номер — всегда, название — из `titles`."""
     allowed: set[str] = set()
     for item in ids:
-        notice(f"удалить {item}? 1. да · 2. нет")
+        notice(_removal_question(item, (titles or {}).get(item, ""), downgraded))
         answer = read_answer(
             read, quick=lambda s: s.strip().casefold() in _YES_WORDS | _NO_WORDS
         )
         if answer is None:
             return None
-        if answer.casefold() in _YES_WORDS:
+        if answer.strip().casefold() in _YES_WORDS:
             allowed.add(item)
     return allowed
+
+
+def _removal_question(item: str, title: str, downgraded: Collection[str]) -> str:
+    """«Удалить D-02 — «Название»? 1. удалить · 2. оставить»."""
+    named = f"{item} — «{title}»" if title else item
+    if item in downgraded:
+        return f"Снять Must с {named}? 1. снять · 2. оставить"
+    return f"Удалить {named}? 1. удалить · 2. оставить"
