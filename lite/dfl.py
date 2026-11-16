@@ -611,8 +611,18 @@ def resolve_review(flag: str | None, stages: tuple[str, ...]) -> tuple[str, ...]
 
 
 def _review_selected(flag: str | None) -> bool:
-    """Флаг `--review` выбирает хоть один этап (не пусто и не `none`)."""
-    return flag is not None and flag.strip().casefold() not in ("", "none")
+    """Флаг `--review` выбирает хоть один этап (`all` или непустой список, не
+    `none`); имя, неизвестное обоим путям, — отказ «неизвестный этап» раньше
+    проверки автора (путь здесь ещё не выбран)."""
+    if flag is None or flag.strip().casefold() == "none":
+        return False
+    if flag.strip().casefold() == "all":
+        return True
+    known = tuple(dict.fromkeys(rp.PERSONAL_STAGES + rp.ENTERPRISE_STAGES))
+    try:
+        return bool(rp.parse_flag(flag, known))
+    except rp.ReviewError as exc:
+        raise DflError(str(exc)) from exc
 
 
 def _check_review(

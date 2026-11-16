@@ -26,6 +26,7 @@ _CODE_SPAN_RE = re.compile(r"`([^`]*)`")
 MACHINE_KEYS = (
     "traces", "traces_to", "scenarios", "delivers", "depends_on", "type",
     "owner", "owner_role", "resolution", "verification", "target", "status",
+    "reason", "parallel_group",
 )  # fmt: skip
 _MACHINE_FIELD_RE = re.compile(rf"^(?:{'|'.join(MACHINE_KEYS)}):\s")
 TITLE_MAX = 60

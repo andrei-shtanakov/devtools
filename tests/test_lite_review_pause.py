@@ -94,7 +94,7 @@ def test_confirm_removals_words_bound_to_question() -> None:
     kinds = {"D-01": "remove", "D-02": "remove", "FR-01": "downgrade"}
     got = rp.confirm_removals(
         ["D-01", "D-02", "FR-01"],
-        read=scripted("Удалить", "снять", "", "снять"),
+        read=scripted("Удалить", "снять", "2", "снять"),
         kinds=kinds,
     )
     assert got == {"D-01", "FR-01"}
@@ -180,6 +180,26 @@ def test_item_titles_colon_in_title_and_field_lines_in_body() -> None:
     titles = node_guard.item_titles(text)
     assert titles["DT-05"] == "dfl: добавить флаг --review"
     assert titles["DT-06"] == "Команда удаления"
+
+
+def test_item_titles_skip_reason_and_parallel_group() -> None:
+    """`reason:` (Q в 20-design.md) и `parallel_group:` (DT) — поля (#778)."""
+    text = (
+        "#### Q-01\nreason: продуктовая граница\nГде хранить токены?\n"
+        "#### DT-07\nparallel_group: A\nСборка индекса\n"
+    )
+    titles = node_guard.item_titles(text)
+    assert titles == {"Q-01": "Где хранить токены?", "DT-07": "Сборка индекса"}
+
+
+def test_confirm_removals_unclear_answer_asks_again(capsys) -> None:
+    """Непонятный ответ — вопрос повторяется с подсказкой, а не молчаливое
+    «нет» после пустой строки (#778)."""
+    got = rp.confirm_removals(["D-01"], read=scripted("а что это?", "1"))
+    assert got == {"D-01"}
+    out = capsys.readouterr().out
+    assert out.count("Удалить D-01?") == 2
+    assert rp.UNCLEAR_ANSWER in out
 
 
 def test_change_kinds() -> None:

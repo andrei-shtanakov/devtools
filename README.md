@@ -352,7 +352,9 @@ remediation-issue у уже помеченного родителя). Повто
 
 Включить: `dfl run --review design,decomposition` (имена: `brief`, `charter`,
 `requirements`, `behaviour-spec`, `design`, `acceptance`, `decomposition`),
-`--review all` — все этапы пути, `--review none` — без пауз. Выбор фиксируется
+`--review all` — все этапы пути, `--review none` — без пауз. Этап чужого пути
+(`brief` на enterprise, `charter` на личном) во флаге — отказ с перечнем
+допустимых, в конфиге — молча не действует (конфиг общий). Выбор фиксируется
 при старте прогона; на продолжении другой `--review` — отказ (сначала
 `dfl abandon`). То же в конфиге: `[review] pause_after = ["design"]`; флаг
 сильнее конфига. Таблицу `[review]` понимают загрузчик devtools (#775) и

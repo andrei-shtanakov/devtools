@@ -33,6 +33,7 @@ PERSONAL_STAGES = ("brief", "design", "decomposition")
 DONE_WORDS = frozenset({"дальше", "да", "ок", "1"})
 _YES_WORDS = frozenset({"1", "да"})
 _NO_WORDS = frozenset({"2", "нет", "оставить", "оставить как было"})
+UNCLEAR_ANSWER = "не понял ответ — номер или слово варианта"
 #: вид правки → (вопрос, слово согласия): слово чужого вопроса — не согласие
 REMOVE, DOWNGRADE, CHANGE = "remove", "downgrade", "change"
 _QUESTIONS = {
@@ -99,11 +100,23 @@ def confirm_removals(
         title = (titles or {}).get(item, "")
         notice(question.format(named=f"{item} — «{title}»" if title else item))
         yes = _YES_WORDS | {word}
-        answer = read_answer(
-            read, quick=lambda s, yes=yes: s.strip().casefold() in yes | _NO_WORDS
-        )
+        answer = _choice(read, yes)
+        while answer == "":
+            notice(UNCLEAR_ANSWER)
+            notice(question.format(named=f"{item} — «{title}»" if title else item))
+            answer = _choice(read, yes)
         if answer is None:
             return None
-        if answer.strip().casefold() in yes:
+        if answer in yes:
             allowed.add(item)
     return allowed
+
+
+def _choice(read: Read, yes: frozenset[str]) -> str | None:
+    """Один ответ строкой: слово согласия/отказа (в нижнем регистре), `""` —
+    непонятно (спросить снова), `None` — `/стоп`/EOF."""
+    answer = read_answer(read, quick=lambda _s: True)
+    if answer is None:
+        return None
+    word = answer.strip().casefold()
+    return word if word in yes | _NO_WORDS else ""
