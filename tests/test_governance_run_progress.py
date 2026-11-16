@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from governance import run_progress as rp
@@ -128,3 +129,111 @@ def test_live_and_summary_lines() -> None:
     assert rp.live_line("TASK-005", 5, 16, 197) == "  TASK-005 · 5 из 16 · 03:17"
     assert rp.live_line("TASK-005", 1, 0, 5) == "  TASK-005 · 00:05"
     assert rp.summary_line(4, 16, 3725) == "реализация: сделано 4 из 16 · 1:02:05"
+
+
+# --- Task 2: наблюдатель -----------------------------------------------------
+
+T0 = datetime(2026, 11, 17, 10, 0, 0)
+
+
+def _ts(seconds: float) -> str:
+    return (T0 + timedelta(seconds=seconds)).isoformat()
+
+
+def _at(seconds: float) -> float:
+    return (T0 + timedelta(seconds=seconds)).timestamp()
+
+
+def _watcher(db: Path, *, live: bool = True):
+    out: list[str] = []
+    lives: list[str] = []
+    w = rp.Watcher(
+        db,
+        rp.read_tasks(TASKS),
+        emit=out.append,
+        live=lives.append if live else None,
+    )
+    return w, out, lives
+
+
+def test_baseline_suppresses_old_events(tmp_path: Path) -> None:
+    db = _db(tmp_path / "s.db")
+    _task(db, "TASK-001", "success", _ts(0), _ts(60))
+    w, out, _ = _watcher(db)
+    w.begin(_at(100))
+    w.tick(_at(101))
+    assert out == []
+    assert w.summary(_at(160)) == "реализация: сделано 1 из 3 · 01:00"
+
+
+def test_started_then_done_lines(tmp_path: Path) -> None:
+    db = _db(tmp_path / "s.db")
+    w, out, _ = _watcher(db)
+    w.begin(_at(0))
+    _task(db, "TASK-001", "running", _ts(1))
+    w.tick(_at(2))
+    _task(db, "TASK-001", "success", _ts(1), _ts(1123))
+    w.tick(_at(1124))
+    w.tick(_at(1125))
+    assert out == ["▶ TASK-001 «Команда add» — начата", "✓ TASK-001 готова · 18:42"]
+
+
+def test_retry_event_and_timer_reset(tmp_path: Path) -> None:
+    db = _db(tmp_path / "s.db")
+    w, out, lives = _watcher(db)
+    w.begin(_at(0))
+    _task(db, "TASK-002", "running", _ts(0))
+    w.tick(_at(10))
+    _attempt(db, "TASK-002", _ts(50), False, "тесты красные")
+    w.tick(_at(51))  # попытка записана, статус ещё running — не событие
+    _task(db, "TASK-002", "running", _ts(60))
+    w.tick(_at(65))
+    assert out[-1] == "↻ TASK-002 «Команда find» — попытка 2"
+    assert lives[-1] == "  TASK-002 · 1 из 3 · 00:05"
+    _task(db, "TASK-002", "success", _ts(60), _ts(120))
+    w.tick(_at(121))
+    assert out[-1] == "✓ TASK-002 готова · 02:00"  # с первого старта
+
+
+def test_failed_line_has_first_error_line(tmp_path: Path) -> None:
+    db = _db(tmp_path / "s.db")
+    w, out, _ = _watcher(db)
+    w.begin(_at(0))
+    _task(db, "TASK-003", "running", _ts(0))
+    w.tick(_at(1))
+    _attempt(db, "TASK-003", _ts(5), False, "лимит исчерпан\nподробности")
+    _task(db, "TASK-003", "failed", _ts(0), _ts(5))
+    w.tick(_at(6))
+    assert out[-1] == "✗ TASK-003 не прошла: лимит исчерпан"
+
+
+def test_live_line_counts_and_elapsed(tmp_path: Path) -> None:
+    db = _db(tmp_path / "s.db")
+    _task(db, "TASK-001", "success", _ts(0), _ts(10))
+    w, _, lives = _watcher(db)
+    w.begin(_at(10))
+    _task(db, "TASK-002", "running", _ts(20))
+    w.tick(_at(25))
+    assert lives[-1] == "  TASK-002 · 2 из 3 · 00:05"
+
+
+def test_unavailable_once_after_30s(tmp_path: Path) -> None:
+    w, out, _ = _watcher(tmp_path / "нет.db")
+    w.begin(_at(0))
+    w.tick(_at(29))
+    assert out == []
+    w.tick(_at(31))
+    w.tick(_at(40))
+    assert out == [rp.UNAVAILABLE.format(path=tmp_path / "нет.db")]
+
+
+def test_tick_swallows_errors(tmp_path: Path) -> None:
+    db = _db(tmp_path / "s.db")
+
+    def boom(_line: str) -> None:
+        raise RuntimeError("экран закрыт")
+
+    w = rp.Watcher(db, rp.read_tasks(TASKS), emit=boom, live=boom)
+    w.begin(_at(0))
+    _task(db, "TASK-001", "running", _ts(0))
+    w.tick(_at(1))  # не бросает
