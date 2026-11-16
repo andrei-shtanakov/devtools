@@ -6646,99 +6646,12 @@ def test_gate_orphan_beh_stops(tmp_path: Path, runs_root, monkeypatch) -> None:
     assert "error GC-ORPHAN: BEH-99" in findings
 
 
-def test_gate_warning_survives_a_later_fatal_in_the_same_gate_call(
-    tmp_path: Path, runs_root, monkeypatch
-) -> None:
-    """Находки НАКАПЛИВАЮТСЯ: non-fatal warning не затирается поздним fatal.
-
-    Round 7 ревью PR #161 (минор, контракт владельца): каждая находка в
-    `_step_gate` писала gate-findings.txt через `write_text`, ЗАТИРАЯ
-    предыдущую запись целиком. Для fatal-веток это было безопасно — стоп
-    сразу же, — но non-fatal `warning GC-DT-GRAPH` (round 6) единственная
-    НЕ останавливает, и более поздний fatal стирал её молча.
-
-    Пара находок подобрана заново под волновой режим (S13). Прежняя —
-    warning из decomposition плюс fatal GC-AC-COVERAGE — в волнах
-    недостижима: покрытие AC краснеет на W4 и останавливает прогон
-    раньше, чем W5 вообще авторит decomposition. Здесь обе находки родом
-    из ОДНОЙ волны W5 и из одного вызова гейта: warning даёт осиротевший
-    путь в `verifies`, fatal — неразрешимый `sources` в `delivers`
-    (GC-DT-CONTRACT), и его ветка лежит НИЖЕ по `_step_gate`, чем сбор
-    warnings. Расстояние между записями то же, что проверял прежний
-    тест, — именно оно и есть предмет.
-    """
-    beh_two = (
-        _DEFAULT_BEHAVIOUR_BODY
-        + "\n#### BEH-02: y\n`traces: [FR-01]`\n- **checked_by**: "
-        "`kind: integration` `target: tests/test_y.py`\n"
-    )
-
-    class _Warned(FakeOps):
-        def author(self, call, kind: str, subject: str) -> int:
-            target_dir, bundle_dir = call.target_dir, call.bundle_dir
-            if kind == "behaviour-spec":
-                self.calls.append(("author", kind))
-                self.authored.append(kind)
-                path = Path(target_dir) / bundle_dir / "15-behaviour-spec.md"
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(beh_two, encoding="utf-8")
-                return 0
-            if kind == "decomposition":
-                self.calls.append(("author", kind))
-                self.authored.append(kind)
-                bundle = Path(target_dir) / bundle_dir
-                design_pin = blob_sha1(
-                    (bundle / "20-design.md").read_text(encoding="utf-8")
-                )
-                acceptance_pin = blob_sha1(
-                    (bundle / "25-acceptance.md").read_text(encoding="utf-8")
-                )
-                path = bundle / "30-decomposition.md"
-                path.write_text(
-                    "---\n"
-                    "spec_stage: decomposition\n"
-                    "dt_contract_version: 2\n"
-                    "status: draft\n"
-                    "owner_role: tech-lead\n"
-                    "traces_to: [design, acceptance]\n"
-                    "upstream_hashes:\n"
-                    f'  design: "{design_pin}"\n'
-                    f'  acceptance: "{acceptance_pin}"\n'
-                    "---\n"
-                    "## Задачи\n\n"
-                    "#### DT-01: x · type: implement · owner: dev\n"
-                    "scenarios: [BEH-01]\n"
-                    "depends_on: []\n"
-                    "parallel_group: solo\n\n"
-                    "delivers: []\n"
-                    "#### DT-02: y · type: verify · owner: qa\n"
-                    "scenarios: [BEH-02]\n"
-                    "depends_on: [DT-01]\n"
-                    "delivered_by: [DT-01]\n"
-                    "parallel_group: solo\n"
-                    "delivers: []\n"
-                    "verifies:\n  - tests/test_typo.py\n\n"
-                    "## Инварианты графа\n\nСоблюдены.\n\n"
-                    "## Порядок и параллельность\n\nПоследовательно.\n\n"
-                    "## Вне объёма\n\nНичего не исключено.\n",
-                    encoding="utf-8",
-                )
-                return 0
-            return super().author(call, kind, subject)
-
-    ops = _with_delivers(_Warned, "acceptance#AC-99")(facts=GREEN_PR_FACTS)
-    state = _drive_waves_to(tmp_path, "r-warn-then-fatal", ops, monkeypatch, 5)
-
-    assert state.status == "stopped_gate", "поздняя находка обязана остановить"
-    findings = (runner.run_dir("r-warn-then-fatal") / "gate-findings.txt").read_text(
-        encoding="utf-8"
-    )
-    assert "GC-DT-CONTRACT" in findings and "AC-99" in findings, findings
-    assert "warning GC-DT-GRAPH" in findings, (
-        "warning затёрт поздней fatal-записью — ровно тот баг, "
-        f"ради которого находки накапливают: {findings}"
-    )
-    assert "tests/test_typo.py" in findings, findings
+# `test_gate_warning_survives_a_later_fatal_in_the_same_gate_call` удалён с
+# devtools#767: его warning давал осиротевший путь в `verifies`, а сирота
+# теперь fatal (GC-DT-GRAPH стопит раньше GC-DT-CONTRACT). Оставшийся
+# non-fatal канал — `warning GC-DT-CONTRACT` — пишется в той же записи,
+# что и его error; следующий fatal (GC-AC-COVERAGE) в волнах недостижим
+# после W5 (см. прежний докстринг в истории git).
 
 
 # --- Task 9: сквозной смоук decomposition-узла + deliver ---------------------
