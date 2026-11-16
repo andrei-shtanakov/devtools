@@ -445,6 +445,7 @@ class Ops(Protocol):
         *,
         labels: tuple[str, ...] = ("inbox",),
         state: str = "open",
+        author: str | None = None,
     ) -> int | None: ...
 
     def issue_state(self, repo_slug: str, number: int) -> str | None: ...
@@ -2821,10 +2822,12 @@ class RealOps(BriefFactsMixin):
         *,
         labels: tuple[str, ...] = ("inbox",),
         state: str = "open",
+        author: str | None = None,
     ) -> int | None:
         """Номер issue (по умолчанию открытого inbox-issue), чьё body
-        начинается с body_prefix; `labels`/`state` — фильтр списка (#771:
-        issue ручной проверки — без меток, любого состояния).
+        начинается с body_prefix; `labels`/`state`/`author` — фильтр списка
+        (#771: issue ручной проверки — без меток, любого состояния, только
+        свой, `author="@me"`: маркер в чужом issue не принимается за свой).
 
         `None` ТОЛЬКО когда такого issue нет; сбой самого запроса — rc != 0,
         битый или неожиданный по форме JSON — поднимает `RuntimeError` (как
@@ -2842,6 +2845,7 @@ class RealOps(BriefFactsMixin):
                 *[f for label in labels for f in ("--label", label)],
                 "--state",
                 state,
+                *(["--author", author] if author else []),
                 "--limit",
                 "500",
                 "--json",

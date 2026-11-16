@@ -1031,8 +1031,15 @@ def test_find_issue_all_states_without_label(monkeypatch):
     calls = _install_fake_run(monkeypatch, returncode=0, stdout=json.dumps(payload))
     assert RealOps().find_issue(REPO_SLUG, "<!-- m -->", labels=(), state="all") == 24
     argv = calls[0].argv
-    assert "--label" not in argv
+    assert "--label" not in argv and "--author" not in argv
     assert argv[argv.index("--state") + 1] == "all"
+
+
+def test_find_issue_author_filter(monkeypatch):
+    calls = _install_fake_run(monkeypatch, returncode=0, stdout="[]")
+    RealOps().find_issue(REPO_SLUG, "<!-- m -->", labels=(), author="@me")
+    argv = calls[0].argv
+    assert argv[argv.index("--author") + 1] == "@me"
 
 
 def test_issue_state_reads_state(monkeypatch):

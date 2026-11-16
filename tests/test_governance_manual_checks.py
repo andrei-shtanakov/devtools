@@ -143,8 +143,8 @@ class _Ops:
         self.found, self.comments = found, list(comments)
         self.calls: list[tuple] = []
 
-    def find_issue(self, slug, prefix, *, labels=("inbox",), state="open"):
-        self.calls.append(("find_issue", prefix, labels, state))
+    def find_issue(self, slug, prefix, *, labels=("inbox",), state="open", author=None):
+        self.calls.append(("find_issue", prefix, labels, state, author))
         return self.found
 
     def create_issue(self, slug, title, body, *, labels=("inbox",)):
@@ -200,7 +200,13 @@ def test_publish_recovers_issue_by_marker() -> None:
     record = _record((CHECK, {**NOT_DONE, "issue": None}))
     _publish(ops, record)
     assert "create_issue" not in ops.names()
-    assert ("find_issue", mc.issue_marker("R1", "BEH-02"), (), "all") in ops.calls
+    assert (
+        "find_issue",
+        mc.issue_marker("R1", "BEH-02"),
+        (),
+        "all",
+        "@me",
+    ) in ops.calls
     assert record["answers"]["BEH-02"]["issue"] == 31
 
 

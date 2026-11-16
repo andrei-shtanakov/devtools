@@ -220,7 +220,7 @@ def publish(
         if answer.get("verdict") != NOT_DONE or answer.get("issue"):
             continue
         marker = issue_marker(run_id, check.beh_id)
-        number = ops.find_issue(repo_slug, marker, labels=(), state="all")
+        number = ops.find_issue(repo_slug, marker, labels=(), state="all", author="@me")
         if number is None:
             body = issue_body(check, answer, run_id=run_id, pr_url=pr_url)
             number = ops.create_issue(repo_slug, issue_title(check), body, labels=())
