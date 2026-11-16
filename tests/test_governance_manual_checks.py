@@ -245,3 +245,29 @@ def test_publish_saves_after_issue() -> None:
     ops = _Ops()
     _publish(ops, _record((CHECK, {**NOT_DONE, "issue": None})), saves)
     assert saves[0] == ["find_issue", "create_issue"]
+
+
+# --- финальное ревью #771 ----------------------------------------------------
+
+
+def test_collect_raises_on_dt_form_problems() -> None:
+    broken = DT.replace(
+        "#### DT-02: Надёжность · type: verify", "#### DT-02 Надёжность"
+    )
+    with pytest.raises(ValueError, match="DT-02"):
+        mc.collect(BEH, broken)
+
+
+def test_collect_raises_on_no_tasks() -> None:
+    with pytest.raises(ValueError, match="задач"):
+        mc.collect(BEH, "## Задачи\n")
+
+
+def test_pr_comment_escapes_pipes_and_newlines() -> None:
+    answer = {**NOT_DONE, "note": "4/10 | 6/10\nпотом 5/10"}
+    text = mc.pr_comment([CHECK], {"BEH-02": answer}, run_id="R1")
+    row = next(ln for ln in text.splitlines() if ln.startswith("| BEH-02"))
+    assert (
+        row
+        == "| BEH-02 | TASK-002 | не выполнено | 4/10 \\| 6/10<br>потом 5/10 | #24 |"
+    )

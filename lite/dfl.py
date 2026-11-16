@@ -1545,12 +1545,24 @@ def _manual_step(state: rs.RunState, url: str) -> int | None:
         pr=pr,
         pr_url=url,
         run_id=state.run_id,
-        save=lambda: rs.save(state),
+        save=lambda: _manual_save(state),
     )
     if reason is None:
         return None
     say(reason)
     return 0 if ma.is_wait(reason) else 1
+
+
+def _manual_save(state: rs.RunState) -> None:
+    """Запись ответов под блокировкой поверх свежего run.json: человек думает
+    сколько угодно, чужие записи прогона за это время не теряются."""
+    try:
+        with run_lock.run_lock(state.run_id):
+            now = rs.load(state.run_id)
+            now.ops[MANUAL_OP] = state.ops[MANUAL_OP]
+            rs.save(now)
+    except run_lock.LockBusy as exc:
+        raise DflError(f"{exc} — дождитесь конца dfl run и повторите") from exc
 
 
 def _select_customer(
@@ -1697,12 +1709,21 @@ def status(cwd: Path) -> int:
             _manual_status(state.ops.get(MANUAL_OP) or {}, state.repo_slug)
         for key, op_status in _op_statuses(state).items():
             say(f"  {key}: {op_status}", 2)
-    active = personal_state.active_for(user_targets.slug_from_url(target.repo_url))
+    active_slug = user_targets.slug_from_url(target.repo_url)
+    active = personal_state.active_for(active_slug)
     if active is not None:
         line = f"личный прогон {active.run_id}: шаг {active.step}"
         say(f"{line} — {active.stop_reason}" if active.stop_reason else line)
         if verbosity() >= 1:
             _manual_status(active.manual, active.repo_slug)
+    for done in personal_state.finished_for(active_slug):
+        tail = mc.summary(mc.checks_of(done.manual), done.manual.get("answers") or {})
+        if not tail and not (verbosity() >= 1 and done.manual.get("checks")):
+            continue
+        line = f"личный прогон {done.run_id}: закончен"
+        say(f"{line}; {tail}" if tail else line)
+        if verbosity() >= 1:
+            _manual_status(done.manual, done.repo_slug)
     return 0
 
 

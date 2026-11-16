@@ -10,6 +10,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -2400,3 +2401,95 @@ def test_status_verbose_shows_issue_state(env: Env, monkeypatch, capsys) -> None
     out = capsys.readouterr().out
     assert "BEH-01 (TASK-001): не выполнено — 5/10 → issue #24 (закрыт" in out
     assert "выполнено позже" in out
+
+
+def test_manual_answers_keep_concurrent_ops(env: Env, monkeypatch, capsys) -> None:
+    """Ревью I1: запись ответов — под блокировкой поверх свежего run.json."""
+    _manual_eng(env)
+    _tty(monkeypatch)
+    seen = iter(["1"])
+
+    def read(prompt: str) -> str | None:
+        fresh = rs.load("WS-1-eng-b")
+        fresh.ops["other"] = {"status": "completed"}
+        rs.save(fresh)  # чужая запись, пока человек думает
+        return next(seen, None)
+
+    monkeypatch.setattr(dfl.ic, "stdin_read", read)
+    assert env.run("run", "--subject", "тема") == 0
+    eng = rs.load("WS-1-eng-b")
+    assert eng.ops["other"] == {"status": "completed"}
+    assert eng.ops["manual-checks"]["status"] == "completed"
+
+
+def _loop_accepts(monkeypatch, env: Env, *, manual: bool) -> None:
+    """Шаг конвейера сам завершает приёмку (самый частый путь)."""
+    eng = _manual_eng(env, manual=manual)
+    del eng.ops["code-accept"]
+    rs.save(eng)
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        _accepted(rs.load("WS-1-eng-b"))
+        return 0
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+
+
+def test_loop_accepts_then_asks_same_step(env: Env, monkeypatch, capsys) -> None:
+    """Ревью I5: приёмка завершилась этим шагом — вопросы сейчас же."""
+    _loop_accepts(monkeypatch, env, manual=True)
+    _tty(monkeypatch)
+    _answers(monkeypatch, "1")
+    assert env.run("run", "--subject", "тема") == 0
+    out = capsys.readouterr().out
+    assert len(env.spec_calls) == 1
+    assert out.index("Ручная проверка BEH-01") < out.index("PR с кодом проверен")
+    assert rs.load("WS-1-eng-b").ops["manual-checks"]["status"] == "completed"
+
+
+def test_loop_accepts_old_run_unchanged(env: Env, monkeypatch, capsys) -> None:
+    _loop_accepts(monkeypatch, env, manual=False)
+    _tty(monkeypatch)
+    asked = _answers(monkeypatch, "1")
+    assert env.run("run", "--subject", "тема") == 0
+    out = capsys.readouterr().out
+    assert asked == [] and "Ручная проверка" not in out
+    assert "PR с кодом проверен" not in out  # итог печатает сам шаг, как раньше
+
+
+def test_loop_nonzero_code_skips_questions(env: Env, monkeypatch, capsys) -> None:
+    _loop_accepts(monkeypatch, env, manual=True)
+    monkeypatch.setattr(spec_loop, "main", lambda argv: 3)
+    _tty(monkeypatch)
+    asked = _answers(monkeypatch, "1")
+    assert env.run("run", "--subject", "тема") == 3
+    assert asked == []
+
+
+def test_status_shows_done_personal_run_summary(env: Env, monkeypatch, capsys) -> None:
+    """Ревью I2: законченный личный прогон с непройденной проверкой виден."""
+    from lite.personal import state as pstate
+
+    _status_target(env, monkeypatch)
+    monkeypatch.setattr(pstate, "PERSONAL_ROOT", env.tmp / "personal")
+    run = pstate.new_personal_run(
+        "тема", REPO, SLUG, str(env.tmp / "target"), date.today()
+    )
+    run.step = "done"
+    check = {"beh_id": "BEH-01", "title": "t", "task_id": "TASK-001", "steps": None}
+    run.manual = {
+        "status": "completed",
+        "checks": [check],
+        "answers": {"BEH-01": {"verdict": "not_done", "note": "", "issue": 24}},
+    }
+    pstate.save(run)
+    env.forge = ManualForge()
+    env.forge.issue_states[24] = "OPEN"
+    assert env.run("-v", "status") == 0
+    out = capsys.readouterr().out
+    assert (
+        f"личный прогон {run.run_id}: закончен; ручные проверки — не выполнено: 1"
+        in out
+    )
+    assert "BEH-01 (TASK-001): не выполнено → issue #24 (открыт)" in out

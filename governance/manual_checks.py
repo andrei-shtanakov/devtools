@@ -69,7 +69,11 @@ def collect(behaviour_text: str, decomposition_text: str) -> list[ManualCheck]:
     Ошибка разбора — `ValueError` наружу: «бандл не прочитан» ≠ «проверок нет».
     """
     scenarios = {s.beh_id: s for s in parse_behaviour(behaviour_text)}
-    dts, _errors = parse_dt_tasks(decomposition_text)
+    dts, problems = parse_dt_tasks(decomposition_text)
+    if problems:
+        raise ValueError("декомпозиция не разбирается: " + "; ".join(problems))
+    if not dts:
+        raise ValueError("в декомпозиции нет задач")
     waived = _waived(behaviour_text)
     seen: set[str] = set()
     out: list[ManualCheck] = []
@@ -123,6 +127,11 @@ def issue_body(check: ManualCheck, answer: Mapping, *, run_id: str, pr_url: str)
     )
 
 
+def _cell(text: str) -> str:
+    """Текст в ячейку markdown-таблицы: `|` и переводы строк не ломают её."""
+    return text.replace("|", "\\|").replace("\r\n", "\n").replace("\n", "<br>")
+
+
 def comment_marker(run_id: str) -> str:
     """Первая строка комментария в PR: по ней повтор его узнаёт."""
     return f"<!-- dfl-manual-checks run={run_id} -->"
@@ -142,7 +151,7 @@ def pr_comment(
     for c in checks:
         a = answers.get(c.beh_id) or {}
         word = VERDICT_WORDS.get(str(a.get("verdict")), "—")
-        note = str(a.get("note") or "").strip() or "—"
+        note = _cell(str(a.get("note") or "").strip()) or "—"
         issue = f"#{a['issue']}" if a.get("issue") else "—"
         rows.append(f"| {c.beh_id} | {c.task_id} | {word} | {note} | {issue} |")
     return "\n".join(rows)

@@ -30,6 +30,13 @@ parallel_group: solo
 """
 
 
+AUTO_BEH = "#### BEH-09: x\n- **checked_by**: `kind: pytest` `target: tests/t.py`\n"
+AUTO_DT = (
+    "#### DT-01: a · type: implement · owner: dev\n"
+    "scenarios: [BEH-09]\ndepends_on: []\nparallel_group: solo\n"
+)
+
+
 def _reader(lines: Iterable[str]):
     it = iter(lines)
     return lambda _prompt: next(it, None)
@@ -111,10 +118,7 @@ def _settle(record: dict, lines: Iterable[str], *, tty: bool = True, ops=None,
 def test_settle_no_checks_is_silent(capsys) -> None:
     record: dict = {}
     ops = _Ops()
-    assert (
-        _settle(record, [], ops=ops, texts=lambda: ("# пусто\n#### BEH-09: x\n", ""))
-        is None
-    )
+    assert _settle(record, [], ops=ops, texts=lambda: (AUTO_BEH, AUTO_DT)) is None
     assert record["status"] == "completed" and ops.calls == []
     assert capsys.readouterr().out == ""
 

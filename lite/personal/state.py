@@ -168,6 +168,24 @@ def active_for(repo_slug: str, subject: str | None = None) -> PersonalRun | None
     return None
 
 
+def finished_for(repo_slug: str) -> list[PersonalRun]:
+    """Законченные (`done`) личные прогоны репо, новые первыми: `dfl status`
+    показывает их ответы на ручные проверки (#771). Нечитаемые — пропуск."""
+    root = personal_root()
+    if not root.is_dir():
+        return []
+    runs: list[tuple[float, PersonalRun]] = []
+    for path in root.glob("*/run.json"):
+        try:
+            run = load(path.parent.name)
+            mtime = path.stat().st_mtime
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+        if run.repo_slug == repo_slug and run.step == "done":
+            runs.append((mtime, run))
+    return [run for _, run in sorted(runs, key=lambda item: item[0], reverse=True)]
+
+
 def abandoned_root() -> Path:
     """Каталог брошенных личных прогонов (рядом с `personal_root()`)."""
     return personal_root().parent / "personal-runs-abandoned"
