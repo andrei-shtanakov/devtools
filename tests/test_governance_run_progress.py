@@ -237,3 +237,15 @@ def test_tick_swallows_errors(tmp_path: Path) -> None:
     w.begin(_at(0))
     _task(db, "TASK-001", "running", _ts(0))
     w.tick(_at(1))  # не бросает
+
+
+def test_event_line_strips_terminal_controls() -> None:
+    """Ошибка из вывода агента не управляет терминалом оператора."""
+    line = rp.event_line(
+        "failed", "TASK-1\x1b]0;x\x07", "t", error="\x1b[2Jстерто\x9b31m" + "я" * 500
+    )
+    assert "\x1b" not in line and "\x07" not in line and "\x9b" not in line
+    assert line.startswith("✗ TASK-1]0;x не прошла: [2Jстерто31m")
+    assert len(line) < 260
+    title = rp.event_line("started", "TASK-2", "a\x1b[1mb")
+    assert title == "▶ TASK-2 «a[1mb» — начата"

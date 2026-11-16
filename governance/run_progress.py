@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -115,6 +116,17 @@ def fmt_duration(seconds: float) -> str:
     return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes:02d}:{secs:02d}"
 
 
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+#: длина текста из БД в строке события (ошибка агента бывает огромной)
+_MAX_TEXT = 200
+
+
+def _clean(text: str) -> str:
+    """Текст из БД/tasks.md на экран: без управляющих символов, с потолком."""
+    cleaned = _CONTROL.sub("", text)
+    return cleaned if len(cleaned) <= _MAX_TEXT else cleaned[: _MAX_TEXT - 1] + "…"
+
+
 def event_line(
     kind: str,
     task_id: str,
@@ -124,7 +136,9 @@ def event_line(
     attempt: int | None = None,
     error: str | None = None,
 ) -> str:
-    """Строка события задачи (форма дизайна §3.1)."""
+    """Строка события задачи (форма дизайна §3.1); текст из БД очищен от
+    управляющих символов терминала."""
+    task_id, title = _clean(task_id), _clean(title)
     if kind == "started":
         return f"▶ {task_id} «{title}» — начата"
     if kind == "done":
@@ -132,13 +146,14 @@ def event_line(
     if kind == "retry":
         return f"↻ {task_id} «{title}» — попытка {attempt}"
     first = (error or "").strip().splitlines()
-    return f"✗ {task_id} не прошла: {first[0] if first else 'причина не записана'}"
+    reason = _clean(first[0]) if first else "причина не записана"
+    return f"✗ {task_id} не прошла: {reason}"
 
 
 def live_line(task_id: str, ordinal: int, total: int, seconds: float) -> str:
     """Живая строка: задача, «N из M» (если M известно), отсчёт."""
     count = f" · {ordinal} из {total}" if total else ""
-    return f"  {task_id}{count} · {fmt_duration(seconds)}"
+    return f"  {_clean(task_id)}{count} · {fmt_duration(seconds)}"
 
 
 def summary_line(done: int, total: int, seconds: float) -> str:
