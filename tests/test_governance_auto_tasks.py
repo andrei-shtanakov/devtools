@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -435,6 +436,24 @@ def test_spec_run_failed_attempt_with_open_partial_pr_stops_with_banner(state, c
         "exit": 2,
         "failed_prs": [7],
     }
+
+
+def test_spec_run_partial_stop_reaches_screen(state, monkeypatch):
+    """Под `dfl` stdout уходит в лог: плашка и причина стопа обязаны
+    дойти до экрана оператора через `DFL_SCREEN_FD` (ревью #767)."""
+    rs.op_start(state, "spec-run", before=[5], exit=2)
+    ops = _ops()
+    ops.prs = [_run_pr(5), _run_pr(7)]
+    ops.tasks_md = _tasks_md(1, 2)
+    r, w = os.pipe()
+    monkeypatch.setenv(auto_tasks.SCREEN_FD_ENV, str(w))
+    assert auto_tasks._spec_run(state, ops) is None
+    os.close(w)
+    screen = os.read(r, 65536).decode()
+    os.close(r)
+    assert "▶ продолжаю проект «s» · o/alpha" in screen
+    assert "сделано 1 из 2 задач" in screen
+    assert run_resume.resume_stop("spec-runner/run-7", 7) in screen
 
 
 def test_spec_run_banner_without_progress(state, capsys):

@@ -197,16 +197,22 @@ def _partial_stop(
     """
     found = run_resume.resume_candidates(prs, before)
     if len(found) > 1:
-        _stop(run_resume.several_stop([n for n, _head in found]))
+        _screen_stop(run_resume.several_stop([n for n, _head in found]))
         return True
     if not found:
         return False
     pr, branch = found[0]
     tasks_rel = f"spec/{state.ws_id}-tasks.md"
     progress = run_resume.read_progress(ops, state.target_dir, branch, tasks_rel)
-    print(run_resume.banner(state.subject, state.repo_slug, branch, progress))
-    _stop(run_resume.resume_stop(branch, pr))
+    notice(run_resume.banner(state.subject, state.repo_slug, branch, progress))
+    _screen_stop(run_resume.resume_stop(branch, pr))
     return True
+
+
+def _screen_stop(reason: str) -> None:
+    """`_stop`, но и на экран оператора: под `dfl` stdout — это лог, а
+    действие («влейте / закройте PR») человек должен увидеть сразу."""
+    notice(f"spec-loop (test): {reason}")
 
 
 #: реализация идёт долго и молча — как смотреть прогресс (devtools#765 б)
