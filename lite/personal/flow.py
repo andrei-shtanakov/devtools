@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from governance import df_config, run_resume
+from governance import manual_checks as mc
 from governance.author_launch import AuthorCall, config_mode, launch_author
 from governance.auto_tasks import RUN_BRANCH_PREFIX, TUI_HINT, notice
 from governance.edge_check import override
@@ -29,6 +30,7 @@ from governance.edge_check.check import run_check
 from governance.facts import Outcome as FactOutcome
 from governance.ops import Ops
 from lite import edge_journal as ej
+from lite import manual_ask as ma
 from lite import node_guard
 from lite import owner_review as orv
 from lite import review_pause as rp
@@ -954,18 +956,57 @@ def _take_new_pr(ctx: _Ctx, new: list[int]) -> bool:
 # --- code-pr -----------------------------------------------------------------
 
 
+def _manual(ctx: _Ctx, pr: int) -> bool:
+    """Ручные проверки перед «конвейер закончен» (#771); `False` — стоп
+    (ожидание человека — код 0, как пауза на просмотр; сбой — `ctx.stop`)."""
+    run = ctx.run
+    if not mc.pending(run.manual_checks, run.manual):
+        return True
+
+    def texts() -> tuple[str, str]:
+        whole = (ctx.bundle / FILENAMES["personal-decomposition"]).read_text(
+            encoding="utf-8"
+        )
+        return whole, whole
+
+    reason = ma.settle(
+        run.manual,
+        load_texts=texts,
+        tty=ctx.tty(),
+        read=ctx.read,
+        ops=ctx.ops,
+        repo_slug=run.repo_slug,
+        pr=pr,
+        pr_url=f"https://github.com/{run.repo_slug}/pull/{pr}",
+        run_id=run.run_id,
+        save=lambda: save(run),
+    )
+    if reason is None:
+        return True
+    if ma.is_wait(reason):
+        run.stop_reason = reason
+        say(reason)
+        return False
+    return ctx.stop(reason)
+
+
 def _step_code_pr(ctx: _Ctx) -> bool:
-    """MERGED → `done`; иначе ждём человека (код 0)."""
+    """Ручные проверки (#771), затем MERGED → `done`; иначе ждём человека
+    (код 0)."""
     run = ctx.run
     pr = run.code_pr
     if pr is None:
         return ctx.stop("integration-PR прогона не известен — повторите dfl run")
+    if not _manual(ctx, pr):
+        return False
     facts = _facts(ctx, pr)
     if facts is None:
         return False
     if facts.get("state") == "MERGED":
         run.step = "done"
-        say(f"integration-PR #{pr} вмержен — конвейер закончен")
+        done = f"integration-PR #{pr} вмержен — конвейер закончен"
+        tail = mc.summary(mc.checks_of(run.manual), run.manual.get("answers") or {})
+        say(f"{done}; {tail}" if tail else done)
         return True
     # `pr_facts` не отдаёт url — ссылка строится из слага и номера
     say(f"смержите https://github.com/{run.repo_slug}/pull/{pr} — затем dfl run")

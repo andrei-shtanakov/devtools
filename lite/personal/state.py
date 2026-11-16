@@ -7,7 +7,7 @@ import os
 import secrets
 import shutil
 import tempfile
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -61,6 +61,11 @@ class PersonalRun:
     #: этапы с паузой на просмотр владельцем (#768) — выбор при старте
     #: (`dfl run --review` / конфиг), дальше не меняется; в JSON — списком
     review_pause: tuple[str, ...] = ()
+    #: ручные проверки в конце прогона (#771): `True` ставит `dfl` при
+    #: создании; старые run.json — `False`, вопросов им нет. `manual` —
+    #: запись ответов (форма `governance.manual_checks`).
+    manual_checks: bool = False
+    manual: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.review_pause = tuple(self.review_pause)
@@ -87,6 +92,7 @@ def new_personal_run(
     target_dir: str,
     today: date,
     review_pause: tuple[str, ...] = (),
+    manual_checks: bool = False,
 ) -> PersonalRun:
     """Новый прогон: `run_id` = ws-id + случайный суффикс."""
     ws_id = _ws_id(subject, today)
@@ -99,6 +105,7 @@ def new_personal_run(
         target_dir=target_dir,
         bundle_dir=f"workstreams/{ws_id}/spec",
         review_pause=review_pause,
+        manual_checks=manual_checks,
     )
 
 

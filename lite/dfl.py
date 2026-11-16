@@ -703,6 +703,7 @@ def _personal(
         str(target.path),
         date.today(),
         resolve_review(review, rp.PERSONAL_STAGES),
+        manual_checks=True,
     )
     personal_state.save(run)
     say(f"личный прогон {run.run_id}", 1)
@@ -1549,7 +1550,7 @@ def _manual_step(state: rs.RunState, url: str) -> int | None:
     if reason is None:
         return None
     say(reason)
-    return 0
+    return 0 if ma.is_wait(reason) else 1
 
 
 def _select_customer(
@@ -1700,6 +1701,8 @@ def status(cwd: Path) -> int:
     if active is not None:
         line = f"личный прогон {active.run_id}: шаг {active.step}"
         say(f"{line} — {active.stop_reason}" if active.stop_reason else line)
+        if verbosity() >= 1:
+            _manual_status(active.manual, active.repo_slug)
     return 0
 
 

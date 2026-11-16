@@ -3110,3 +3110,8 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 
 - [x] Повтор `dfl run` при открытом частичном integration-PR — плашка проекта («сделано N из M задач») и стоп вместо новой ветки прогона; закрытый PR = начать заново (оба пути, `governance/run_resume.py`) @owner:github:andrei-shtanakov @id:dfl-run-resume-stop
 - [ ] Передавать ветку прогона в spec-runner (режим продолжения), когда выйдет spec-runner#678; до этого dfl останавливается (дизайн `docs/superpowers/specs/2026-11-16-dfl-run-resume-design.md` §3.4) @owner:github:andrei-shtanakov @id:dfl-run-resume-pass-branch @blocked_by:todo://spec-runner/integration-pr-resume-branch
+
+## dfl run: ручные проверки в конце прогона (devtools#771)
+
+- [x] Перед «конвейер закончен» вопрос по каждой проверке `kind: manual` (выполнено / не выполнено / с оговоркой), один комментарий в PR с кодом, issue в репо проекта на «не выполнено», сводка в финальной строке и `dfl status -v` (оба пути, только новые прогоны; `governance/manual_checks.py`, `lite/manual_ask.py`) @owner:github:andrei-shtanakov @id:dfl-manual-checks
+- [ ] Журнал требований проекта после прогона: отложенное, баги эксплуатации, issues (devtools#792) @owner:github:andrei-shtanakov @id:dfl-requirements-ledger

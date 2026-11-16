@@ -19,6 +19,12 @@ PAUSED = "ответы на ручные проверки — потом: dfl ru
 NOTE_PROMPT = "что видно на деле (Enter — без комментария):"
 CAVEAT_PROMPT = "текст оговорки:"
 
+
+def is_wait(reason: str) -> bool:
+    """Стоп «ждём человека» (код 0), а не сбой (код 1)."""
+    return reason == PAUSED or reason.startswith(NO_TTY.split("{", 1)[0])
+
+
 _WORDS = {
     "1": mc.DONE,
     "выполнено": mc.DONE,
