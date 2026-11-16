@@ -32,7 +32,7 @@ from lite.interview_chat import STOP_WORD, Read, read_answer
 PERSONAL_STAGES = ("brief", "design", "decomposition")
 DONE_WORDS = frozenset({"дальше", "да", "ок", "1"})
 _YES_WORDS = frozenset({"1", "да"})
-_NO_WORDS = frozenset({"2", "нет", "оставить"})
+_NO_WORDS = frozenset({"2", "нет", "оставить", "оставить как было"})
 #: вид правки → (вопрос, слово согласия): слово чужого вопроса — не согласие
 REMOVE, DOWNGRADE, CHANGE = "remove", "downgrade", "change"
 _QUESTIONS = {

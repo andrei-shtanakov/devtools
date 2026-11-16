@@ -111,6 +111,17 @@ def test_confirm_removals_shows_id_and_title(capsys) -> None:
     )
 
 
+def test_confirm_removals_printed_no_option_is_one_line_answer() -> None:
+    """Вариант отказа так, как он напечатан, — ответ одной строкой."""
+    kinds = {"D-01": "remove", "FR-01": "downgrade", "FR-02": "change"}
+    got = rp.confirm_removals(
+        ["D-01", "FR-01", "FR-02"],
+        read=scripted("оставить", "Оставить", "оставить как было"),
+        kinds=kinds,
+    )
+    assert got == set()
+
+
 def test_confirm_removals_question_per_kind(capsys) -> None:
     """Пункт остался: потерял Must — «Снять Must», иначе — «Принять правку»."""
     rp.confirm_removals(
@@ -157,6 +168,18 @@ def test_item_titles_skip_machine_fields_keep_inline_code() -> None:
     assert titles["Q-01"] == "Где хранить токены?"
     assert titles["DT-01"] == "Команда add"
     assert titles["D-04"] == "Хранение — строка в config.toml"
+
+
+def test_item_titles_colon_in_title_and_field_lines_in_body() -> None:
+    """Двоеточие в названии — не служебное поле (поля — закрытый перечень
+    ключей); строки-поля тела не выдаются за название (ревью #781)."""
+    text = (
+        "#### DT-05: dfl: добавить флаг --review · type: implement · owner: dev\n"
+        "#### DT-06\nscenarios: [BEH-07]\ntraces: [D-01]\nКоманда удаления\n"
+    )
+    titles = node_guard.item_titles(text)
+    assert titles["DT-05"] == "dfl: добавить флаг --review"
+    assert titles["DT-06"] == "Команда удаления"
 
 
 def test_change_kinds() -> None:
