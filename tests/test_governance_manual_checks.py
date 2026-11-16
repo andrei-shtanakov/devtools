@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from governance import manual_checks as mc
 
 BEH = """## Проверки
@@ -134,14 +136,17 @@ def test_unanswered_reads_record() -> None:
 
 
 class _Comment:
-    def __init__(self, body: str) -> None:
-        self.body = body
+    def __init__(self, body: str, author: str = "me", edited: str | None = None):
+        self.body, self.author, self.last_edited_at = body, author, edited
 
 
 class _Ops:
-    def __init__(self, found: int | None = None, comments: list[str] = ()) -> None:
+    def __init__(self, found: int | None = None, comments=()) -> None:
         self.found, self.comments = found, list(comments)
         self.calls: list[tuple] = []
+
+    def caller_login(self) -> str:
+        return "me"
 
     def find_issue(self, slug, prefix, *, labels=("inbox",), state="open", author=None):
         self.calls.append(("find_issue", prefix, labels, state, author))
@@ -154,7 +159,7 @@ class _Ops:
     def pr_comments_fact(self, slug, pr):
         from governance.facts import Fact, Outcome
 
-        return Fact(Outcome.FOUND, [_Comment(b) for b in self.comments])
+        return Fact(Outcome.FOUND, list(self.comments))
 
     def comment(self, slug, pr, body):
         self.calls.append(("comment", pr, body.splitlines()[0]))
@@ -219,10 +224,20 @@ def test_publish_comment_once() -> None:
 
 
 def test_publish_skips_comment_found_by_marker() -> None:
-    ops = _Ops(comments=[mc.comment_marker("R1") + "\nстарый"])
+    ops = _Ops(comments=[_Comment(mc.comment_marker("R1") + "\nстарый")])
     record = _record((B1, DONE))
     _publish(ops, record)
     assert "comment" not in ops.names() and record["commented"] is True
+
+
+@pytest.mark.parametrize(
+    "found", [_Comment("<!-- dfl-manual-checks run=R1 -->", author="stranger"),
+              _Comment("<!-- dfl-manual-checks run=R1 -->", edited="2026-11-16")],
+)  # fmt: skip
+def test_publish_ignores_foreign_or_edited_marker_comment(found) -> None:
+    ops = _Ops(comments=[found])
+    _publish(ops, _record((B1, DONE)))
+    assert "comment" in ops.names()
 
 
 def test_publish_saves_after_issue() -> None:

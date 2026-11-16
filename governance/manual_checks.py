@@ -189,10 +189,18 @@ def unanswered(record: Mapping) -> list[ManualCheck]:
 
 
 def _comment_exists(ops, repo_slug: str, pr: int, run_id: str) -> bool:
+    """Свой неправленый комментарий с маркером уже в PR: чужой комментарий с
+    тем же маркером (или правленый) за снимок не принимается."""
+    me = ops.caller_login()
     fact = ops.pr_comments_fact(repo_slug, pr)
+    if me is None or not fact.established:
+        return False
     marker = comment_marker(run_id)
-    return fact.established and any(
-        (c.body or "").startswith(marker) for c in fact.value or []
+    return any(
+        (c.body or "").startswith(marker)
+        and c.author == me
+        and c.last_edited_at is None
+        for c in fact.value or []
     )
 
 

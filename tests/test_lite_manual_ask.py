@@ -78,6 +78,9 @@ class _Ops:
         self.calls.append("create_issue")
         return 24
 
+    def caller_login(self) -> str:
+        return "me"
+
     def pr_comments_fact(self, *a):
         from governance.facts import Fact, Outcome
 
