@@ -99,6 +99,29 @@ def test_decomposition_valid_sample() -> None:
     assert check.decomposition_problems(text, _brief(1, 1)) == []
 
 
+def test_orphan_verifies_is_decomposition_problem() -> None:
+    """#767: файл в `verifies`, который не создаёт ни одна задача, — ошибка
+    графа и на личном пути (раздел «## Проверки» в роли текста поведения)."""
+    text = (FIXTURES / "30-decomposition.md").read_text(encoding="utf-8")
+    text = text.replace(
+        "## Задачи",
+        "#### BEH-03: сквозная проверка\nadd, затем find.\n"
+        "- **checked_by**: `kind: e2e` `target: tests/test_e2e.py::test_flow`\n"
+        "**Критерии:** FR-01/1\n\n## Задачи",
+    )
+    text += (
+        "\n#### DT-03: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-03]\ndepends_on: [DT-02]\ndelivered_by: [DT-02]\n"
+        "parallel_group: solo\n"
+        "verifies:\n  - tests/test_find.py\n  - tests/test_orphan.py\n"
+    )
+    problems = check.decomposition_problems(text, _brief(1, 1))
+    assert any(
+        "DT-03" in p and "tests/test_orphan.py" in p and "не создаёт" in p
+        for p in problems
+    ), problems
+
+
 def test_split_decomposition() -> None:
     text = (FIXTURES / "30-decomposition.md").read_text(encoding="utf-8")
     checks, whole = check.split_decomposition(text)

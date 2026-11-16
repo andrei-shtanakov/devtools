@@ -958,11 +958,10 @@ def test_verify_with_checked_by_target_but_without_verifies_is_legacy_ok() -> No
     """Round 7 ревью PR #161, минор (контракт владельца, замена round-5
     безусловного «verify без verifies»): verify-DT с checked_by-целью в
     scenarios (легаси-форма single-file verify) — НЕ находка, даже без
-    verifies, ни на уровне graph_findings, ни на уровне non_fatal_findings
-    — промпт авторинга рекомендует verifies только когда группа наблюдения
+    verifies, на уровне graph_findings — промпт авторинга рекомендует verifies только когда группа наблюдения
     выходит за собственные checked_by-цели, и гард обязан это отражать
     (иначе конформный по промпту бандл шумит на зелёном гейте)."""
-    from governance.decomposition_guard import graph_findings, non_fatal_findings
+    from governance.decomposition_guard import graph_findings
 
     beh = (
         "#### BEH-01: Один\n**checked_by** `kind: integration` "
@@ -978,7 +977,6 @@ def test_verify_with_checked_by_target_but_without_verifies_is_legacy_ok() -> No
         "delivered_by: [DT-01]\nparallel_group: solo\n"
     )
     assert graph_findings(beh, dt) == []
-    assert non_fatal_findings(beh, dt) == []
 
 
 def test_verify_group_underivable_is_a_fatal_finding() -> None:
@@ -989,7 +987,7 @@ def test_verify_group_underivable_is_a_fatal_finding() -> None:
     «не блокирует доставку» было ложью для этого входа. Теперь это FATAL
     находка `graph_findings` (S4-гейт и deliver() её видят и отказывают),
     а не non-fatal warning."""
-    from governance.decomposition_guard import graph_findings, non_fatal_findings
+    from governance.decomposition_guard import graph_findings
 
     beh = (
         "#### BEH-01: Один\n- **checked_by**: без бэктиков, не биндится\n\n"
@@ -1004,10 +1002,6 @@ def test_verify_group_underivable_is_a_fatal_finding() -> None:
     )
     findings = graph_findings(beh, dt)
     assert any("DT-14" in f and "группа наблюдения не выводится" in f for f in findings)
-    # Больше НЕ дублируется в non-fatal канале — единственный вывод, fatal.
-    assert not any(
-        "группа наблюдения не выводится" in f for f in non_fatal_findings(beh, dt)
-    )
 
 
 def test_manual_only_verify_group_is_underivable() -> None:
@@ -1072,14 +1066,13 @@ def test_file_target_obeys_resolved_adapter_capability() -> None:
     )
 
 
-def test_orphan_verifies_target_is_non_fatal_finding() -> None:
-    """Round 7 ревью PR #161, минор (контракт владельца): элемент
-    verifies, не совпавший ни с одной checked_by-целью бандла, — опечатка
-    либо осиротевший путь, находка формы (не fatal), но обязана быть
-    видна оператору через non_fatal_findings — иначе уезжает в
-    tasks-спеку как селектор прогона, которого ни одна задача не
-    создаёт."""
-    from governance.decomposition_guard import graph_findings, non_fatal_findings
+def test_orphan_verifies_target_is_graph_finding() -> None:
+    """devtools#767 (решение владельца 16.11): элемент verifies, не
+    совпавший ни с одной checked_by-целью бандла, — файл, который не
+    создаёт ни одна задача. Это ошибка гейта (graph_findings), а не
+    предупреждение: исполнение всё равно упало бы на «not a regular file».
+    Если других целей нет, рядом стоит и «группа наблюдения не выводится»."""
+    from governance.decomposition_guard import graph_findings
 
     beh = (
         "#### BEH-01: Один\n**checked_by** `kind: integration` "
@@ -1094,18 +1087,70 @@ def test_orphan_verifies_target_is_non_fatal_finding() -> None:
         "delivered_by: [DT-01]\nparallel_group: solo\n"
         "verifies:\n  - tests/test_typo.py\n"
     )
-    warnings = non_fatal_findings(beh, dt)
-    assert any(
-        "DT-14" in f
-        and "tests/test_typo.py" in f
-        and "опечатка либо осиротевший путь" in f
-        for f in warnings
-    )
     fatal = graph_findings(beh, dt)
+    assert any(
+        "DT-14" in f and "tests/test_typo.py" in f and _ORPHAN in f for f in fatal
+    )
     assert any(
         "DT-14" in finding and "группа наблюдения не выводится" in finding
         for finding in fatal
     )
+
+
+_ORPHAN = "не создаёт ни одна задача"
+
+
+def test_orphan_verifies_beside_owned_target_is_graph_finding() -> None:
+    """Форма sdd-runer DT-15 (#767): у verify-задачи есть исполнимая цель
+    (файл задачи из замыкания), и рядом — ничей файл. Раньше сирота
+    уходила в warning, а «группа наблюдения» выводилась — гейт проходил,
+    исполнение тратило попытки. Теперь — ровно одна находка про сироту с
+    обоими исправлениями в тексте."""
+    from governance.decomposition_guard import graph_findings
+
+    beh = (
+        "#### BEH-01: Один\n**checked_by** `kind: integration` "
+        "`target: tests/test_a.py::test_one`\n\n"
+        "#### BEH-02: Два\n**checked_by** `kind: integration` "
+        "`target: tests/test_b.py::test_two`\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: solo\n\n"
+        "#### DT-15: Наблюдение · type: verify · owner: qa\n"
+        "scenarios: [BEH-02]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: solo\n"
+        "verifies:\n  - tests/test_a.py\n"
+        "  - tests/contract/test_run_state_schema.py\n"
+    )
+    fatal = graph_findings(beh, dt)
+    orphans = [f for f in fatal if _ORPHAN in f]
+    assert len(orphans) == 1, fatal
+    assert "DT-15" in orphans[0]
+    assert "tests/contract/test_run_state_schema.py" in orphans[0]
+    assert "checked_by" in orphans[0] and "уберите" in orphans[0]
+
+
+def test_orphan_selector_of_owned_file_is_not_finding() -> None:
+    """`file.py::test` в verifies, чей файл — цель checked_by задачи из
+    замыкания, — не сирота (срез `::` перед сверкой сохранён)."""
+    from governance.decomposition_guard import graph_findings
+
+    beh = (
+        "#### BEH-01: Один\n**checked_by** `kind: integration` "
+        "`target: tests/x.py::test_one`\n\n"
+        "#### BEH-02: Два\n**checked_by** `kind: integration` "
+        "`target: tests/test_b.py::test_two`\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: solo\n\n"
+        "#### DT-02: V · type: verify · owner: qa\n"
+        "scenarios: [BEH-02]\ndepends_on: [DT-01]\n"
+        "delivered_by: [DT-01]\nparallel_group: solo\n"
+        "verifies:\n  - tests/x.py::test_a\n"
+    )
+    assert graph_findings(beh, dt) == []
 
 
 def test_verifies_target_owner_outside_depends_on_closure_is_a_finding() -> None:
@@ -1152,7 +1197,7 @@ def test_verifies_selector_form_does_not_bypass_closure_invariant() -> None:
     «опечатка». Зеркало
     test_verifies_target_owner_outside_depends_on_closure_is_a_finding,
     но verifies — с `::test1` вместо голого пути."""
-    from governance.decomposition_guard import graph_findings, non_fatal_findings
+    from governance.decomposition_guard import graph_findings
 
     beh = (
         "#### BEH-01: Один\n**checked_by** `kind: integration` "
@@ -1181,10 +1226,8 @@ def test_verifies_selector_form_does_not_bypass_closure_invariant() -> None:
         and "замыкания" in f
         for f in findings
     )
-    # НЕ ложная находка «опечатка» — путь реально принадлежит DT-01.
-    assert not any(
-        "опечатка либо осиротевший путь" in f for f in non_fatal_findings(beh, dt)
-    )
+    # НЕ ложная находка «сирота» — путь реально принадлежит DT-01.
+    assert not any(_ORPHAN in f for f in findings)
 
 
 def test_verifies_target_owner_directly_in_depends_on_is_clean() -> None:
