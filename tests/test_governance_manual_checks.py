@@ -128,3 +128,99 @@ def test_unanswered_reads_record() -> None:
         "answers": {"BEH-01": DONE},
     }
     assert mc.unanswered(record) == [CHECK]
+
+
+# --- публикация (Task 3) ----------------------------------------------------
+
+
+class _Comment:
+    def __init__(self, body: str) -> None:
+        self.body = body
+
+
+class _Ops:
+    def __init__(self, found: int | None = None, comments: list[str] = ()) -> None:
+        self.found, self.comments = found, list(comments)
+        self.calls: list[tuple] = []
+
+    def find_issue(self, slug, prefix, *, labels=("inbox",), state="open"):
+        self.calls.append(("find_issue", prefix, labels, state))
+        return self.found
+
+    def create_issue(self, slug, title, body, *, labels=("inbox",)):
+        self.calls.append(("create_issue", title, labels))
+        return 24
+
+    def pr_comments_fact(self, slug, pr):
+        from governance.facts import Fact, Outcome
+
+        return Fact(Outcome.FOUND, [_Comment(b) for b in self.comments])
+
+    def comment(self, slug, pr, body):
+        self.calls.append(("comment", pr, body.splitlines()[0]))
+
+    def names(self) -> list[str]:
+        return [c[0] for c in self.calls]
+
+
+def _record(*answers: tuple[mc.ManualCheck, dict]) -> dict:
+    return {
+        "status": "started",
+        "checks": [mc.as_dict(c) for c, _a in answers],
+        "answers": {c.beh_id: dict(a) for c, a in answers},
+        "commented": False,
+    }
+
+
+def _publish(ops, record, saves: list | None = None) -> None:
+    log = saves if saves is not None else []
+    mc.publish(
+        ops,
+        record,
+        repo_slug="o/r",
+        pr=9,
+        pr_url="https://github.com/o/r/pull/9",
+        run_id="R1",
+        save=lambda: log.append(list(ops.names())),
+    )
+
+
+def test_publish_creates_issue_only_for_not_done() -> None:
+    ops = _Ops()
+    record = _record((CHECK, {**NOT_DONE, "issue": None}), (B1, DONE))
+    _publish(ops, record)
+    creates = [c for c in ops.calls if c[0] == "create_issue"]
+    assert creates == [("create_issue", mc.issue_title(CHECK), ())]
+    assert record["answers"]["BEH-02"]["issue"] == 24
+    assert record["status"] == "completed" and record["commented"] is True
+
+
+def test_publish_recovers_issue_by_marker() -> None:
+    ops = _Ops(found=31)
+    record = _record((CHECK, {**NOT_DONE, "issue": None}))
+    _publish(ops, record)
+    assert "create_issue" not in ops.names()
+    assert ("find_issue", mc.issue_marker("R1", "BEH-02"), (), "all") in ops.calls
+    assert record["answers"]["BEH-02"]["issue"] == 31
+
+
+def test_publish_comment_once() -> None:
+    ops = _Ops()
+    record = _record((B1, DONE))
+    _publish(ops, record)
+    _publish(ops, record)
+    assert ops.names().count("comment") == 1
+
+
+def test_publish_skips_comment_found_by_marker() -> None:
+    ops = _Ops(comments=[mc.comment_marker("R1") + "\nстарый"])
+    record = _record((B1, DONE))
+    _publish(ops, record)
+    assert "comment" not in ops.names() and record["commented"] is True
+
+
+def test_publish_saves_after_issue() -> None:
+    saves: list = []
+    ops = _Ops()
+    _publish(ops, _record((CHECK, {**NOT_DONE, "issue": None})), saves)
+    assert saves[0] == ["find_issue", "create_issue"]

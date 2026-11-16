@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 
 from governance.decomposition_guard import parse_dt_tasks
@@ -186,3 +186,50 @@ def unanswered(record: Mapping) -> list[ManualCheck]:
     """Проверки записи без ответа — их и спрашивает повтор."""
     answers = record.get("answers") or {}
     return [c for c in checks_of(record) if c.beh_id not in answers]
+
+
+def _comment_exists(ops, repo_slug: str, pr: int, run_id: str) -> bool:
+    fact = ops.pr_comments_fact(repo_slug, pr)
+    marker = comment_marker(run_id)
+    return fact.established and any(
+        (c.body or "").startswith(marker) for c in fact.value or []
+    )
+
+
+def publish(
+    ops,
+    record: dict,
+    *,
+    repo_slug: str,
+    pr: int,
+    pr_url: str,
+    run_id: str,
+    save: Callable[[], None],
+) -> None:
+    """Issue на «не выполнено», затем один комментарий в PR; идемпотентно.
+
+    Номер issue сохраняется сразу после создания; гибель до сохранения
+    лечит поиск по маркеру (issue без меток, любого состояния). Комментарий
+    узнаётся по флагу записи, а после гибели — по маркеру в PR. Исключения
+    `Ops` — наружу: вызывающий стопит с причиной.
+    """
+    checks = checks_of(record)
+    answers = record.setdefault("answers", {})
+    for check in checks:
+        answer = answers.get(check.beh_id) or {}
+        if answer.get("verdict") != NOT_DONE or answer.get("issue"):
+            continue
+        marker = issue_marker(run_id, check.beh_id)
+        number = ops.find_issue(repo_slug, marker, labels=(), state="all")
+        if number is None:
+            body = issue_body(check, answer, run_id=run_id, pr_url=pr_url)
+            number = ops.create_issue(repo_slug, issue_title(check), body, labels=())
+        answer["issue"] = number
+        save()
+    if not record.get("commented"):
+        if not _comment_exists(ops, repo_slug, pr, run_id):
+            ops.comment(repo_slug, pr, pr_comment(checks, answers, run_id=run_id))
+        record["commented"] = True
+        save()
+    record["status"] = "completed"
+    save()
