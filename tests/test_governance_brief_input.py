@@ -171,6 +171,31 @@ def test_invalid_customer_is_rejected_with_gate_id(tmp_path: Path) -> None:
         brief_input.inspect_brief(path)
 
 
+@pytest.mark.parametrize(
+    ("v12_form", "gate_id"),
+    [
+        (lambda t: t.split("\n## Translation table")[0] + "\n", "GC-18"),
+        (lambda t: t.replace("**Category**: perf, cost\n", ""), "GC-20"),
+        (
+            lambda t: t.replace("`owns: process, data, quality, operations` ", ""),
+            "GC-21",
+        ),
+    ],
+    ids=["no-translation-table", "no-nfr-category", "no-owners"],
+)
+def test_customer_brief_v12_form_is_rejected(
+    tmp_path: Path, v12_form, gate_id: str
+) -> None:
+    """Контракт v1.3: бриф заказчика без translation table, `**Category**`
+    у NFR или владельцев `owns:` — не допускается (ревью #780)."""
+    text = v12_form(customer_brief())
+    assert text != customer_brief()
+    path = _write(tmp_path / "brief.md", text)
+
+    with pytest.raises(brief_input.BriefInputError, match=gate_id):
+        brief_input.inspect_brief(path)
+
+
 def test_consistent_gate_failed_customer_is_rejected_at_admission(
     tmp_path: Path,
 ) -> None:
