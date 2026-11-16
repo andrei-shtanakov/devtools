@@ -339,6 +339,21 @@ def test_manifest_unreadable_is_refused_without_fallback(
     assert "манифест флота" in capsys.readouterr().out
 
 
+def test_review_pause_typo_is_refused_before_side_effects(
+    runs_root, tmp_path, monkeypatch, capsys
+) -> None:
+    """Опечатка в `--review-pause` — `spec-loop: …` и код 1 до любых
+    побочных эффектов, а не traceback (#778)."""
+    env = _LoopEnv(monkeypatch, tmp_path)
+    rc = spec_loop.main(
+        ["--subject", "s", "--repo", "alpha", "--review-pause", "desgin"]
+    )
+    assert rc == 1 and env.calls == []
+    out = capsys.readouterr().out
+    assert "spec-loop: review_pause: неизвестный этап desgin" in out
+    assert not runs_root.exists() or not any(runs_root.iterdir())
+
+
 def _config_root(tmp_path: Path, monkeypatch, ws: Path) -> None:
     """Реальный конфиг DarkFactory с `workspace.root = ws`."""
     from governance import df_config

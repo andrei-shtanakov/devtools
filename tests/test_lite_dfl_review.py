@@ -376,6 +376,31 @@ def test_flag_none_with_non_claude_author_ok(env: Env, monkeypatch) -> None:  # 
     assert "--review-pause" not in env.spec_calls[0]
 
 
+def test_flag_only_commas_is_no_choice(env: Env, monkeypatch) -> None:  # noqa: F811
+    """`--review ","` — этапов нет, как `none`: автор не claude не отказ (#778)."""
+    _not_claude(monkeypatch)
+    code = env.run("run", "--subject", "t1", "--track", "enterprise", "--review", ",")
+    assert code == 0
+    assert "--review-pause" not in env.spec_calls[0]
+
+
+def test_unknown_stage_named_before_claude_refusal(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Неизвестный этап — «неизвестный этап», а не отказ про автора (#778)."""
+    _not_claude(monkeypatch)
+    code = env.run(
+        "run", "--subject", "t1", "--track", "enterprise", "--review", "desgin"
+    )
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "неизвестный этап: desgin" in err
+    assert "harness.author" not in err
+    assert env.spec_calls == []
+
+
 def test_config_with_non_claude_author_dropped_enterprise(
     env: Env,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,

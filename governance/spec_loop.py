@@ -1181,8 +1181,14 @@ def _after_resume(after: rs.RunState, ops) -> int:
 
 
 def _review_pause(value: str) -> tuple[str, ...]:
-    """`--review-pause a,b` → этапы; имена проверяет `dfl` (`lite.review_pause`)."""
-    return tuple(name.strip() for name in value.split(",") if name.strip())
+    """`--review-pause a,b` → этапы enterprise-пути; неизвестное имя —
+    `SpecLoopError` (тот же текст, что у `runner.validate_review_pause`)."""
+    names = tuple(name.strip() for name in value.split(",") if name.strip())
+    try:
+        runner.validate_review_pause(names)
+    except ValueError as exc:
+        raise SpecLoopError(str(exc)) from exc
+    return names
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1264,6 +1270,12 @@ def main(argv: list[str] | None = None) -> int:
     if oracle_error is not None:
         # Отказ ДО любых побочных эффектов — как у --legacy ниже.
         print(f"spec-loop: {oracle_error}")
+        return 1
+    try:
+        # Опечатка в этапе — отказ ДО любых побочных эффектов (#778).
+        _review_pause(args.review_pause)
+    except SpecLoopError as exc:
+        print(f"spec-loop: {exc}")
         return 1
     if args.legacy:
         # Отказ ДО любых побочных эффектов: ни леджера, ни git, ни
