@@ -173,7 +173,10 @@ def test_removal_asked_and_restored_on_no(tmp_path, capsys) -> None:
     assert "- D-02 не удалять" in second
     assert "- замечание владельца: убери поиск" in second
     assert (_bundle(run) / "20-design.md").read_text(encoding="utf-8") == kept
-    assert "удалить D-02? 1. да · 2. нет" in capsys.readouterr().out
+    assert (
+        "Удалить D-02 — «Поиск — построчный фильтр по подстроке»? 1. удалить · 2. оставить"
+        in capsys.readouterr().out
+    )
 
 
 def test_removal_confirmed_is_accepted(tmp_path) -> None:

@@ -18,12 +18,52 @@ from governance.decomposition_guard import node_id_counts
 
 GRAMMAR_SENTINEL = "<grammar>"
 _FINDING_ID = re.compile(r"([^\s:]+):\s")
+_HEADING_RE = re.compile(r"^####\s+([A-Z][A-Z0-9]*-\d+[a-z]?)(?=[\s:]|$)(.*)$")
+_FIELD_RE = re.compile(r"^\*\*[^*]+\*\*:")  # `**Priority**: Must` — не текст пункта
+_CODE_SPAN_RE = re.compile(r"`[^`]*`")
+TITLE_MAX = 60
 
 
 def node_items(text: str) -> dict[str, str | None]:
     """Id пунктов узла (как у `node_id_counts`) и их Priority по гейту или None."""
     priorities, _ = _parse_requirements(text)
     return {item: priorities.get(item) for item in node_id_counts(text)}
+
+
+def item_titles(text: str) -> dict[str, str]:
+    """Id пункта → название из заголовка `#### <ID>: <название>`; без
+    названия — начало текста пункта (до `TITLE_MAX` знаков с «…»)."""
+    titles: dict[str, str] = {}
+    lines = text.splitlines()
+    for n, line in enumerate(lines):
+        match = _HEADING_RE.match(line)
+        if not match or match.group(1) in titles:
+            continue
+        title = _clean(match.group(2))
+        if not title:
+            title = next((_clean(b) for b in _body(lines[n + 1 :]) if _clean(b)), "")
+        titles[match.group(1)] = _short(title)
+    return titles
+
+
+def _body(lines: list[str]) -> list[str]:
+    """Строки пункта до следующего заголовка, без полей `**Поле**:`."""
+    body: list[str] = []
+    for line in lines:
+        if line.startswith("#"):
+            break
+        if not _FIELD_RE.match(line.strip()):
+            body.append(line)
+    return body
+
+
+def _clean(text: str) -> str:
+    """Без code-span (`traces: […]`) и разделителей после id."""
+    return _CODE_SPAN_RE.sub("", text).strip().lstrip(":—–-. ").strip()
+
+
+def _short(text: str) -> str:
+    return text if len(text) <= TITLE_MAX else text[:TITLE_MAX].rstrip() + "…"
 
 
 def _findings_by_id(text: str) -> dict[str, Counter[str]]:

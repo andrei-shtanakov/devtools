@@ -217,7 +217,10 @@ def test_enterprise_removal_confirmed(
     calls = _author(monkeypatch, NO_D02, DESIGN + "\nбез удаления\n")
     assert env.run("run", "--subject", "t") == 0
     out, _ = _read(capfd)
-    assert "удалить D-02? 1. да · 2. нет" in out
+    assert (
+        "Удалить D-02 — «Поиск — построчный фильтр по подстроке»? 1. удалить · 2. оставить"
+        in out
+    )
     assert _design(env).read_text(encoding="utf-8") == final
     assert len(calls) == revisions
     if revisions == 2:
