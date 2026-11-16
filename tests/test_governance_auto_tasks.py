@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from governance import auto_tasks, spec_loop
+from governance import auto_tasks, run_resume, spec_loop
 from governance import run_state as rs
 from governance.auto_tasks import TASKS_SKIP_TEST, run_chain
 from governance.pr_checks import NO_CHECKS_TEST
@@ -46,6 +46,16 @@ class _ChainOps:
         self.run_pr: int | None = 9
         self.prs_exc: Exception | None = None
         self.workflows: list[str] | None = ["ci.yml"]
+        self.fetched = True
+        self.tasks_md: str | None = None
+
+    def fetch_branch(self, target_dir: str, branch: str) -> bool:
+        self.calls.append(("fetch", branch))
+        return self.fetched
+
+    def show_file(self, target_dir: str, ref: str, path: str) -> str | None:
+        self.calls.append(("show", ref, path))
+        return self.tasks_md
 
     def pr_facts(self, slug: str, pr: int) -> dict:
         return self.facts[pr]
@@ -399,15 +409,67 @@ def test_spec_run_nonzero_exit_keeps_op_started(state):
     }
 
 
-def test_spec_run_resume_reruns_and_ignores_old_pr(state):
+def _tasks_md(done: int, total: int) -> str:
+    return "".join(
+        f"### TASK-{i:03d}: t\nP1 | {'✅ DONE' if i <= done else 'TODO'}\n\n"
+        for i in range(1, total + 1)
+    )
+
+
+def test_spec_run_failed_attempt_with_open_partial_pr_stops_with_banner(state, capsys):
+    """#767: повтор после упавшего прогона не создаёт новую ветку — плашка
+    проекта и стоп; запись прошлой попытки не перетирается."""
     rs.op_start(state, "spec-run", before=[5], exit=2, failed_prs=[7])
     ops = _ops()
     ops.prs = [_run_pr(5), _run_pr(7)]
+    ops.tasks_md = _tasks_md(14, 16)
+    assert auto_tasks._spec_run(state, ops) is None
+    assert _run_calls(ops) == []
+    assert ("show", "origin/spec-runner/run-7", "spec/WS-1-tasks.md") in ops.calls
+    out = capsys.readouterr().out
+    assert run_resume.banner("s", "o/alpha", "spec-runner/run-7", (14, 16)) in out
+    assert run_resume.resume_stop("spec-runner/run-7", 7) in out
+    assert rs.load(state.run_id).ops["spec-run"] == {
+        "status": "started",
+        "before": [5],
+        "exit": 2,
+        "failed_prs": [7],
+    }
+
+
+def test_spec_run_banner_without_progress(state, capsys):
+    rs.op_start(state, "spec-run", before=[5], exit=2)
+    ops = _ops()
+    ops.prs = [_run_pr(5), _run_pr(7)]
+    ops.fetched = False
+    assert auto_tasks._spec_run(state, ops) is None
+    out = capsys.readouterr().out
+    assert "счётчик задач не прочитан" in out
+    assert run_resume.resume_stop("spec-runner/run-7", 7) in out
+    assert _run_calls(ops) == []
+
+
+def test_spec_run_two_partial_prs_stop(state, capsys):
+    rs.op_start(state, "spec-run", before=[5], exit=2)
+    ops = _ops()
+    ops.prs = [_run_pr(5), _run_pr(7), _run_pr(8)]
+    assert auto_tasks._spec_run(state, ops) is None
+    out = capsys.readouterr().out
+    assert run_resume.several_stop([7, 8]) in out
+    assert "▶ продолжаю" not in out
+    assert _run_calls(ops) == []
+
+
+def test_spec_run_failed_attempt_closed_partial_pr_reruns(state):
+    """Закрытый частичный PR — решение человека начать заново."""
+    rs.op_start(state, "spec-run", before=[5], exit=2, failed_prs=[7])
+    ops = _ops()
+    ops.prs = [_run_pr(5), _run_pr(7, state="CLOSED")]
     assert auto_tasks._spec_run(state, ops) == 9
     assert _run_calls(ops) == [("spec_runner", state.target_dir, RUN_ARGS)]
     assert state.ops["spec-run"] == {
         "status": "completed",
-        "before": [5, 7],
+        "before": [5],
         "pr": 9,
         "exit": 0,
     }
