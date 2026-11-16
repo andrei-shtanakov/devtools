@@ -1480,7 +1480,8 @@ def test_author_dsl_decomposition_explains_verifies_field() -> None:
     обещает, что ЛЮБОЙ verifies-путь без владельца стопит доставку —
     это ДВУХУРОВНЕВАЯ гарантия (FATAL — только когда владелец есть и вне
     замыкания; путь БЕЗ владельца вовсе — non-fatal warning на гейте, не
-    факт остановки deliver()).
+    факт остановки deliver()). devtools#767 (решение владельца 2026-11-16):
+    путь без владельца стал fatal — промпт называет оба инварианта fatal.
 
     Round 14 ревью PR #161, минор (контракт владельца): промпт обещал
     single-owner ИСКЛЮЧЕНИЕ через verifies, которого в коде нет вовсе
@@ -1500,8 +1501,12 @@ def test_author_dsl_decomposition_explains_verifies_field() -> None:
     assert "NOT also this same task's own checked_by target" not in dsl
     assert "FATAL graph invariant" in verifies_tail[:1600]
     assert "transitive closure of THIS task's OWN depends_on" in verifies_tail[:1900]
-    assert "NON-fatal form recommendation" in verifies_tail[:2200]
-    assert "does NOT stop delivery on its own" in verifies_tail[:2400]
+    # devtools#767: сирота в verifies — тоже graph error, стоп доставки.
+    assert "NON-fatal" not in dsl
+    assert "does NOT stop delivery" not in dsl
+    assert "(2) FATAL orphan invariant" in verifies_tail[:2200]
+    assert "matches NO checked_by target" in verifies_tail[:2400]
+    assert "or remove it from verifies" in verifies_tail[:2700]
 
 
 def test_author_dsl_covers_acceptance() -> None:
