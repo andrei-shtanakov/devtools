@@ -3104,4 +3104,4 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
   нет: интервьюер фрейма заказчика v1.3 сам собирает translation table, категории и
   владельцев; непочиненные находки видны человеку в причине стопа (`stop_findings`).
 - [ ] Починка GC-18…GC-21 в диалоге после интервью (`lite/gate_repair.py`), если живой enterprise-прогон встанет на них @owner:github:andrei-shtanakov @id:gate-repair-customer-v1.3
-- [ ] Ре-вендор `contracts/discovery-approval/v1/gate_check.py` на discovery @ `0b0108d` (sha256 `6f0df20eb53b0b77…`, совпадает с `governance/discovery_contract/gate_check.py`). Authority-root, мержит человек. Не срочно: из копии берётся только `split_frontmatter`, он не менялся @owner:github:andrei-shtanakov @id:revendor-discovery-approval-gate-check
+- [x] Ре-вендор `contracts/discovery-approval/v1/gate_check.py` на discovery @ `9b6d8f8` (было в плане `0b0108d`; байты те же) (sha256 `6f0df20eb53b0b77…`, совпадает с `governance/discovery_contract/gate_check.py`). Authority-root, мержит человек. Не срочно: из копии берётся только `split_frontmatter`, он не менялся @owner:github:andrei-shtanakov @id:revendor-discovery-approval-gate-check
