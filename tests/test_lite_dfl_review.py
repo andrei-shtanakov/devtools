@@ -401,6 +401,32 @@ def test_unknown_stage_named_before_claude_refusal(
     assert env.spec_calls == []
 
 
+def test_unknown_stage_hint_lists_stages_of_chosen_track(
+    env: Env,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """С `--track` подсказка — этапы этого пути, а не обоих (ревью #784)."""
+    code = env.run(
+        "run", "--subject", "t1", "--track", "enterprise", "--review", "desgin"
+    )
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "допустимы: charter, requirements, behaviour-spec" in err
+    assert "brief" not in err
+
+
+def test_unknown_stage_hint_without_track_splits_by_path(
+    env: Env,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Без `--track` путь не выбран — перечень разделён по путям."""
+    code = env.run("run", "--subject", "t1", "--review", "desgin")
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "личный путь: brief, design, decomposition" in err
+    assert "enterprise: charter, requirements" in err
+
+
 def test_config_with_non_claude_author_dropped_enterprise(
     env: Env,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
