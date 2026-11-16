@@ -1,7 +1,7 @@
 {
   "discovery_commit": "94c88cc55ae29aa005855bbebf6f4ae6244a6f3b",
   "approve_exit": 0,
-  "self_hash": "sha256:b7bd55ff95fe7dfe79faf1d2ea4501b4f2df4299034f7f428ca4b333ad271571",
+  "self_hash": "sha256:b83fdde1e301ce455bbcbd7bb66a24dd9c7188728d117eaaf9226c8631622a33",
   "verify_signed": null,
   "verify_draft": "debt_status",
   "merge_event": {

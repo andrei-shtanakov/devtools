@@ -46,7 +46,7 @@ traces_to: []
 # Brief
 
 - **G-01** Goal
-- **P-01** Persona
+- **P-01** `owns: process, data, quality, operations` Persona
 - **J-01** `traces: [G-01]` Job
 
 #### FR-01: Feature `traces: [G-01, J-01]`
@@ -54,11 +54,21 @@ traces_to: []
 **Acceptance**: works
 
 #### NFR-01: Safety `traces: [CON-01]`
-**Target**: zero writes
+**Category**: perf, cost
+**Target**: 0 записей в чужие файлы
 
 - **CON-01** Constraint
 - **M-01** `traces: [G-01]` Metric
 - **OUT-01** Not in scope
+
+## Translation table
+
+| Слова заказчика | Категория | Ограничение | Допущение | Подтверждает | Срок |
+|---|---|---|---|---|---|
+| должно работать | делать | FR-01 | — | — | — |
+| не писать в чужое | не делать | OUT-01 | — | — | — |
+| недорого | стоить | NFR-01 | — | — | — |
+| ничего не ломать | доказывать | NFR-01 | — | — | — |
 """
 
 
