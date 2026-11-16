@@ -363,3 +363,57 @@ def test_summary_total_falls_back_to_db(tmp_path: Path) -> None:
     _task(db, "TASK-001", "success", _ts(0), _ts(5))
     w.tick(_at(6))
     assert w.summary(_at(6)) == "реализация: сделано 1 из 1 · 00:06"
+
+
+# --- финальное ревью #765 ----------------------------------------------------
+
+
+def test_live_clear_after_capture_ends(monkeypatch) -> None:
+    """Ревью I1: личный путь — перехват кончился, строку всё равно стереть."""
+    master, slave = os.openpty()
+    live = rp._LiveScreen(fallback_fd=slave)
+    monkeypatch.setenv(rp.SCREEN_FD_ENV, str(slave))
+    live("  TASK-001 · 00:01")
+    monkeypatch.delenv(rp.SCREEN_FD_ENV)
+    live.clear()
+    got = os.read(master, 4096)
+    os.close(slave)
+    os.close(master)
+    assert got.endswith(b"\r\x1b[K")
+
+
+def test_stale_running_from_killed_run_is_quiet(tmp_path: Path) -> None:
+    """Ревью I2: `running` от убитого прошлого запуска — не «не прошла»."""
+    db = _db(tmp_path / "s.db")
+    _task(db, "TASK-002", "running", _ts(-7200))
+    w, out, lives = _watcher(db)
+    w.begin(_at(0))
+    w.tick(_at(1))
+    assert lives == [] or "2:00:0" not in lives[-1]
+    _task(db, "TASK-002", "failed", _ts(-7200), _ts(2))  # recover_stale_tasks
+    w.tick(_at(3))
+    assert out == []
+    _task(db, "TASK-002", "running", _ts(4))  # настоящий старт этого запуска
+    w.tick(_at(5))
+    assert out == ["▶ TASK-002 «Команда find» — начата"]
+
+
+def test_live_between_tasks_counts_from_last_end(tmp_path: Path) -> None:
+    """Ревью I3: между задачами отсчёт от конца предыдущей, без номера."""
+    db = _db(tmp_path / "s.db")
+    w, _, lives = _watcher(db)
+    w.begin(_at(0))
+    _task(db, "TASK-001", "success", _ts(1), _ts(10))
+    w.tick(_at(22))
+    assert lives[-1] == "  … · 00:12"
+
+
+def test_watched_survives_unreadable_tasks(tmp_path: Path) -> None:
+    """Прогресс не валит прогон: битый tasks.md — раннер всё равно идёт."""
+    (tmp_path / "spec").mkdir()
+    (tmp_path / "spec" / "x.md").write_bytes(b"\xff\xfe\xfa")
+    called = []
+    code = rp.watched(lambda: called.append(1) or 0, target_dir=str(tmp_path),
+                      prefix="WS-1-", tasks_rel="spec/x.md",
+                      emit=lambda _l: None, period=0.05)  # fmt: skip
+    assert code == 0 and called == [1]

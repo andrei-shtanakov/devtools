@@ -205,6 +205,9 @@ class Watcher:
         self.began = 0.0
         self.seen_db = False
         self.warned = False
+        #: `running` из базового снимка — хвост убитого прошлого запуска:
+        #: его «восстановление» раннером в `failed` — не событие этого запуска
+        self.stale: dict[str, str | None] = {}
 
     def begin(self, t: float) -> None:
         """Базовый снимок без событий: прошлое этого прогона не печатается."""
@@ -213,6 +216,9 @@ class Watcher:
         if snap is not None:
             self.seen_db = True
             self.prev = snap
+            self.stale = {
+                k: r.started_at for k, r in snap.items() if r.status == "running"
+            }
 
     def tick(self, t: float) -> None:
         """Один такт: события переходов и живая строка."""
@@ -234,6 +240,12 @@ class Watcher:
             return
         self.seen_db = True
         for task_id, row in snap.items():
+            if task_id in self.stale:
+                if row.started_at == self.stale[task_id]:
+                    continue  # хвост прошлого запуска — молчим
+                del self.stale[task_id]  # новый старт: обычная задача
+                self._events(task_id, None, row, t)
+                continue
             self._events(task_id, self.prev.get(task_id), row, t)
         self.prev = snap
         self._live(snap, t)
@@ -262,9 +274,13 @@ class Watcher:
         running = [
             (_epoch(r.started_at) or t, task_id)
             for task_id, r in snap.items()
-            if r.status == "running"
+            if r.status == "running" and task_id not in self.stale
         ]
         if not running:
+            # между задачами — отсчёт от конца предыдущей, без номера (§3.2)
+            ends = [_epoch(r.completed_at) for r in snap.values()]
+            since = max([e for e in ends if e and e >= self.began] or [self.began])
+            self.live(f"  … · {fmt_duration(t - since)}")
             return
         start, task_id = max(running)
         done = sum(1 for r in snap.values() if r.status in _DONE)
@@ -288,19 +304,20 @@ class _LiveScreen:
     вывод раннера уходит в лог) и только в терминал. fd читается при каждой
     записи: перехват включается внутри вызова раннера."""
 
-    def __init__(self) -> None:
+    def __init__(self, fallback_fd: int = 1) -> None:
         self.drawn = False
+        self.fallback_fd = fallback_fd
 
     @staticmethod
-    def _fd() -> int | None:
-        raw = os.environ.get(SCREEN_FD_ENV, "")
-        if not raw.isdigit():
-            return None
-        fd = int(raw)
+    def _tty(fd: int) -> int | None:
         try:
             return fd if os.isatty(fd) else None
         except OSError:
             return None
+
+    def _fd(self) -> int | None:
+        raw = os.environ.get(SCREEN_FD_ENV, "")
+        return self._tty(int(raw)) if raw.isdigit() else None
 
     def __call__(self, text: str) -> None:
         fd = self._fd()
@@ -311,8 +328,15 @@ class _LiveScreen:
             self.drawn = True
 
     def clear(self) -> None:
+        """Стереть нарисованную строку. Перехват мог уже кончиться (личный
+        путь: он живёт только внутри вызова раннера) — тогда экран снова на
+        `fallback_fd` (stdout)."""
+        if not self.drawn:
+            return
         fd = self._fd()
-        if fd is None or not self.drawn:
+        if fd is None:
+            fd = self._tty(self.fallback_fd)
+        if fd is None:
             return
         with contextlib.suppress(OSError):
             os.write(fd, b"\r\x1b[K")
@@ -335,7 +359,7 @@ def watched(
     """
     try:
         text = (Path(target_dir) / tasks_rel).read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, ValueError):  # нет файла, права, битая кодировка
         text = ""
     live = _LiveScreen()
 
@@ -343,13 +367,16 @@ def watched(
         live.clear()  # строка события не дописывается в хвост живой
         emit(line)
 
-    watcher = Watcher(
-        state_db_path(target_dir, prefix),
-        read_tasks(text),
-        emit=emit_line,
-        live=live,
-    )
-    watcher.begin(time.time())
+    try:
+        watcher = Watcher(
+            state_db_path(target_dir, prefix),
+            read_tasks(text),
+            emit=emit_line,
+            live=live,
+        )
+        watcher.begin(time.time())
+    except Exception:  # noqa: BLE001 - прогресс не мешает прогону: без него
+        return call()
     stop = threading.Event()
 
     def loop() -> None:
