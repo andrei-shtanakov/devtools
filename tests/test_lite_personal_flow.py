@@ -142,7 +142,11 @@ class FakeOps:
         self.calls.append(("spec_runner", target_dir, args))
         if self.spec_rc == 0:
             self.prs.append(
-                {"number": CODE_PR, "state": "OPEN", "headRefName": "spec-runner/run-1"}
+                {
+                    "number": CODE_PR,
+                    "state": "OPEN",
+                    "head": {"ref": "spec-runner/run-1"},
+                }
             )
         return self.spec_rc
 
@@ -156,7 +160,7 @@ class FakeOps:
 
     def prs_by_head_prefix(self, repo_slug: str, prefix: str) -> list[dict]:
         self.calls.append(("prs_by_head_prefix", repo_slug, prefix))
-        return [p for p in self.prs if p["headRefName"].startswith(prefix)]
+        return [p for p in self.prs if p["head"]["ref"].startswith(prefix)]
 
     def names(self) -> list[str]:
         return [c[0] for c in self.calls]
@@ -569,7 +573,7 @@ def test_code_run_resume_takes_pr_after_observed_success(run) -> None:
     run.before_prs = []
     run.run_exit = 0
     ops.prs.append(
-        {"number": CODE_PR, "state": "OPEN", "headRefName": "spec-runner/run-1"}
+        {"number": CODE_PR, "state": "OPEN", "head": {"ref": "spec-runner/run-1"}}
     )
     assert _advance(run, ops) == 0
     assert "spec_runner" not in ops.names() and run.code_pr == CODE_PR
@@ -580,7 +584,7 @@ def test_code_run_unobserved_outcome_with_new_pr_stops(run) -> None:
     run.step = "code-run"
     run.before_prs = []
     ops.prs.append(
-        {"number": CODE_PR, "state": "OPEN", "headRefName": "spec-runner/run-1"}
+        {"number": CODE_PR, "state": "OPEN", "head": {"ref": "spec-runner/run-1"}}
     )
     assert _advance(run, ops) == 1
     assert "spec_runner" not in ops.names() and f"#{CODE_PR}" in run.stop_reason
@@ -590,7 +594,7 @@ def _partial(number: int, state_: str = "OPEN") -> dict:
     return {
         "number": number,
         "state": state_,
-        "headRefName": f"spec-runner/run-{number}",
+        "head": {"ref": f"spec-runner/run-{number}"},
     }
 
 

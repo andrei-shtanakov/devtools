@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+
+import pytest
+
+from governance import ops as ops_mod
 from governance import run_resume as rr
 
 BRANCH = "spec-runner/run-20261114-173445"
 
 
 def _pr(number: int, state: str = "OPEN", head: str = "spec-runner/run-1") -> dict:
-    return {"number": number, "state": state, "headRefName": head}
+    return {"number": number, "state": state, "head": {"ref": head}}
 
 
 def test_candidates_open_new_run_prs() -> None:
@@ -31,6 +37,42 @@ def test_candidates_skip_closed() -> None:
 
 def test_candidates_ignore_foreign_head() -> None:
     assert rr.resume_candidates([_pr(5, head="feature/x")], []) == []
+
+
+def test_candidates_unreadable_head_fails_closed() -> None:
+    """Запись без `head.ref` — нарушение контракта Ops, не «частичного PR нет»."""
+    with pytest.raises(RuntimeError, match="head.ref"):
+        rr.resume_candidates([{"number": 5, "state": "OPEN"}], [])
+
+
+def test_candidates_read_real_ops_records(monkeypatch) -> None:
+    """Сквозь настоящий `RealOps.prs_by_head_prefix`: форма записи — его."""
+    payload = [
+        {
+            "data": {
+                "repository": {
+                    "pullRequests": {
+                        "nodes": [
+                            {
+                                "number": 7,
+                                "title": "run",
+                                "body": "",
+                                "headRefName": BRANCH,
+                                "state": "OPEN",
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    ]
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload))
+
+    monkeypatch.setattr(ops_mod.subprocess, "run", fake_run)
+    prs = ops_mod.RealOps().prs_by_head_prefix("o/r", rr.RUN_BRANCH_PREFIX)
+    assert rr.resume_candidates(prs, []) == [(7, BRANCH)]
 
 
 _TASKS = (

@@ -24,11 +24,24 @@ class _BranchReader(Protocol):
     def show_file(self, target_dir: str, ref: str, path: str) -> str | None: ...
 
 
+def _head_ref(pr: dict) -> str:
+    """Ветка записи `Ops.prs_by_head_prefix` (`{"number", "head": {"ref"}, ...}`).
+
+    Нечитаемая ветка — нарушение контракта Ops: стоп, а не «частичного PR
+    нет» (иначе dfl молча создал бы новую ветку прогона).
+    """
+    head = pr.get("head")
+    ref = head.get("ref") if isinstance(head, dict) else None
+    if not isinstance(ref, str):
+        raise RuntimeError(f"PR без head.ref: {pr!r}")
+    return ref
+
+
 def resume_candidates(prs: list[dict], before: list[int]) -> list[tuple[int, str]]:
     """Открытые PR ветки прогона, появившиеся после `before`: `(номер, ветка)`."""
     old = set(before)
     found = [
-        (int(p["number"]), str(p.get("headRefName") or ""))
+        (int(p["number"]), _head_ref(p))
         for p in prs
         if p.get("state") == "OPEN" and int(p["number"]) not in old
     ]

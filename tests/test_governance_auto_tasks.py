@@ -30,7 +30,7 @@ def _facts(pr: int, *, state="OPEN", draft=False, rollup=None) -> dict:
 def _run_pr(number: int, state: str = "OPEN") -> dict:
     return {
         "number": number,
-        "headRefName": f"spec-runner/run-{number}",
+        "head": {"ref": f"spec-runner/run-{number}"},
         "state": state,
     }
 
@@ -88,7 +88,7 @@ class _ChainOps:
         self.calls.append(("prs", slug, prefix))
         if self.prs_exc is not None:
             raise self.prs_exc
-        return [p for p in self.prs if p["headRefName"].startswith(prefix)]
+        return [p for p in self.prs if p["head"]["ref"].startswith(prefix)]
 
     def names(self) -> list[str]:
         return [c[0] for c in self.calls]
