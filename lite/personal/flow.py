@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from governance import df_config, run_resume
+from governance import df_config, run_progress, run_resume
 from governance import manual_checks as mc
 from governance.author_launch import AuthorCall, config_mode, launch_author
 from governance.auto_tasks import RUN_BRANCH_PREFIX, TUI_HINT, notice
@@ -921,7 +921,13 @@ def _step_code_run(ctx: _Ctx) -> bool:
     run.before_prs, run.run_exit = before, None
     save(run)  # write-ahead: PR, открытые до запуска, не примутся
     notice(TUI_HINT.format(ws=run.ws_id))
-    rc = ctx.ops.spec_runner(run.target_dir, _run_args(run))
+    rc = run_progress.watched(
+        lambda: ctx.ops.spec_runner(run.target_dir, _run_args(run)),
+        target_dir=run.target_dir,
+        prefix=f"{run.ws_id}-",
+        tasks_rel=TASKS_PATH.format(ws_id=run.ws_id),
+        emit=notice,
+    )  # события задач и живой отсчёт на экране (#765)
     run.run_exit = rc
     save(run)
     after = _open_run_prs(ctx)

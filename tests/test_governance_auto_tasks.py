@@ -586,6 +586,7 @@ def test_spec_run_write_ahead_before_runner(state):
         return orig(target_dir, args)
 
     ops.spec_runner = run
+    _progress_tasks(state.target_dir, state.ws_id)
     assert auto_tasks._spec_run(state, ops) == 9
     assert seen == [{"status": "started", "before": [5]}]
 
@@ -867,3 +868,48 @@ def test_deliver_approve_git_error_is_named_stop(state, bridge, monkeypatch, cap
     out = capsys.readouterr().out
     assert out.startswith("spec-loop (test):") and "approve-PR" in out
     assert state.ops["tasks-approve"]["status"] == "started"
+
+
+def _progress_tasks(target_dir: str, ws_id: str) -> Path:
+    """tasks.md прогона — есть до запуска раннера, как в жизни."""
+    spec = Path(target_dir) / "spec"
+    spec.mkdir(parents=True, exist_ok=True)
+    (spec / f"{ws_id}-tasks.md").write_text(
+        "### TASK-001: Команда add\nP1 | TODO\n", encoding="utf-8"
+    )
+    return spec
+
+
+def _write_progress(target_dir: str, ws_id: str) -> None:
+    """Раннер «сделал» TASK-001: состояние в БД spec-runner (#765)."""
+    import sqlite3
+    from datetime import datetime
+
+    spec = _progress_tasks(target_dir, ws_id)
+    now = datetime.now().isoformat()
+    with sqlite3.connect(spec / f".executor-{ws_id}-state.db") as con:
+        con.executescript(
+            "CREATE TABLE tasks (task_id TEXT, status TEXT, started_at TEXT,"
+            " completed_at TEXT); CREATE TABLE attempts (id INTEGER PRIMARY KEY,"
+            " task_id TEXT, timestamp TEXT, success INTEGER, error TEXT);"
+        )
+        con.execute("INSERT INTO tasks VALUES ('TASK-001','success',?,?)", (now, now))
+
+
+def test_spec_run_prints_progress_events(state, capsys):
+    """#765: события задач и итог реализации — в выводе шага."""
+    ops = _ops()
+    ops.prs = [_run_pr(5)]
+    orig = ops.spec_runner
+
+    def run(target_dir, args):
+        _write_progress(target_dir, state.ws_id)
+        return orig(target_dir, args)
+
+    ops.spec_runner = run
+    _progress_tasks(state.target_dir, state.ws_id)
+    assert auto_tasks._spec_run(state, ops) == 9
+    out = capsys.readouterr().out
+    assert "✓ TASK-001 готова" in out
+    assert "реализация: сделано 1 из 1 · " in out
+    assert _run_calls(ops) == [("spec_runner", state.target_dir, RUN_ARGS)]

@@ -1112,3 +1112,22 @@ def test_personal_state_roundtrip_manual(run) -> None:
     path.write_text(json.dumps(raw), encoding="utf-8")
     old = state.load(run.run_id)
     assert old.manual_checks is False and old.manual == {}
+
+
+def test_code_run_prints_progress_summary(run, capsys) -> None:
+    """#765: итог реализации — в выводе личного шага."""
+    from tests.test_governance_auto_tasks import _progress_tasks, _write_progress
+
+    ops = FakeOps(run)
+    run.step = "code-run"
+    orig = ops.spec_runner
+
+    def runner(target_dir, args):
+        _write_progress(target_dir, run.ws_id)
+        return orig(target_dir, args)
+
+    ops.spec_runner = runner
+    _progress_tasks(run.target_dir, run.ws_id)
+    assert _advance(run, ops) == 0
+    out = capsys.readouterr().out
+    assert "✓ TASK-001 готова" in out and "реализация: сделано 1 из 1 · " in out
