@@ -62,7 +62,7 @@
 - Test: `tests/test_df_config.py` (или существующий файл тестов df_config)
 
 **Interfaces:**
-- Produces: `DfConfig.review_pause_after: tuple[str, ...] = ()`; таблица `[review]` необязательна (как `app`); `pause_after` — список строк, иначе `ConfigError`. Имена здесь не сверяются с этапами (это `review_pause.from_config`).
+- Produces: `DfConfig.review_pause_after: tuple[str, ...] = ()`; таблица `[review]` необязательна (как `app`); `pause_after` — список строк, иначе `ConfigError`. Имя, неизвестное обоим путям, — отказ при загрузке (спека §7.5; `REVIEW_STAGES`, добавлено в #786); чужое пути — фильтрует `review_pause.from_config`.
 
 - [ ] **Step 1: тесты**: `test_review_table_optional`, `test_review_pause_after_parsed`, `test_review_pause_after_not_list_rejected`, `test_review_unknown_key_rejected`.
 - [ ] **Step 2–4:** FAIL → реализация → PASS (+ существующие тесты df_config зелёные).

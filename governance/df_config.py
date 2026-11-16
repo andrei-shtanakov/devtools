@@ -94,6 +94,20 @@ TEST_BANNER_HEADER = "режим test: по сравнению со strict вы�
 _LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}")
 MODES = ("strict", "test")
 
+#: этапы с паузой на просмотр обоих путей dfl (#768): личный — brief, design,
+#: decomposition; enterprise — узлы бандла. Своя копия (модуль stdlib-only,
+#: исполняется скриптами мержа): совпадение с `lite.review_pause` держит
+#: `tests/test_df_config.py::test_review_stages_match_both_paths`. Имя вне
+#: перечня — отказ при загрузке (спека #768 §7.5); чужое пути — фильтрует `dfl`.
+REVIEW_STAGES = (
+    "brief",
+    "charter",
+    "requirements",
+    "behaviour-spec",
+    "design",
+    "acceptance",
+    "decomposition",
+)
 _TOP = {"schema", "mode", "accounts", "policy", "workspace", "harness", "app", "review"}
 _TABLES = {
     "accounts": ("human", "agent", "human_gh_config_dir", "agent_gh_config_dir"),
@@ -365,6 +379,13 @@ class _Parser:
             isinstance(item, str) and item for item in value
         ):
             raise self.fail("review.pause_after", "ожидается список непустых строк")
+        unknown = [item for item in value if item not in REVIEW_STAGES]
+        if unknown:
+            raise self.fail(
+                "review.pause_after",
+                f"неизвестный этап {', '.join(unknown)}; допустимы: "
+                f"{', '.join(REVIEW_STAGES)}",
+            )
         return tuple(value)
 
     def policy(self, data: dict[str, object], strict: bool) -> PolicySource | None:
