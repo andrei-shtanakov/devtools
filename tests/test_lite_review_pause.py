@@ -88,12 +88,16 @@ def test_confirm_removals_yes_no() -> None:
     assert got == {"D-01"}
 
 
-def test_confirm_removals_words() -> None:
-    """Ответ словами варианта: «удалить»/«снять» — да, «оставить» — нет."""
+def test_confirm_removals_words_bound_to_question() -> None:
+    """Слово варианта своего вопроса: «удалить» — да; «снять» на вопрос
+    «Удалить?» — не согласие (такого варианта не было)."""
+    kinds = {"D-01": "remove", "D-02": "remove", "FR-01": "downgrade"}
     got = rp.confirm_removals(
-        ["D-01", "D-02", "D-03"], read=scripted("Удалить", "оставить", "снять")
+        ["D-01", "D-02", "FR-01"],
+        read=scripted("Удалить", "снять", "", "снять"),
+        kinds=kinds,
     )
-    assert got == {"D-01", "D-03"}
+    assert got == {"D-01", "FR-01"}
 
 
 def test_confirm_removals_shows_id_and_title(capsys) -> None:
@@ -107,13 +111,17 @@ def test_confirm_removals_shows_id_and_title(capsys) -> None:
     )
 
 
-def test_confirm_removals_downgrade_asks_about_must(capsys) -> None:
-    """Пункт остался, но потерял Must — вопрос не «удалить»."""
+def test_confirm_removals_question_per_kind(capsys) -> None:
+    """Пункт остался: потерял Must — «Снять Must», иначе — «Принять правку»."""
     rp.confirm_removals(
-        ["FR-01"], read=scripted("2"), titles={"FR-01": "Вход"}, downgraded={"FR-01"}
+        ["FR-01", "FR-02"],
+        read=scripted("2", "2"),
+        titles={"FR-01": "Вход", "FR-02": "Выход"},
+        kinds={"FR-01": "downgrade", "FR-02": "change"},
     )
     out = capsys.readouterr().out
     assert "Снять Must с FR-01 — «Вход»? 1. снять · 2. оставить" in out
+    assert "Принять правку FR-02 — «Выход»? 1. принять · 2. оставить как было" in out
     assert "Удалить" not in out
 
 
@@ -134,6 +142,32 @@ def test_item_titles_heading_or_body_start() -> None:
     assert titles["D-02"].startswith("Поиск по названию без учёта регистра")
     assert titles["D-02"].endswith("…") and len(titles["D-02"]) <= 61
     assert titles["D-03"] == "Кэш"
+
+
+def test_item_titles_skip_machine_fields_keep_inline_code() -> None:
+    """Поля `· key: value` — не название (Q, DT); обычный inline-код — часть
+    названия, вырезается только служебный `traces: […]`."""
+    text = (
+        "#### Q-01 · owner_role: architects · resolution: resolved\n"
+        "Где хранить токены?\n"
+        "#### DT-01: Команда add · type: implement · owner: dev\n"
+        "#### D-04: Хранение — строка в `config.toml` `traces: [FR-01]`\n"
+    )
+    titles = node_guard.item_titles(text)
+    assert titles["Q-01"] == "Где хранить токены?"
+    assert titles["DT-01"] == "Команда add"
+    assert titles["D-04"] == "Хранение — строка в config.toml"
+
+
+def test_change_kinds() -> None:
+    before = (
+        "#### FR-01: вход\n**Priority**: Must\n"
+        "#### FR-02: выход\n**Priority**: Should\n"
+        "#### FR-03: справка\n**Priority**: Should\n"
+    )
+    after = "#### FR-01: вход\n**Priority**: Should\n#### FR-02: выход\n"
+    kinds = node_guard.change_kinds(before, after, ["FR-01", "FR-02", "FR-03"])
+    assert kinds == {"FR-01": "downgrade", "FR-02": "change", "FR-03": "remove"}
 
 
 def test_confirm_removals_stop_is_none() -> None:
@@ -185,7 +219,9 @@ def test_dropped_not_pending_and_listed_separately(tmp_path: Path) -> None:
     section = rp.pr_section(tmp_path)
     assert section.startswith("## Замечания владельца")
     assert "- дизайн: добавь X" in section
-    assert "не применены (правка удаляла пункты): дизайн: убери Y" in section
+    assert (
+        "не применены (правка удаляла или ослабляла пункты): дизайн: убери Y" in section
+    )
     assert "- дизайн: убери Y" not in section and "ещё Z" not in section
 
 
@@ -194,4 +230,31 @@ def test_pr_section_only_dropped(tmp_path: Path) -> None:
     rp.mark_dropped(tmp_path, "design", 1)
     section = rp.pr_section(tmp_path)
     assert section.startswith("## Замечания владельца")
-    assert "не применены (правка удаляла пункты): дизайн: убери Y" in section
+    assert (
+        "не применены (правка удаляла или ослабляла пункты): дизайн: убери Y" in section
+    )
+
+
+def test_keep_downgraded_sends_keep_must_note(tmp_path: Path, capsys) -> None:
+    """«оставить» на «Снять Must?» — автору «сохранить Priority Must», не
+    «не удалять» (пункт никто не удалял)."""
+    from lite import owner_review as orv
+
+    before = "#### FR-01: вход\n**Priority**: Must\n"
+    path = tmp_path / "10-requirements.md"
+    path.write_text(before, encoding="utf-8")
+    prompts: list[str] = []
+    outputs = iter(["#### FR-01: вход\n**Priority**: Should\n", before])
+
+    def revise(current: str, text: str) -> str:
+        prompts.append(text)
+        path.write_text(next(outputs), encoding="utf-8")
+        return ""
+
+    outcome, _ = orv.revise_by_owner(
+        path, "сделай вход необязательным", revise=revise, read=scripted("2")
+    )
+    assert outcome == orv.ACCEPTED
+    assert "Снять Must с FR-01 — «вход»?" in capsys.readouterr().out
+    assert "- FR-01: сохранить Priority Must" in prompts[1]
+    assert "не удалять" not in prompts[1]

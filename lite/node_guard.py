@@ -20,7 +20,8 @@ GRAMMAR_SENTINEL = "<grammar>"
 _FINDING_ID = re.compile(r"([^\s:]+):\s")
 _HEADING_RE = re.compile(r"^####\s+([A-Z][A-Z0-9]*-\d+[a-z]?)(?=[\s:]|$)(.*)$")
 _FIELD_RE = re.compile(r"^\*\*[^*]+\*\*:")  # `**Priority**: Must` — не текст пункта
-_CODE_SPAN_RE = re.compile(r"`[^`]*`")
+_CODE_SPAN_RE = re.compile(r"`([^`]*)`")
+_MACHINE_FIELD_RE = re.compile(r"^\w+:\s")  # `traces: […]`, `· type: implement`
 TITLE_MAX = 60
 
 
@@ -39,7 +40,7 @@ def item_titles(text: str) -> dict[str, str]:
         match = _HEADING_RE.match(line)
         if not match or match.group(1) in titles:
             continue
-        title = _clean(match.group(2))
+        title = _heading_title(match.group(2))
         if not title:
             title = next((_clean(b) for b in _body(lines[n + 1 :]) if _clean(b)), "")
         titles[match.group(1)] = _short(title)
@@ -57,13 +58,41 @@ def _body(lines: list[str]) -> list[str]:
     return body
 
 
+def _heading_title(tail: str) -> str:
+    """Название из хвоста заголовка: части через `·` вида `key: value` —
+    служебные поля (Q, DT), не название."""
+    parts = [_clean(part) for part in tail.split("·")]
+    return next((p for p in parts if p and not _MACHINE_FIELD_RE.match(p)), "")
+
+
 def _clean(text: str) -> str:
-    """Без code-span (`traces: […]`) и разделителей после id."""
-    return _CODE_SPAN_RE.sub("", text).strip().lstrip(":—–-. ").strip()
+    """Без служебных code-span (`traces: […]`), прочий inline-код — его
+    текстом; без разделителей после id."""
+    text = _CODE_SPAN_RE.sub(
+        lambda m: "" if _MACHINE_FIELD_RE.match(m.group(1)) else m.group(1), text
+    )
+    return " ".join(text.split()).lstrip(":—–-. ").strip()
 
 
 def _short(text: str) -> str:
     return text if len(text) <= TITLE_MAX else text[:TITLE_MAX].rstrip() + "…"
+
+
+def change_kinds(before: str, after: str, ids: list[str]) -> dict[str, str]:
+    """Что правка сделала с ослабленным пунктом: `remove` — исчез,
+    `downgrade` — был Must и потерял его, `change` — иначе изменён."""
+    old_prio, new_prio = _parse_requirements(before)[0], _parse_requirements(after)[0]
+    present = node_id_counts(after)
+    return {
+        item: (
+            "remove"
+            if item not in present
+            else "downgrade"
+            if old_prio.get(item) == "Must" and new_prio.get(item) != "Must"
+            else "change"
+        )
+        for item in ids
+    }
 
 
 def _findings_by_id(text: str) -> dict[str, Counter[str]]:

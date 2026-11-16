@@ -197,16 +197,17 @@ def test_unclear_remark_not_replayed(tmp_path) -> None:
     assert _advance(run, FakeOps(run), read=read, launch=author) == 1
     assert run.step == "design"
     assert (
-        "замечание не применено: правка удаляла D-02 — сформулируйте иначе "
-        "(dfl run)" in run.stop_reason
+        "замечание не применено: правка удаляла или ослабляла D-02 — "
+        "сформулируйте иначе (dfl run)" in run.stop_reason
     )
     assert (_bundle(run) / "20-design.md").read_text(encoding="utf-8") == DESIGN
     rd = state.run_dir(run.run_id)
     assert rp.pending(rd, "design") == []
     assert [r.status for r in rp.all_remarks(rd)] == ["dropped"]
     assert "- дизайн: убери поиск" not in rp.pr_section(rd)
-    assert "не применены (правка удаляла пункты): дизайн: убери поиск" in (
-        rp.pr_section(rd)
+    assert (
+        "не применены (правка удаляла или ослабляла пункты): дизайн: убери поиск"
+        in (rp.pr_section(rd))
     )
 
     author2 = _author()
