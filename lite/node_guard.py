@@ -21,7 +21,13 @@ _FINDING_ID = re.compile(r"([^\s:]+):\s")
 _HEADING_RE = re.compile(r"^####\s+([A-Z][A-Z0-9]*-\d+[a-z]?)(?=[\s:]|$)(.*)$")
 _FIELD_RE = re.compile(r"^\*\*[^*]+\*\*:")  # `**Priority**: Must` — не текст пункта
 _CODE_SPAN_RE = re.compile(r"`([^`]*)`")
-_MACHINE_FIELD_RE = re.compile(r"^\w+:\s")  # `traces: […]`, `· type: implement`
+#: служебные поля пункта (`traces: […]`, `· type: implement`) — закрытый
+#: перечень: двоеточие в названии («dfl: добавить флаг») полем не делает
+MACHINE_KEYS = (
+    "traces", "traces_to", "scenarios", "delivers", "depends_on", "type",
+    "owner", "owner_role", "resolution", "verification", "target", "status",
+)  # fmt: skip
+_MACHINE_FIELD_RE = re.compile(rf"^(?:{'|'.join(MACHINE_KEYS)}):\s")
 TITLE_MAX = 60
 
 
@@ -48,12 +54,14 @@ def item_titles(text: str) -> dict[str, str]:
 
 
 def _body(lines: list[str]) -> list[str]:
-    """Строки пункта до следующего заголовка, без полей `**Поле**:`."""
+    """Строки пункта до следующего заголовка, без полей `**Поле**:` и
+    служебных `key: value`."""
     body: list[str] = []
     for line in lines:
         if line.startswith("#"):
             break
-        if not _FIELD_RE.match(line.strip()):
+        bare = line.strip()
+        if not (_FIELD_RE.match(bare) or _MACHINE_FIELD_RE.match(bare)):
             body.append(line)
     return body
 

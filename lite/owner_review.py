@@ -14,13 +14,13 @@ from lite import node_guard
 from lite import review_pause as rp
 from lite.interview_chat import Read
 
-#: исходы круга правки (`revise_by_owner`)
 #: указание автору на повтор по пункту, который владелец оставил как был
 KEEP_NOTE = {
     rp.REMOVE: "- {item} не удалять",
     rp.DOWNGRADE: "- {item}: сохранить Priority Must",
     rp.CHANGE: "- {item}: не менять, оставить как было",
 }
+#: исходы круга правки (`revise_by_owner`)
 ACCEPTED, PAUSED, UNCLEAR, FAILED = "accepted", "paused", "unclear", "failed"
 UNCLEAR_REMARK = (
     "замечание не применено: правка удаляла или ослабляла {ids} — "
@@ -66,10 +66,12 @@ def revise_by_owner(
 def _round(
     path: Path, before: str, text: str, revise: Revise, read: Read
 ) -> tuple[str, str]:
-    """RF-2: вопрос «удалить <id>?» — только об удалённых/пониженных id; «нет»
-    — файл возвращается и один повтор с «<id> не удалять». Сломанные id
-    (дубли, новые находки гейта, `<grammar>`) — правка отклоняется без
-    вопроса, один повтор с названной проблемой."""
+    """RF-2: вопрос по каждому ослабленному id — по виду правки
+    (`node_guard.change_kinds`): «Удалить …?», «Снять Must с …?» или
+    «Принять правку …?»; отказ — файл возвращается и один повтор с
+    указанием своего вида (`KEEP_NOTE`). Сломанные id (дубли, новые находки
+    гейта, `<grammar>`) — правка отклоняется без вопроса, один повтор с
+    названной проблемой."""
     failed = revise(before, text)
     if failed:
         return FAILED, failed
