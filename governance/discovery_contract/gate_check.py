@@ -1,6 +1,6 @@
-"""gate_check — линтер discovery-brief по контракту DISCOVERY-BRIEF-CONTRACT.md (v1.2).
+"""gate_check — линтер discovery-brief по контракту DISCOVERY-BRIEF-CONTRACT.md (v1.3).
 
-Правила GC-01…GC-17 — нормативный реестр в контракте §5. Каждое finding несёт ID
+Правила GC-01…GC-21 — нормативный реестр в контракте §5. Каждое finding несёт ID
 правила; выход 1, если есть хотя бы одна ошибка.
 
 Запуск: uv run gate_check.py <brief.md> [<brief2.md> ...]
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -52,6 +53,24 @@ _DEF_RE = re.compile(r"^(?:-\s+\*\*|#{2,6}\s+)([A-Z]+-\d+)")
 _HEADING_RE = re.compile(r"^#{1,6}\s")
 _ID_LIST_RE = re.compile(r"[A-Z]+-\d+")
 _Q_REF_RE = re.compile(r"\bQ-\d+\b")
+
+# v1.3 (issue #30): enterprise-фрейм заказчика — translation table и владельцы
+TRANSLATION_HEADING = "## Translation table"
+TRANSLATION_COLUMNS = 6  # слова | категория | ограничение | допущение | подтверждает | срок
+REQUIRED_CATEGORIES = ("делать", "не делать", "стоить", "доказывать")
+TRANSLATION_CATEGORIES = set(REQUIRED_CATEGORIES) | {
+    "данные", "приёмка", "эксплуатация", "передача",
+}
+CONSTRAINT_PREFIXES = {"FR", "NFR", "CON", "OUT"}
+OWNER_DOMAINS = ("process", "data", "quality", "operations")
+NUMERIC_CATEGORIES = {"perf", "cost"}
+_EMPTY_CELL = {"", "—", "-"}
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_TARGET_RE = re.compile(r"\*\*(?:Acceptance[\w ]*|Target)\*\*:\s*(.+)")
+_CATEGORY_RE = re.compile(r"\*\*Category\*\*:\s*([\w|, -]+)")
+_OWNS_RE = re.compile(r"owns:\s*([a-z][a-z, ]*)")
+# число с единицей: «2 с», «500 запросов/день», «95%», «40 000 ₽», «$300», «€ 40»
+_NUMBER_UNIT_RE = re.compile(r"\d[\d.,]*\s*(?:[%$€₽£°]|[^\W\d_])|[$€₽£]\s*\d")
 
 
 @dataclass
@@ -98,6 +117,17 @@ class Entry:
     def resolved(self) -> bool:
         return bool(re.search(r"resolved:\s*true", self.text))
 
+    def categories(self) -> set[str]:
+        m = _CATEGORY_RE.search(self.text)
+        if not m:
+            return set()
+        return {c.strip().lower() for c in re.split(r"[|,]", m.group(1)) if c.strip()}
+
+    def owns(self) -> set[str]:
+        return {
+            d.strip() for m in _OWNS_RE.finditer(self.text) for d in m.group(1).split(",")
+        }
+
     def status(self) -> str | None:
         m = re.search(r"(?<![\w*])status:\s*(\w+)", self.text)
         return m.group(1) if m else None
@@ -118,6 +148,7 @@ class Finding:
 class Brief:
     meta: dict
     entries: list[Entry]
+    body: str = ""
 
     def by_prefix(self, prefix: str) -> list[Entry]:
         return [e for e in self.entries if e.prefix == prefix]
@@ -164,7 +195,7 @@ def parse_brief(text: str) -> Brief | None:
     meta, body = split_frontmatter(text)
     if meta is None:
         return None
-    return Brief(meta=meta, entries=parse_body(body))
+    return Brief(meta=meta, entries=parse_body(body), body=body)
 
 
 def _repo_root(base_dir: Path) -> Path | None:
@@ -195,13 +226,101 @@ def _resolve_ref(ref: str, base_dir: Path) -> Path | None:
     return None
 
 
+def translation_rows(body: str) -> list[list[str]] | None:
+    """Строки данных секции `## Translation table` (ячейки) или None, если секции нет."""
+    lines = body.splitlines()
+    start = next(
+        (i for i, line in enumerate(lines) if line.strip() == TRANSLATION_HEADING), None
+    )
+    if start is None:
+        return None
+    rows: list[list[str]] = []
+    for line in lines[start + 1 :]:
+        if _HEADING_RE.match(line):
+            break
+        if "|" not in line:  # GFM допускает строку таблицы без ведущей трубы
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if all(set(c) <= set("-: ") for c in cells) and "-" in line:  # |---|---|
+            continue
+        rows.append(cells)
+    return rows[1:]  # первая строка — заголовок колонок
+
+
+Report = Callable[[str, str, str], None]
+
+
+def check_translation_table(brief: Brief, err: Report) -> None:
+    """GC-18 формат строк translation table; GC-19 четыре обязательные категории."""
+    rows = translation_rows(brief.body)
+    if not rows:
+        err("GC-18", "Translation table", "секции нет или в ней нет строк")
+        return
+    doc_ids = brief.ids()
+    seen: set[str] = set()
+    for n, cells in enumerate(rows, 1):
+        ref = f"Translation table#{n}"
+        if len(cells) != TRANSLATION_COLUMNS:
+            err("GC-18", ref, f"{len(cells)} колонок, ожидается {TRANSLATION_COLUMNS}")
+            continue
+        words, category, constraint, assumption, confirmer, due = cells
+        if words in _EMPTY_CELL:
+            err("GC-18", ref, "нет слов заказчика")
+        if category.lower() not in TRANSLATION_CATEGORIES:
+            err("GC-18", ref, f"категория {category!r} вне словаря")
+        seen.add(category.lower())
+        ids = _ID_LIST_RE.findall(constraint)
+        if not ids:
+            err("GC-18", ref, "ограничение не ссылается на ID записи брифа")
+        for eid in ids:
+            if eid.rsplit("-", 1)[0] not in CONSTRAINT_PREFIXES or eid not in doc_ids:
+                err("GC-18", ref, f"{eid} — не существующая запись FR/NFR/CON/OUT")
+        if assumption not in _EMPTY_CELL:
+            if confirmer in _EMPTY_CELL:
+                err("GC-18", ref, "у допущения нет подтверждающего")
+            if not _DATE_RE.match(due):
+                err("GC-18", ref, f"у допущения нет срока YYYY-MM-DD (получено {due!r})")
+    for category in REQUIRED_CATEGORIES:
+        if category not in seen:
+            err("GC-19", "Translation table", f"нет ни одной строки категории «{category}»")
+
+
+def check_numeric_targets(brief: Brief, err: Report) -> None:
+    """GC-20: у NFR есть Category; perf/cost есть и числом с единицей либо Q-NN."""
+    present = set().union(*(e.categories() for e in brief.by_prefix("NFR")))
+    for category in sorted(NUMERIC_CATEGORIES - present):
+        err("GC-20", f"Category: {category}", f"нет ни одной NFR категории {category}")
+    for entry in brief.by_prefix("NFR"):
+        categories = entry.categories()
+        if not categories:
+            err("GC-20", entry.eid, "нет **Category**: без неё perf/cost-цель не проверить")
+            continue
+        if not categories & NUMERIC_CATEGORIES:
+            continue
+        target = " ".join(_TARGET_RE.findall(entry.text))
+        numbers = _ID_LIST_RE.sub(" ", target)  # цифры ID (M-01, CON-02) — не числа
+        if not (_NUMBER_UNIT_RE.search(numbers) or _Q_REF_RE.search(target)):
+            err("GC-20", entry.eid, "цель perf/cost без числа с единицей и без ссылки на Q-NN")
+
+
+def check_owners(brief: Brief, err: Report) -> None:
+    """GC-21: владельцы процесса, данных, качества и эксплуатации: P или открытый Q."""
+    owned: set[str] = set()
+    open_q = [e for e in brief.by_prefix("Q") if not e.resolved()]
+    for entry in (*brief.by_prefix("P"), *open_q):
+        owned |= entry.owns()
+    for domain in OWNER_DOMAINS:
+        if domain not in owned:
+            err("GC-21", f"owns: {domain}", "владелец не назван: нет P или открытого Q с этим owns")
+
+
 def _type_msg(expected: str, value: object) -> str:
     """Текст finding о неверной форме поля frontmatter."""
     return f"ожидается {expected}, получено {type(value).__name__}"
 
 
 def check(text: str, base_dir: Path | None = None) -> list[Finding]:
-    """Прогнать все правила GC-01…GC-17; вернуть findings (errors + warnings)."""
+    """Прогнать все правила GC-01…GC-21; вернуть findings (errors + warnings)."""
     findings: list[Finding] = []
 
     def err(rule: str, ref: str, msg: str) -> None:
@@ -405,6 +524,12 @@ def check(text: str, base_dir: Path | None = None) -> list[Finding]:
         for prefix in ("S", "IF", "AP"):
             for entry in brief.by_prefix(prefix):
                 warn("GC-14", entry.eid, "solution-space запись в customer-брифе")
+
+    # GC-18…GC-21 enterprise-фрейм заказчика (v1.3): translation table и владельцы
+    if frame_name == "customer":
+        check_translation_table(brief, err)
+        check_numeric_targets(brief, err)
+        check_owners(brief, err)
 
     # GC-17 число как исследование: ссылка на Q-NN из FR/NFR/M разрешается в Q брифа
     questions = {e.eid: e for e in brief.by_prefix("Q")}
