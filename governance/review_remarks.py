@@ -8,7 +8,7 @@
 `{"kind": "remark", "stage", "text", "ts"}` и `{"kind": "applied" | "dropped",
 "stage", "upto", "ts"}`. Строки `applied`/`dropped` этапа по порядку гасят
 следующие `upto` замечаний этапа: `applied` — правка внесена, `dropped` —
-отклонена (правка удаляла пункты); погашенное не недоиграно.
+отклонена (правка удаляла или ослабляла пункты); погашенное не недоиграно.
 `{"kind": "reset", "stage", "ts"}` — этап переоткрыт (`--reopen`): строки
 этапа до последнего сброса не действуют. Строки не переписываются,
 оборванная последняя строка игнорируется.
@@ -176,7 +176,10 @@ def pr_section(run_dir: Path, stages: Collection[str] | None = None) -> str:
     lines = [f"- {_named(r)}" for r in remarks if r.status == APPLIED]
     dropped = [_named(r) for r in remarks if r.status == DROPPED]
     if dropped:
-        lines += ["", "не применены (правка удаляла пункты): " + "; ".join(dropped)]
+        lines += [
+            "",
+            "не применены (правка удаляла или ослабляла пункты): " + "; ".join(dropped),
+        ]
     if not lines:
         return ""
     return "## Замечания владельца\n\n" + "\n".join(lines).lstrip("\n") + "\n"

@@ -233,7 +233,7 @@ def test_removal_still_unclear_drops_remark(env: Env, monkeypatch, capfd) -> Non
     _author(monkeypatch, NO_D02, NO_D02)
     assert env.run("run", "--subject", "t") == 1
     out, _ = _read(capfd)
-    assert "замечание не применено: правка удаляла D-02" in out
+    assert "замечание не применено: правка удаляла или ослабляла D-02" in out
     assert _design(env).read_text(encoding="utf-8") == DESIGN
     [remark] = rp.all_remarks(rs.run_dir(RUN_ID))
     assert remark.status == rp.DROPPED

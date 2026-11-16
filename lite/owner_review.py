@@ -15,9 +15,16 @@ from lite import review_pause as rp
 from lite.interview_chat import Read
 
 #: исходы круга правки (`revise_by_owner`)
+#: указание автору на повтор по пункту, который владелец оставил как был
+KEEP_NOTE = {
+    rp.REMOVE: "- {item} не удалять",
+    rp.DOWNGRADE: "- {item}: сохранить Priority Must",
+    rp.CHANGE: "- {item}: не менять, оставить как было",
+}
 ACCEPTED, PAUSED, UNCLEAR, FAILED = "accepted", "paused", "unclear", "failed"
 UNCLEAR_REMARK = (
-    "замечание не применено: правка удаляла {ids} — сформулируйте иначе (dfl run)"
+    "замечание не применено: правка удаляла или ослабляла {ids} — "
+    "сформулируйте иначе (dfl run)"
 )
 NO_TTY = (
     "ждёт просмотра этапа «{label}» — откройте {links}; замечания — dfl run в терминале"
@@ -81,16 +88,18 @@ def _round(
             )
         ]
     else:
+        kinds = node_guard.change_kinds(before, after, bad)
         answer = rp.confirm_removals(
-            bad,
-            read=read,
-            titles=node_guard.item_titles(before),
-            downgraded=set(node_guard.node_items(after)),
+            bad, read=read, titles=node_guard.item_titles(before), kinds=kinds
         )
         if answer is None:
             return PAUSED, ""
         allowed = answer
-        extra = [f"- {item} не удалять" for item in bad if item not in allowed]
+        extra = [
+            KEEP_NOTE[kinds[item]].format(item=item)
+            for item in bad
+            if item not in allowed
+        ]
         if not extra:
             return ACCEPTED, ""
     path.write_text(before, encoding="utf-8")

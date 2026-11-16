@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 
 from governance.auto_tasks import notice
@@ -31,8 +31,15 @@ from lite.interview_chat import STOP_WORD, Read, read_answer
 
 PERSONAL_STAGES = ("brief", "design", "decomposition")
 DONE_WORDS = frozenset({"дальше", "да", "ок", "1"})
-_YES_WORDS = frozenset({"1", "да", "удалить", "снять"})
+_YES_WORDS = frozenset({"1", "да"})
 _NO_WORDS = frozenset({"2", "нет", "оставить"})
+#: вид правки → (вопрос, слово согласия): слово чужого вопроса — не согласие
+REMOVE, DOWNGRADE, CHANGE = "remove", "downgrade", "change"
+_QUESTIONS = {
+    REMOVE: ("Удалить {named}? 1. удалить · 2. оставить", "удалить"),
+    DOWNGRADE: ("Снять Must с {named}? 1. снять · 2. оставить", "снять"),
+    CHANGE: ("Принять правку {named}? 1. принять · 2. оставить как было", "принять"),
+}
 
 
 class ReviewError(Exception):
@@ -80,27 +87,23 @@ def confirm_removals(
     *,
     read: Read,
     titles: Mapping[str, str] | None = None,
-    downgraded: Collection[str] = (),
+    kinds: Mapping[str, str] | None = None,
 ) -> set[str] | None:
-    """Спросить по каждому id, можно ли удалить (или снять Must у пункта из
-    `downgraded`): разрешённые id; `None` — `/стоп`/EOF (человек прервал —
-    пауза у вызывающего, не «нет»). Номер — всегда, название — из `titles`."""
+    """Спросить по каждому id, принять ли правку (вид — `kinds`, по
+    умолчанию удаление): разрешённые id; `None` — `/стоп`/EOF (человек
+    прервал — пауза у вызывающего, не «нет»). Номер — всегда, название — из
+    `titles`."""
     allowed: set[str] = set()
     for item in ids:
-        notice(_removal_question(item, (titles or {}).get(item, ""), downgraded))
+        question, word = _QUESTIONS[(kinds or {}).get(item, REMOVE)]
+        title = (titles or {}).get(item, "")
+        notice(question.format(named=f"{item} — «{title}»" if title else item))
+        yes = _YES_WORDS | {word}
         answer = read_answer(
-            read, quick=lambda s: s.strip().casefold() in _YES_WORDS | _NO_WORDS
+            read, quick=lambda s, yes=yes: s.strip().casefold() in yes | _NO_WORDS
         )
         if answer is None:
             return None
-        if answer.strip().casefold() in _YES_WORDS:
+        if answer.strip().casefold() in yes:
             allowed.add(item)
     return allowed
-
-
-def _removal_question(item: str, title: str, downgraded: Collection[str]) -> str:
-    """«Удалить D-02 — «Название»? 1. удалить · 2. оставить»."""
-    named = f"{item} — «{title}»" if title else item
-    if item in downgraded:
-        return f"Снять Must с {named}? 1. снять · 2. оставить"
-    return f"Удалить {named}? 1. удалить · 2. оставить"
