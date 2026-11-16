@@ -4201,7 +4201,7 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     # ревью PR #161, минор: давний баг рядом с этим кодом — каждая
     # находка ниже писала gate-findings.txt через write_text, ЗАТИРАЯ
     # предыдущую запись целиком; для fatal-веток это было безопасно (стоп
-    # сразу же), но non-fatal warning, введённый round 6, — единственная
+    # сразу же), но non-fatal warning (сейчас — GC-DT-CONTRACT) —
     # НЕ останавливающая запись в этой функции, и более поздний fatal-стоп
     # (например, GC-AC-COVERAGE) стирал её молча). Каждая ветка write_text
     # НИЖЕ обязана включать `warnings` в свою запись, а не только
@@ -4212,28 +4212,9 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
     if beh_path.exists() and decomp_path.exists():
         decomp_text = decomp_path.read_text(encoding="utf-8")
         beh_text = beh_path.read_text(encoding="utf-8")
-        # Non-fatal находки про verifies (round 7 ревью PR #161, минор;
-        # комментарий исправлен round 10 — прежняя версия обещала фильтр
-        # внутри `graph_findings`, которого там нет): `graph_findings`
-        # (ниже) про эти находки НЕ ЗНАЕТ ВООБЩЕ — она их не вычисляет и
-        # не фильтрует, каждый вызов парсит decomposition сам по себе
-        # (`non_fatal_findings` и `graph_findings` — два независимых
-        # прохода `parse_dt_tasks`, decomposition читается дважды за этот
-        # гейт; общий у них только сам модуль-источник,
-        # `_orphan_verifies_findings`, round 13 переименован из
-        # `_verify_group_and_orphan_findings` — единственная non-fatal
-        # находка теперь одна: опечатка/осиротевший путь). НЕ fatal
-        # (легаси-бандл с checked_by-целью, но без verifies, обязан пройти
-        # гейт), но обязаны быть видимы оператору. Пишутся В ТОТ ЖЕ
-        # gate-findings.txt
-        # как `warning GC-DT-GRAPH:` (не `error`) и НЕ останавливают
-        # прогон: `console_model` просто конкатенирует файл как показ
-        # оператору, не как управляющий сигнал (state.status — единственный
-        # авторитетный источник «гейт стоп/прошёл»).
-        warnings = [
-            f"warning GC-DT-GRAPH: {f}"
-            for f in decomposition_guard.non_fatal_findings(beh_text, decomp_text)
-        ]
+        # Сирота в verifies (файл, который не создаёт ни одна задача) —
+        # ошибка `graph_findings` с devtools#767; отдельного non-fatal
+        # канала у графа больше нет.
         try:
             selector_policy = target_selector_policy(state.target_dir)
         except ValueError as exc:

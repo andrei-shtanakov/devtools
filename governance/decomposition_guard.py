@@ -19,17 +19,6 @@ from governance.spec_runner_contract import (
     is_file_target_form,
 )
 
-# Маркер-подстрока non-fatal находки формы «осиротевший/опечатанный путь
-# в verifies» (round 7 ревью PR #161, минор) — единственная точка истины
-# её текста, используется в `_orphan_verifies_findings` НИЖЕ (единственный
-# продьюсер). Эта находка НИКОГДА не попадает в `graph_findings` (её
-# fatal-результат про неё не знает — она её не вычисляет и не
-# фильтрует) — публичная точка входа `non_fatal_findings` вычисляет её
-# ОТДЕЛЬНО; единственный потребитель — S4-гейт `governance.runner.
-# _step_gate` (round 6/7/8 ревью PR #161), пишет её как
-# `warning GC-DT-GRAPH:` в gate-findings.txt, не останавливая прогон:
-# элемент verifies, не являющийся checked_by-целью НИ ОДНОЙ задачи бандла.
-_ORPHAN_VERIFIES_TARGET_MARKER = "опечатка либо осиротевший путь"
 # Маркер-подстрока находки «группа наблюдения не выводится вовсе» — теперь
 # FATAL (round 13 ревью PR #161, минор — до этого была non-fatal
 # `_VERIFY_GROUP_UNDERIVABLE_MARKER`-находка формы; промотирована в
@@ -615,49 +604,27 @@ def _orphan_verifies_findings(
     tasks: list[DtTask],
     bindings: dict[str, tuple[str | None, str | None]],
 ) -> list[str]:
-    """Единственная ОСТАВШАЯСЯ non-fatal находка verifies (round 7 ревью
-    PR #161, минор, контракт владельца; «группа наблюдения не выводится»
-    промотирована в fatal round 13, см. `graph_findings`) — общая точка
-    для `non_fatal_findings` (публичная точка входа для S4-гейта):
+    """Сироты verifies — FATAL (devtools#767, решение владельца 16.11):
     элемент verifies, не являющийся checked_by-целью НИ ОДНОЙ задачи
-    бандла — опечатка либо осиротевший путь; уезжал бы в tasks-спеку как
-    селектор прогона, которого ни одна задача не создаёт.
+    бандла, — файл, который не создаёт ни одна задача. Раньше это была
+    non-fatal находка (round 7 ревью PR #161); бандл доезжал до
+    исполнения, и verify-задача тратила попытки на «not a regular file»
+    (живой прогон sdd-runer, DT-15/16). Легаси-форма «checked_by-цель
+    есть, verifies нет» по-прежнему не находка — это другой случай.
     """
     findings: list[str] = []
     owned_files = {target for target, _kind in bindings.values() if target is not None}
     for t in tasks:
         for f in t.verifies:
-            # Срез `::`-селектора ПЕРЕД сверкой (round 10 ревью PR #161,
-            # минор): bindings/owned_files несут ГОЛЫЕ пути
-            # (`_parse_beh_bindings` уже режет `::` для checked_by-целей)
-            # — тот же канон, что уже применён в render_tasks_dt (union-
-            # дедуп, round 9) и в closure-инварианте graph_findings ниже.
-            # Без среза `file.py::test`-форма в verifies никогда не
-            # совпадала бы с owned_files, даже когда файл реально в
-            # бандле, — ложная находка «опечатка».
+            # Срез `::`-селектора ПЕРЕД сверкой (round 10 ревью PR #161):
+            # bindings/owned_files несут ГОЛЫЕ пути.
             if f.split("::", 1)[0] not in owned_files:
                 findings.append(
-                    f"{t.dt_id}: verifies {f}: наблюдаемая цель не "
-                    "принадлежит ни одной задаче — "
-                    f"{_ORPHAN_VERIFIES_TARGET_MARKER}"
+                    f"{t.dt_id}: verifies {f}: файл не создаёт ни одна "
+                    "задача — дайте его задаче-реализации через checked_by "
+                    "её сценария или уберите из verifies"
                 )
     return findings
-
-
-def non_fatal_findings(behaviour_text: str, decomposition_text: str) -> list[str]:
-    """Non-fatal находки формы про `verifies` (round 7 ревью PR #161,
-    минор, контракт владельца) — единственная точка их вычисления, и
-    единственный потребитель — `governance.runner._step_gate`: показывает
-    их оператору как `warning GC-DT-GRAPH:` в gate-findings.txt, НЕ
-    останавливая прогон. `graph_findings` (fatal-агрегат S4-гейта и
-    `task_bridge.deliver`) про эту находку НЕ ЗНАЕТ ВООБЩЕ — она её не
-    вычисляет и не фильтрует (round 8 ревью PR #161, минор: исправлен
-    комментарий модуля, ранее ошибочно обещавший обратное); общий с этой
-    функцией источник — только `_orphan_verifies_findings`.
-    """
-    tasks, _form_findings = parse_dt_tasks(decomposition_text)
-    bindings = _parse_beh_bindings(behaviour_text)
-    return _orphan_verifies_findings(tasks, bindings)
 
 
 def graph_findings(
@@ -671,12 +638,8 @@ def graph_findings(
     Порядок проверок фиксирован, findings накапливаются (гейт показывает
     всё сразу, не по одной). Пустой список — граф валиден.
 
-    Единственная ОСТАВШАЯСЯ non-fatal находка про `verifies`
-    (`_orphan_verifies_findings`, round 7 ревью PR #161, минор — опечатка/
-    осиротевший путь) в результат НЕ попадает вовсе — вычисляется
-    ОТДЕЛЬНО, публичной `non_fatal_findings` (потребитель —
-    `runner._step_gate`, показывает её как warning, не останавливая
-    прогон); эта функция про неё просто не знает.
+    Сирота verifies (`_orphan_verifies_findings`: путь, которого нет ни
+    у одной checked_by-цели бандла) — fatal находка здесь (devtools#767).
 
     Fatal-инвариант verifies-замыкания (round 8 ревью PR #161, major,
     контракт владельца): элемент verifies обязан ссылаться на файл, чей
@@ -693,9 +656,9 @@ def graph_findings(
     RuntimeError «нечего прогонять» — «рекомендация формы, не блокирует
     доставку» была ложью именно для этого входа; легаси-форма,
     checked_by-цель ЕСТЬ и verifies нет, — по-прежнему НЕ находка).
-    Orphan verifies остаётся отдельным warning о причине, но не считается
-    исполняемой целью: если других целей нет, underivable-finding управляет
-    исходом и останавливает гейт (#162).
+    Orphan verifies — сама по себе fatal (devtools#767) и не считается
+    исполняемой целью: если других целей нет, рядом стоит и
+    underivable-finding (#162).
     """
     tasks, findings = parse_dt_tasks(decomposition_text)
     records = _parse_beh_binding_records(behaviour_text)
@@ -878,9 +841,9 @@ def graph_findings(
     # наблюдаемого файла его реально создаст (промпт авторинга рекомендует
     # класть в verifies именно файлы ДРУГИХ DT — ops.py, «owned by other
     # DTs» — но не требует ребра к ним, гард обязан требовать сам).
-    # Файлы, не являющиеся чьей-либо checked_by-целью вовсе (опечатка/
-    # осиротевший путь), здесь не смотрим — non-fatal-версия этой проверки
-    # уже сделана отдельно в `non_fatal_findings`. Срез `::`-селектора
+    # Файлы, не являющиеся чьей-либо checked_by-целью вовсе (сироты),
+    # здесь не смотрим — их ловит `_orphan_verifies_findings` в конце
+    # этой функции (fatal, devtools#767). Срез `::`-селектора
     # ПЕРЕД сверкой с file_owner (round 10 ревью PR #161, минор) — тот же
     # канон, что уже применён выше в orphan-проверке и в render_tasks_dt:
     # без него `file.py::test`-форма в verifies никогда не находила бы
@@ -960,6 +923,7 @@ def graph_findings(
                     f"{t.dt_id}: зависит от группы {g}, но не от всех её "
                     f"стоков (нет: {', '.join(sorted(missing))})"
                 )
+    findings.extend(_orphan_verifies_findings(tasks, bindings))
     return findings
 
 

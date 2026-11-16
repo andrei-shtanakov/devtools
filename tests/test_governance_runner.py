@@ -5982,19 +5982,15 @@ def test_gate_dt_graph_finding_stops(tmp_path: Path, runs_root, monkeypatch) -> 
     assert f"candidate-{state.wave}" not in state.ops
 
 
-def test_gate_dt_graph_non_fatal_finding_is_surfaced_as_warning(
+def test_gate_dt_graph_orphan_verifies_stops_gate(
     tmp_path: Path, runs_root, monkeypatch
 ) -> None:
-    """Round 7 ревью PR #161 (минор, контракт владельца), фикстура
-    обновлена в round 13 (major того же раунда промотировал «группа
-    наблюдения не выводится» в fatal — прежняя фикстура теперь стопит
-    гейт, см. test_gate_dt_graph_finding_stops_on_underivable_group):
-    осиротевший/опечатанный путь в verifies — единственный ОСТАВШИЙСЯ
-    non-fatal класс. DT-02 несёт СОБСТВЕННУЮ checked_by-цель (BEH-02
-    биндится), значит группа выводится и рендер не падает; verifies
-    указывает на путь, которого нет ни у одной checked_by-цели бандла.
-    Граф иначе валиден — гейт ПРОХОДИТ, но gate-findings.txt несёт
-    `warning GC-DT-GRAPH:` строку с опечаткой."""
+    """devtools#767 (решение владельца 16.11): осиротевший путь в verifies
+    — ошибка гейта. DT-02 несёт СОБСТВЕННУЮ checked_by-цель (BEH-02
+    биндится), значит группа выводится; verifies указывает на путь,
+    которого нет ни у одной checked_by-цели бандла. Раньше гейт проходил
+    с `warning GC-DT-GRAPH`, а исполнение тратило попытки на «not a
+    regular file» (sdd-runer DT-15/16) — теперь гейт стоит с error."""
     beh_two = (
         _DEFAULT_BEHAVIOUR_BODY
         + "\n#### BEH-02: y\n`traces: [FR-01]`\n- **checked_by**: "
@@ -6055,15 +6051,15 @@ def test_gate_dt_graph_non_fatal_finding_is_surfaced_as_warning(
             return super().author(call, kind, subject)
 
     ops = _Ops(facts=GREEN_PR_FACTS)
-    state = _drive_waves_to(tmp_path, "r-dt-graph-warning", ops, monkeypatch, 5)
+    state = _drive_waves_to(tmp_path, "r-dt-graph-orphan", ops, monkeypatch, 5)
 
-    assert state.status != "stopped_gate"
-    findings_path = runner.run_dir("r-dt-graph-warning") / "gate-findings.txt"
-    assert findings_path.exists()
+    assert state.status == "stopped_gate"
+    findings_path = runner.run_dir("r-dt-graph-orphan") / "gate-findings.txt"
     findings = findings_path.read_text()
-    assert "warning GC-DT-GRAPH" in findings
+    assert "error GC-DT-GRAPH" in findings
+    assert "warning GC-DT-GRAPH" not in findings
     assert "tests/test_typo.py" in findings
-    assert "опечатка либо осиротевший путь" in findings
+    assert "не создаёт ни одна задача" in findings
 
 
 def test_gate_dt_graph_finding_stops_on_underivable_group(
@@ -6072,8 +6068,8 @@ def test_gate_dt_graph_finding_stops_on_underivable_group(
     """Round 13 ревью PR #161, минор (контракт владельца): «группа
     наблюдения не выводится вовсе» промотирована в FATAL — гейт теперь
     останавливается на этом входе, не молча пропускает его как warning.
-    #162: orphan verifies объясняет причину warning-строкой, но не отменяет
-    fatal underivable — именно error управляет исходом гейта."""
+    #162/#767: orphan verifies — тоже error и объясняет причину рядом
+    с underivable."""
     beh_two = (
         _DEFAULT_BEHAVIOUR_BODY + "\n#### BEH-02: y\n`traces: [FR-01]`\n"
         "- **checked_by**: без бэктиков, не биндится\n"
@@ -6142,8 +6138,8 @@ def test_gate_dt_graph_finding_stops_on_underivable_group(
         runner.run_dir("r-dt-graph-underivable-stop") / "gate-findings.txt"
     ).read_text()
     assert "error GC-DT-GRAPH" in findings
-    assert "warning GC-DT-GRAPH" in findings
-    assert "опечатка либо осиротевший путь" in findings
+    assert "warning GC-DT-GRAPH" not in findings
+    assert "не создаёт ни одна задача" in findings
     assert "группа наблюдения не выводится" in findings
     assert "DT-02" in findings and "verifies" in findings
 
