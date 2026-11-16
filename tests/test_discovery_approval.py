@@ -27,6 +27,19 @@ def test_self_hash_matches_producer_on_signed_fixture() -> None:
     assert da.self_hash(_load("draft-brief.md")) == expected["self_hash"]
 
 
+def test_signed_fixture_was_produced_at_the_pinned_commit() -> None:
+    """Фикстура T40 — выход `discovery approve` того коммита, на котором
+    пинована копия: иначе сверка с продюсером относится к другому коду."""
+    expected = json.loads(_load("signed-brief.json"))
+    pinned = (vendor.CONTRACT / "PINNED.txt").read_text(encoding="utf-8")
+    commit = next(
+        line.split(":", 1)[1].strip()
+        for line in pinned.splitlines()
+        if line.startswith("commit:")
+    )
+    assert expected["discovery_commit"] == commit
+
+
 def test_crlf_variant_has_the_same_hash() -> None:
     signed = _load("signed-brief.md")
     assert da.self_hash(signed.replace("\n", "\r\n")) == da.self_hash(signed)
