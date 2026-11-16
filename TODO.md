@@ -3105,3 +3105,8 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
   владельцев; непочиненные находки видны человеку в причине стопа (`stop_findings`).
 - [ ] Починка GC-18…GC-21 в диалоге после интервью (`lite/gate_repair.py`), если живой enterprise-прогон встанет на них @owner:github:andrei-shtanakov @id:gate-repair-customer-v1.3
 - [x] Ре-вендор `contracts/discovery-approval/v1/gate_check.py` на discovery @ `9b6d8f8` (было в плане `0b0108d`; байты те же) (sha256 `6f0df20eb53b0b77…`, совпадает с `governance/discovery_contract/gate_check.py`). Authority-root, мержит человек. Не срочно: из копии берётся только `split_frontmatter`, он не менялся @owner:github:andrei-shtanakov @id:revendor-discovery-approval-gate-check
+
+## dfl run: продолжение прогона (devtools#767)
+
+- [x] Повтор `dfl run` при открытом частичном integration-PR — плашка проекта («сделано N из M задач») и стоп вместо новой ветки прогона; закрытый PR = начать заново (оба пути, `governance/run_resume.py`) @owner:github:andrei-shtanakov @id:dfl-run-resume-stop
+- [ ] Передавать ветку прогона в spec-runner (режим продолжения), когда выйдет spec-runner#678; до этого dfl останавливается (дизайн `docs/superpowers/specs/2026-11-16-dfl-run-resume-design.md` §3.4) @owner:github:andrei-shtanakov @id:dfl-run-resume-pass-branch @blocked_by:todo://spec-runner/integration-pr-resume-branch

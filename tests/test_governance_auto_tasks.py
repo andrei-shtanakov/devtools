@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from governance import auto_tasks, spec_loop
+from governance import auto_tasks, run_resume, spec_loop
 from governance import run_state as rs
 from governance.auto_tasks import TASKS_SKIP_TEST, run_chain
 from governance.pr_checks import NO_CHECKS_TEST
@@ -29,7 +30,7 @@ def _facts(pr: int, *, state="OPEN", draft=False, rollup=None) -> dict:
 def _run_pr(number: int, state: str = "OPEN") -> dict:
     return {
         "number": number,
-        "headRefName": f"spec-runner/run-{number}",
+        "head": {"ref": f"spec-runner/run-{number}"},
         "state": state,
     }
 
@@ -46,6 +47,16 @@ class _ChainOps:
         self.run_pr: int | None = 9
         self.prs_exc: Exception | None = None
         self.workflows: list[str] | None = ["ci.yml"]
+        self.fetched = True
+        self.tasks_md: str | None = None
+
+    def fetch_branch(self, target_dir: str, branch: str) -> bool:
+        self.calls.append(("fetch", branch))
+        return self.fetched
+
+    def show_file(self, target_dir: str, ref: str, path: str) -> str | None:
+        self.calls.append(("show", ref, path))
+        return self.tasks_md
 
     def pr_facts(self, slug: str, pr: int) -> dict:
         return self.facts[pr]
@@ -77,7 +88,7 @@ class _ChainOps:
         self.calls.append(("prs", slug, prefix))
         if self.prs_exc is not None:
             raise self.prs_exc
-        return [p for p in self.prs if p["headRefName"].startswith(prefix)]
+        return [p for p in self.prs if p["head"]["ref"].startswith(prefix)]
 
     def names(self) -> list[str]:
         return [c[0] for c in self.calls]
@@ -399,15 +410,85 @@ def test_spec_run_nonzero_exit_keeps_op_started(state):
     }
 
 
-def test_spec_run_resume_reruns_and_ignores_old_pr(state):
+def _tasks_md(done: int, total: int) -> str:
+    return "".join(
+        f"### TASK-{i:03d}: t\nP1 | {'✅ DONE' if i <= done else 'TODO'}\n\n"
+        for i in range(1, total + 1)
+    )
+
+
+def test_spec_run_failed_attempt_with_open_partial_pr_stops_with_banner(state, capsys):
+    """#767: повтор после упавшего прогона не создаёт новую ветку — плашка
+    проекта и стоп; запись прошлой попытки не перетирается."""
     rs.op_start(state, "spec-run", before=[5], exit=2, failed_prs=[7])
     ops = _ops()
     ops.prs = [_run_pr(5), _run_pr(7)]
+    ops.tasks_md = _tasks_md(14, 16)
+    assert auto_tasks._spec_run(state, ops) is None
+    assert _run_calls(ops) == []
+    assert ("show", "origin/spec-runner/run-7", "spec/WS-1-tasks.md") in ops.calls
+    out = capsys.readouterr().out
+    assert run_resume.banner("s", "o/alpha", "spec-runner/run-7", (14, 16)) in out
+    assert run_resume.resume_stop("spec-runner/run-7", 7) in out
+    assert rs.load(state.run_id).ops["spec-run"] == {
+        "status": "started",
+        "before": [5],
+        "exit": 2,
+        "failed_prs": [7],
+    }
+
+
+def test_spec_run_partial_stop_reaches_screen(state, monkeypatch):
+    """Под `dfl` stdout уходит в лог: плашка и причина стопа обязаны
+    дойти до экрана оператора через `DFL_SCREEN_FD` (ревью #767)."""
+    rs.op_start(state, "spec-run", before=[5], exit=2)
+    ops = _ops()
+    ops.prs = [_run_pr(5), _run_pr(7)]
+    ops.tasks_md = _tasks_md(1, 2)
+    r, w = os.pipe()
+    monkeypatch.setenv(auto_tasks.SCREEN_FD_ENV, str(w))
+    assert auto_tasks._spec_run(state, ops) is None
+    os.close(w)
+    screen = os.read(r, 65536).decode()
+    os.close(r)
+    assert "▶ продолжаю проект «s» · o/alpha" in screen
+    assert "сделано 1 из 2 задач" in screen
+    assert run_resume.resume_stop("spec-runner/run-7", 7) in screen
+
+
+def test_spec_run_banner_without_progress(state, capsys):
+    rs.op_start(state, "spec-run", before=[5], exit=2)
+    ops = _ops()
+    ops.prs = [_run_pr(5), _run_pr(7)]
+    ops.fetched = False
+    assert auto_tasks._spec_run(state, ops) is None
+    out = capsys.readouterr().out
+    assert "счётчик задач не прочитан" in out
+    assert run_resume.resume_stop("spec-runner/run-7", 7) in out
+    assert _run_calls(ops) == []
+
+
+def test_spec_run_two_partial_prs_stop(state, capsys):
+    rs.op_start(state, "spec-run", before=[5], exit=2)
+    ops = _ops()
+    ops.prs = [_run_pr(5), _run_pr(7), _run_pr(8)]
+    assert auto_tasks._spec_run(state, ops) is None
+    out = capsys.readouterr().out
+    assert run_resume.several_stop([7, 8]) in out
+    assert "▶ продолжаю" not in out
+    assert _run_calls(ops) == []
+
+
+def test_spec_run_failed_attempt_closed_partial_pr_reruns(state):
+    """Закрытый частичный PR — решение человека начать заново."""
+    rs.op_start(state, "spec-run", before=[5], exit=2, failed_prs=[7])
+    ops = _ops()
+    ops.prs = [_run_pr(5), _run_pr(7, state="CLOSED")]
     assert auto_tasks._spec_run(state, ops) == 9
     assert _run_calls(ops) == [("spec_runner", state.target_dir, RUN_ARGS)]
     assert state.ops["spec-run"] == {
         "status": "completed",
-        "before": [5, 7],
+        "before": [5],
         "pr": 9,
         "exit": 0,
     }

@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from governance import df_config
+from governance import df_config, run_resume
 from governance.author_launch import AuthorCall, config_mode, launch_author
 from governance.auto_tasks import RUN_BRANCH_PREFIX, TUI_HINT, notice
 from governance.edge_check import override
@@ -855,21 +855,52 @@ def _run_args(run: PersonalRun) -> list[str]:
     ]
 
 
-def _open_run_prs(ctx: _Ctx) -> list[int] | None:
+def _run_prs(ctx: _Ctx) -> list[dict] | None:
     try:
-        prs = ctx.ops.prs_by_head_prefix(ctx.run.repo_slug, RUN_BRANCH_PREFIX)
+        return ctx.ops.prs_by_head_prefix(ctx.run.repo_slug, RUN_BRANCH_PREFIX)
     except RuntimeError as exc:
         ctx.stop(f"список PR {RUN_BRANCH_PREFIX}* не прочитан: {exc} — {RETRY}")
         return None
+
+
+def _open_numbers(prs: list[dict]) -> list[int]:
     return sorted(int(p["number"]) for p in prs if p.get("state") == "OPEN")
+
+
+def _open_run_prs(ctx: _Ctx) -> list[int] | None:
+    prs = _run_prs(ctx)
+    return None if prs is None else _open_numbers(prs)
+
+
+def _partial_stop(ctx: _Ctx, prs: list[dict], before: list[int]) -> bool:
+    """Открыт частичный PR упавшей попытки — плашка и стоп (#767).
+
+    `True` — шаг встал; `False` — частичного PR нет (человек закрыл его,
+    чтобы начать заново), раннер перезапускается как раньше.
+    """
+    run = ctx.run
+    found = run_resume.resume_candidates(prs, before)
+    if len(found) > 1:
+        ctx.stop(run_resume.several_stop([n for n, _head in found]))
+        return True
+    if not found:
+        return False
+    pr, branch = found[0]
+    progress = run_resume.read_progress(
+        ctx.ops, run.target_dir, branch, TASKS_PATH.format(ws_id=run.ws_id)
+    )
+    say(run_resume.banner(run.subject, run.repo_slug, branch, progress))
+    ctx.stop(run_resume.resume_stop(branch, pr))
+    return True
 
 
 def _step_code_run(ctx: _Ctx) -> bool:
     """spec-runner → новый integration-PR (семантика `auto_tasks._spec_run`)."""
     run = ctx.run
-    current = _open_run_prs(ctx)
-    if current is None:
+    prs = _run_prs(ctx)
+    if prs is None:
         return False
+    current = _open_numbers(prs)
     before = current
     if run.before_prs is not None:
         pending = [n for n in current if n not in run.before_prs]
@@ -882,6 +913,8 @@ def _step_code_run(ctx: _Ctx) -> bool:
                 f"{partial} — он может быть частичным; закройте его и "
                 f"повторите dfl run (повтор перезапустит раннер; {ABANDON})"
             )
+        if run.run_exit not in (None, 0) and _partial_stop(ctx, prs, run.before_prs):
+            return False
         before = sorted(set(run.before_prs) | set(current))
     run.before_prs, run.run_exit = before, None
     save(run)  # write-ahead: PR, открытые до запуска, не примутся
@@ -889,12 +922,18 @@ def _step_code_run(ctx: _Ctx) -> bool:
     rc = ctx.ops.spec_runner(run.target_dir, _run_args(run))
     run.run_exit = rc
     save(run)
-    if rc != 0:
-        return ctx.stop(
-            f"spec-runner run вернул {rc} — разберите и повторите dfl run "
-            "(повтор перезапустит раннер)"
-        )
     after = _open_run_prs(ctx)
+    if rc != 0:
+        # причина — код раннера, даже если список PR не прочитан
+        partial = [n for n in after or [] if n not in before]
+        promise = (
+            "повтор покажет, что сделано, и не создаст новую ветку"
+            if partial
+            else "повтор перезапустит раннер"
+        )
+        return ctx.stop(
+            f"spec-runner run вернул {rc} — разберите и повторите dfl run ({promise})"
+        )
     if after is None:
         return False
     return _take_new_pr(ctx, [n for n in after if n not in before])

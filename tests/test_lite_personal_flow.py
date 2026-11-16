@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from governance import run_resume
 from governance.author_launch import LaunchOutcome
 from governance.brief_facts import DefaultBranch
 from governance.facts import Fact, Outcome
@@ -56,6 +57,8 @@ class FakeOps:
         self.run_head_fact: Fact | None = None  # переопределить факт целиком
         self.ancestor: bool | None = False
         self.push_fail = False
+        self.fetched = True
+        self.tasks_md: str | None = None
 
     def default_branch_fact(self, repo_slug: str) -> Fact:
         self.calls.append(("default_branch_fact", repo_slug))
@@ -139,13 +142,25 @@ class FakeOps:
         self.calls.append(("spec_runner", target_dir, args))
         if self.spec_rc == 0:
             self.prs.append(
-                {"number": CODE_PR, "state": "OPEN", "headRefName": "spec-runner/run-1"}
+                {
+                    "number": CODE_PR,
+                    "state": "OPEN",
+                    "head": {"ref": "spec-runner/run-1"},
+                }
             )
         return self.spec_rc
 
+    def fetch_branch(self, target_dir: str, branch: str) -> bool:
+        self.calls.append(("fetch_branch", branch))
+        return self.fetched
+
+    def show_file(self, target_dir: str, ref: str, path: str) -> str | None:
+        self.calls.append(("show_file", ref, path))
+        return self.tasks_md
+
     def prs_by_head_prefix(self, repo_slug: str, prefix: str) -> list[dict]:
         self.calls.append(("prs_by_head_prefix", repo_slug, prefix))
-        return [p for p in self.prs if p["headRefName"].startswith(prefix)]
+        return [p for p in self.prs if p["head"]["ref"].startswith(prefix)]
 
     def names(self) -> list[str]:
         return [c[0] for c in self.calls]
@@ -558,7 +573,7 @@ def test_code_run_resume_takes_pr_after_observed_success(run) -> None:
     run.before_prs = []
     run.run_exit = 0
     ops.prs.append(
-        {"number": CODE_PR, "state": "OPEN", "headRefName": "spec-runner/run-1"}
+        {"number": CODE_PR, "state": "OPEN", "head": {"ref": "spec-runner/run-1"}}
     )
     assert _advance(run, ops) == 0
     assert "spec_runner" not in ops.names() and run.code_pr == CODE_PR
@@ -569,10 +584,79 @@ def test_code_run_unobserved_outcome_with_new_pr_stops(run) -> None:
     run.step = "code-run"
     run.before_prs = []
     ops.prs.append(
-        {"number": CODE_PR, "state": "OPEN", "headRefName": "spec-runner/run-1"}
+        {"number": CODE_PR, "state": "OPEN", "head": {"ref": "spec-runner/run-1"}}
     )
     assert _advance(run, ops) == 1
     assert "spec_runner" not in ops.names() and f"#{CODE_PR}" in run.stop_reason
+
+
+def _partial(number: int, state_: str = "OPEN") -> dict:
+    return {
+        "number": number,
+        "state": state_,
+        "head": {"ref": f"spec-runner/run-{number}"},
+    }
+
+
+def test_code_run_failed_attempt_with_open_partial_pr_stops_with_banner(
+    run, capsys
+) -> None:
+    """#767: повтор после упавшего прогона — плашка и стоп, не новая ветка."""
+    ops = FakeOps(run)
+    run.step = "code-run"
+    run.before_prs = []
+    run.run_exit = 1
+    ops.prs.append(_partial(7))
+    ops.tasks_md = "### TASK-001: a\nP1 | ✅ DONE\n\n### TASK-002: b\nP1 | TODO\n"
+    assert _advance(run, ops) == 1
+    assert "spec_runner" not in ops.names()
+    tasks_rel = f"spec/{run.ws_id}-tasks.md"
+    assert ("show_file", "origin/spec-runner/run-7", tasks_rel) in ops.calls
+    expected = run_resume.banner(
+        run.subject, run.repo_slug, "spec-runner/run-7", (1, 2)
+    )
+    assert expected in capsys.readouterr().out
+    assert run.stop_reason == run_resume.resume_stop("spec-runner/run-7", 7)
+    assert run.before_prs == [] and run.run_exit == 1
+
+
+def test_code_run_failed_attempt_closed_partial_pr_reruns(run) -> None:
+    ops = FakeOps(run)
+    run.step = "code-run"
+    run.before_prs = []
+    run.run_exit = 1
+    ops.prs.append(_partial(7, "CLOSED"))
+    assert _advance(run, ops) == 0
+    assert "spec_runner" in ops.names() and run.code_pr == CODE_PR
+
+
+def test_code_run_two_partial_prs_stop(run) -> None:
+    ops = FakeOps(run)
+    run.step = "code-run"
+    run.before_prs = []
+    run.run_exit = 1
+    ops.prs += [_partial(7), _partial(8)]
+    assert _advance(run, ops) == 1
+    assert "spec_runner" not in ops.names()
+    assert run.stop_reason == run_resume.several_stop([7, 8])
+
+
+def test_spec_runner_failure_with_partial_pr_promises_banner(run) -> None:
+    """После падения с частичным PR повтор не перезапустит раннер (#767)."""
+    ops = FakeOps(run)
+    run.step = "code-run"
+    run.before_prs = []
+    ops.spec_rc = 1
+    orig = ops.spec_runner
+
+    def run_with_partial(target_dir, args):
+        ops.prs.append(_partial(7))
+        return orig(target_dir, args)
+
+    ops.spec_runner = run_with_partial
+    assert _advance(run, ops) == 1
+    assert "перезапустит" not in run.stop_reason
+    assert "не создаст новую ветку" in run.stop_reason
 
 
 def test_code_pr_merged_marks_done(run, capsys) -> None:

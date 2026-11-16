@@ -14,7 +14,7 @@ import contextlib
 import os
 import subprocess
 
-from governance import accept_pr
+from governance import accept_pr, run_resume
 from governance import approve_node as an
 from governance import run_state as rs
 from governance import task_bridge as tb
@@ -165,17 +165,54 @@ def _approve_tasks(state: RunState, ops: Ops) -> bool:
     return True
 
 
-RUN_BRANCH_PREFIX = "spec-runner/run-"
+RUN_BRANCH_PREFIX = run_resume.RUN_BRANCH_PREFIX
+
+
+def _run_prs(state: RunState, ops: Ops) -> list[dict] | None:
+    """PR веток прогона раннера; `None` — форджа недоступна (стоп)."""
+    try:
+        return ops.prs_by_head_prefix(state.repo_slug, RUN_BRANCH_PREFIX)
+    except RuntimeError as exc:
+        _stop(f"список PR {RUN_BRANCH_PREFIX}* не прочитан: {exc}")
+        return None
+
+
+def _open_numbers(prs: list[dict]) -> list[int]:
+    return sorted(int(p["number"]) for p in prs if p.get("state") == "OPEN")
 
 
 def _open_run_prs(state: RunState, ops: Ops) -> list[int] | None:
     """Номера OPEN integration-PR раннера; `None` — форджа недоступна (стоп)."""
-    try:
-        prs = ops.prs_by_head_prefix(state.repo_slug, RUN_BRANCH_PREFIX)
-    except RuntimeError as exc:
-        _stop(f"список PR {RUN_BRANCH_PREFIX}* не прочитан: {exc}")
-        return None
-    return sorted(int(p["number"]) for p in prs if p.get("state") == "OPEN")
+    prs = _run_prs(state, ops)
+    return None if prs is None else _open_numbers(prs)
+
+
+def _partial_stop(
+    state: RunState, ops: Ops, prs: list[dict], before: list[int]
+) -> bool:
+    """Открыт частичный PR упавшей попытки — плашка и стоп (#767).
+
+    `True` — цепочка встала; `False` — частичного PR нет (человек закрыл
+    его, чтобы начать заново), раннер перезапускается как раньше.
+    """
+    found = run_resume.resume_candidates(prs, before)
+    if len(found) > 1:
+        _screen_stop(run_resume.several_stop([n for n, _head in found]))
+        return True
+    if not found:
+        return False
+    pr, branch = found[0]
+    tasks_rel = f"spec/{state.ws_id}-tasks.md"
+    progress = run_resume.read_progress(ops, state.target_dir, branch, tasks_rel)
+    notice(run_resume.banner(state.subject, state.repo_slug, branch, progress))
+    _screen_stop(run_resume.resume_stop(branch, pr))
+    return True
+
+
+def _screen_stop(reason: str) -> None:
+    """`_stop`, но и на экран оператора: под `dfl` stdout — это лог, а
+    действие («влейте / закройте PR») человек должен увидеть сразу."""
+    notice(f"spec-loop (test): {reason}")
 
 
 #: реализация идёт долго и молча — как смотреть прогресс (devtools#765 б)
@@ -218,17 +255,21 @@ def _spec_run(state: RunState, ops: Ops) -> int | None:
     - `exit = 0` записан — новый PR подхватывается без второго запуска;
     - исход не наблюдён (падение) и новый PR открыт — стоп: PR мог быть
       частичным, его закрывает человек;
-    - иначе (ненулевой код либо нового PR нет) — раннер перезапускается,
-      открытые `spec-runner/run-*` PR уходят в `before` и не принимаются.
+    - ненулевой код и открыт частичный PR — плашка проекта и стоп: spec-runner
+      пока не продолжает начатую ветку, а новая потеряла бы сделанное
+      (#767); закрытый человеком PR = начать заново;
+    - иначе (нового PR нет) — раннер перезапускается, открытые
+      `spec-runner/run-*` PR уходят в `before` и не принимаются.
     """
     key = "spec-run"
     if not _mode_gate(state):
         return None
     if op_status(state, key) == "completed":
         return state.ops[key]["pr"]
-    current = _open_run_prs(state, ops)
-    if current is None:
+    prs = _run_prs(state, ops)
+    if prs is None:
         return None
+    current = _open_numbers(prs)
     previous = state.ops.get(key)
     before = current
     if previous is not None:
@@ -243,6 +284,10 @@ def _spec_run(state: RunState, ops: Ops) -> int | None:
                 f"{partial} — он может быть частичным и не принимается; "
                 "закройте его и повторите (повтор перезапустит раннер)"
             )
+            return None
+        if previous.get("exit") not in (None, 0) and _partial_stop(
+            state, ops, prs, old
+        ):
             return None
         before = sorted(set(old) | set(current))
     op_start(state, key, before=before)
@@ -277,6 +322,14 @@ def _take_new_pr(state: RunState, key: str, new: list[int]) -> int | None:
     return None
 
 
+#: что даст повтор после ненулевого кода: с частичным PR — плашку и стоп
+#: (#767), без него — перезапуск раннера
+_RETRY_AFTER_FAIL = {
+    True: "повтор покажет, что сделано, и не создаст новую ветку",
+    False: "повтор перезапустит раннер",
+}
+
+
 def _record_run_failure(
     state: RunState, ops: Ops, key: str, rc: int, before: list[int]
 ) -> None:
@@ -292,7 +345,7 @@ def _record_run_failure(
     partial = ", ".join(f"#{n}" for n in failed) or "нет"
     _stop(
         f"spec-runner run вернул {rc}; частичные integration-PR: {partial} "
-        "— не принимаются; разберите и повторите (повтор перезапустит раннер)"
+        f"— не принимаются; разберите и повторите ({_RETRY_AFTER_FAIL[bool(failed)]})"
     )
     return None
 
