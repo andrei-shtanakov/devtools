@@ -257,3 +257,14 @@ def test_run_state_review_pause_default_empty(runs_root) -> None:
     )
     rs.save(chosen)
     assert rs.load("r-0002").review_pause == ["design"]
+
+
+def test_run_state_manual_checks_default_false(runs_root) -> None:
+    """#771: старый леджер без поля — «старый» прогон, вопросов нет."""
+    state = _mk(runs_root)
+    assert state.manual_checks is False
+    path = rs.run_dir(state.run_id) / "run.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.pop("manual_checks")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert rs.load(state.run_id).manual_checks is False

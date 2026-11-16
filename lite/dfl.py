@@ -36,6 +36,7 @@ from typing import cast
 from governance import brief_tools as bt
 from governance import df_config, run_lock, runner, spec_loop, user_targets
 from governance import interview as iv
+from governance import manual_checks as mc
 from governance import run_state as rs
 from governance.author_launch import AuthorCall, LaunchOutcome, launch_author
 from governance.edge_check.check import run_check
@@ -45,6 +46,7 @@ from lite import edge_resolve as er
 from lite import failure_log as fl
 from lite import interview_chat as ic
 from lite import interview_view as iview
+from lite import manual_ask as ma
 from lite import owner_review as orv
 from lite import review_pause as rp
 from lite import runlog
@@ -1492,8 +1494,62 @@ def _accepted_url(state: rs.RunState) -> str | None:
 
 
 def _finished(cust: rs.RunState, runs: list[rs.RunState]) -> bool:
+    """PR с кодом проверен и ручные проверки отвечены (#771)."""
     eng = _engineer_of(cust, runs)
-    return eng is not None and _accepted_url(eng) is not None
+    return (
+        eng is not None and _accepted_url(eng) is not None and not _manual_pending(eng)
+    )
+
+
+#: op записи ответов на ручные проверки (#771)
+MANUAL_OP = "manual-checks"
+MANUAL_HINT = "ждут ответа ручные проверки — dfl run"
+
+
+def _manual_pending(state: rs.RunState) -> bool:
+    return mc.pending(state.manual_checks, state.ops.get(MANUAL_OP))
+
+
+def _manual_summary(state: rs.RunState, closed: frozenset[int] = frozenset()) -> str:
+    record = state.ops.get(MANUAL_OP) or {}
+    return mc.summary(mc.checks_of(record), record.get("answers") or {}, closed)
+
+
+def _with_summary(line: str, state: rs.RunState) -> str:
+    tail = _manual_summary(state)
+    return f"{line}; {tail}" if tail else line
+
+
+def _bundle_texts(state: rs.RunState) -> tuple[str, str]:
+    bundle = Path(state.target_dir) / state.bundle_dir
+    return (
+        (bundle / "15-behaviour-spec.md").read_text(encoding="utf-8"),
+        (bundle / "30-decomposition.md").read_text(encoding="utf-8"),
+    )
+
+
+def _manual_step(state: rs.RunState, url: str) -> int | None:
+    """Ручные проверки перед «конвейер закончен» (#771), вне перехвата
+    вывода: вопрос и ответ — на экране. `None` — пройдено; код — стоп."""
+    result = (state.ops.get("code-accept") or {}).get("result") or {}
+    pr = int(result.get("pr") or url.rstrip("/").rsplit("/", 1)[-1])
+    record = state.ops.setdefault(MANUAL_OP, {})
+    reason = ma.settle(
+        record,
+        load_texts=lambda: _bundle_texts(state),
+        tty=_is_tty(),
+        read=ic.stdin_read,
+        ops=_QuietOps(_forge()),
+        repo_slug=state.repo_slug,
+        pr=pr,
+        pr_url=url,
+        run_id=state.run_id,
+        save=lambda: rs.save(state),
+    )
+    if reason is None:
+        return None
+    say(reason)
+    return 0
 
 
 def _select_customer(
@@ -1529,21 +1585,35 @@ def _engineer_step(
     eng: rs.RunState, repo: str, loop: Callable[[list[str]], int]
 ) -> int:
     url = _accepted_url(eng)
-    if url is not None and merged_unreviewed(eng.ops):
-        say(f"PR с кодом вмержен без автоматической приёмки: {url}; конвейер закончен")
-        return 0
-    if url is not None and code_merged(eng.ops):
+    if url is None:
+        code = loop(["--subject", eng.subject, "--repo", repo, "--run-id", eng.run_id])
+        fresh = _load_run(eng.run_id) if code == 0 else None
+        url = _accepted_url(fresh) if fresh is not None else None
+        if fresh is None or url is None or not _manual_pending(fresh):
+            return code
+        eng = fresh  # приёмка завершилась этим шагом — ручные проверки сейчас
+    if _manual_pending(eng):
+        stopped = _manual_step(eng, url)
+        if stopped is not None:
+            return stopped
+    say(_with_summary(_accepted_line(eng, url), eng))
+    return 0
+
+
+def _accepted_line(eng: rs.RunState, url: str) -> str:
+    """Итог шага, когда PR с кодом уже проверен (до хвоста ручных проверок)."""
+    if merged_unreviewed(eng.ops):
+        return (
+            f"PR с кодом вмержен без автоматической приёмки: {url}; конвейер закончен"
+        )
+    if code_merged(eng.ops):
         # merged+reviewed пишет только auto_tasks._finish_merged: ревью этой
         # головы одобрило, но приёмка не завершилась (ревью #739)
-        say(
+        return (
             f"PR с кодом вмержен человеком после одобряющего ревью, приёмка "
             f"не завершена: {url}; конвейер закончен"
         )
-        return 0
-    if url is not None:
-        say(f"PR с кодом проверен: {url}; мерж — за вами")
-        return 0
-    return loop(["--subject", eng.subject, "--repo", repo, "--run-id", eng.run_id])
+    return f"PR с кодом проверен: {url}; мерж — за вами"
 
 
 def _brief_step(cust: rs.RunState, role: str, loop: Callable[[list[str]], int]) -> int:
@@ -1622,6 +1692,8 @@ def status(cwd: Path) -> int:
         line = f"{state.run_id}  {_frame(state) or '-'}  {state.status}"
         hint = _next_hint(state, runs)
         say(f"{line}  дальше: {hint}" if hint else line)
+        if verbosity() >= 1:
+            _manual_status(state.ops.get(MANUAL_OP) or {}, state.repo_slug)
         for key, op_status in _op_statuses(state).items():
             say(f"  {key}: {op_status}", 2)
     active = personal_state.active_for(user_targets.slug_from_url(target.repo_url))
@@ -1629,6 +1701,29 @@ def status(cwd: Path) -> int:
         line = f"личный прогон {active.run_id}: шаг {active.step}"
         say(f"{line} — {active.stop_reason}" if active.stop_reason else line)
     return 0
+
+
+def _manual_status(record: dict, repo_slug: str) -> None:
+    """`dfl status -v`: строка на ручную проверку; состояние issue «не
+    выполнено» — вживую (закрыт = выполнено позже, журнал только растёт)."""
+    answers = record.get("answers") or {}
+    for check in mc.checks_of(record):
+        answer = answers.get(check.beh_id)
+        if answer is None:
+            say(f"  {check.beh_id} ({check.task_id}): ждёт ответа", 1)
+            continue
+        line = f"  {check.beh_id} ({check.task_id}): "
+        line += mc.VERDICT_WORDS.get(str(answer.get("verdict")), "?")
+        if answer.get("note"):
+            line += f" — {answer['note']}"
+        issue = answer.get("issue")
+        if issue:
+            state = _forge().issue_state(repo_slug, int(issue))
+            mark = {"CLOSED": "закрыт — выполнено позже", "OPEN": "открыт"}
+            line += (
+                f" → issue #{issue} ({mark.get(str(state), 'состояние не прочитано')})"
+            )
+        say(line, 1)
 
 
 def _registered_target(cwd: Path) -> user_targets.UserTarget:
@@ -1641,13 +1736,16 @@ def _registered_target(cwd: Path) -> user_targets.UserTarget:
 
 def _next_hint(state: rs.RunState, runs: list[rs.RunState]) -> str | None:
     url = _accepted_url(state)
+    if url is not None and _manual_pending(state):
+        return MANUAL_HINT
     if url is not None:
         # конвейер закончен и без мержа: dfl run его не продолжает (ревью #739);
         # новую тему предлагаем, только если её не заблокирует другой конвейер
-        done = (
+        done = _with_summary(
             f"конвейер закончен ({url} вмержен)"
             if code_merged(state.ops)
-            else (f"смержите {url} — конвейер закончен")
+            else (f"смержите {url} — конвейер закончен"),
+            state,
         )
         busy = any(_frame(c) == "customer" and not _finished(c, runs) for c in runs)
         return done if busy else f"{done}; {NEXT_SUBJECT_HINT}"
