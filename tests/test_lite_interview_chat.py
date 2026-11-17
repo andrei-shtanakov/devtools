@@ -941,3 +941,12 @@ def test_send_hint_once_per_process(monkeypatch, capsys) -> None:
     ic.read_answer(_reader("а", ""))
     ic.read_answer(_reader("б", ""))
     assert capsys.readouterr().out.count(ic.SEND_HINT) == 1
+
+
+def test_send_hint_skips_quick_questions(monkeypatch, capsys) -> None:
+    """Ревью #800: вопрос трека (`quick`) не съедает подсказку интервью."""
+    monkeypatch.setattr(ic, "_hinted", [])
+    ic.read_answer(_reader("1"), quick=str.isdigit)
+    assert ic.SEND_HINT not in capsys.readouterr().out
+    ic.read_answer(_reader("а", ""))
+    assert ic.SEND_HINT in capsys.readouterr().out

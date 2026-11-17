@@ -282,7 +282,8 @@ def read_answer(
     `quick` — короткий ответ (номер варианта, «пропустить»): если ПЕРВАЯ
     строка ему отвечает, она уходит сразу, без пустой строки; пустые строки
     до первой непустой при этом пропускаются (лишний Enter — не ответ)."""
-    _hint_once()
+    if quick is None:  # с `quick` пустая строка не отправляет — подсказка неверна
+        _hint_once()
     lines: list[str] = []
     while True:
         line = read(MORE_PROMPT if lines else PROMPT)
