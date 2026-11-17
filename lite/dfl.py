@@ -132,9 +132,14 @@ TRACKS = ("personal", "enterprise")  # в порядке `TRACK_OPTIONS`
 TRACK_RETRY = "ответьте номером: 1 или 2"
 TRACK_STOPPED = "прогон не начат — повторите dfl run --subject '<тема>'"
 TRACK_PERSONAL_TAKEN = (
-    "тема «{subject}» уже ведётся enterprise-конвейером, --track personal "
-    "не применим — продолжить её: dfl run --subject '<тема>' без --track; "
-    "личный проект заведите под другой темой (или сначала dfl abandon)"
+    "тема «{subject}» уже есть у enterprise-конвейера (идёт или закончен), "
+    "--track personal не применим — продолжить её: dfl run --subject "
+    "'{subject}' без --track; личный проект заведите под другой темой "
+    "(или сначала dfl abandon)"
+)
+ABANDON_ENTERPRISE_LEFT = (
+    "незаконченный enterprise-конвейер репо не тронут — бросить и его: "
+    "повторите dfl abandon"
 )
 TRACK_ENTERPRISE_TAKEN = (
     "тема «{subject}» ведётся личным путём (прогон {run_id}), --track enterprise "
@@ -1986,7 +1991,10 @@ def abandon(cwd: Path, subject: str | None) -> int:
     slug = user_targets.slug_from_url(target.repo_url)
     personal = personal_state.active_for(slug, subject=subject)
     if personal is not None:
-        return _abandon_personal(personal)
+        rc = _abandon_personal(personal)
+        if subject is None and _enterprise_unfinished(target.repo):
+            print(ABANDON_ENTERPRISE_LEFT)
+        return rc
     runs = _readable_runs(target.repo)
     cust = _existing_customer(runs, subject)
     wss = {cust.ws_id, cust.ws_id + ENGINEER_SUFFIX}
@@ -2008,6 +2016,12 @@ def abandon(cwd: Path, subject: str | None) -> int:
         f"вернуть прогон — перенести каталог обратно в {rs.RUNS_ROOT}"
     )
     return 0
+
+
+def _enterprise_unfinished(repo: str) -> bool:
+    """В репо есть незаконченный enterprise-конвейер (customer-прогон)."""
+    runs = _readable_runs(repo)
+    return any(_frame(s) == "customer" and not _finished(s, runs) for s in runs)
 
 
 def _abandon_personal(run: personal_state.PersonalRun) -> int:

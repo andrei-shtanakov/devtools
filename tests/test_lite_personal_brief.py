@@ -196,6 +196,13 @@ def test_demote_uncovered() -> None:
     assert out.open_items == ("голая: нет критерия приёмки",)
 
 
+def test_demote_uncovered_untitled_function_named() -> None:
+    """Ревью #774: функция с пустым названием опознаётся в заметке."""
+    bare = Function("FR-01", "  ", ("G-01",), (), "w")
+    out = demote_uncovered(make_brief(functions=(bare,)))
+    assert out.open_items == ("функция без названия: нет критерия приёмки",)
+
+
 def test_demote_then_problems_has_no_order_issue() -> None:
     fs = (
         Function("FR-01", "a", ("G-01",), ("x",), "w"),

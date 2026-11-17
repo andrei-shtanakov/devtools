@@ -231,7 +231,10 @@ def demote_uncovered(b: Brief) -> Brief:
     bare = [f for f in b.functions if not _has_criteria(f)]
     if not bare:
         return b
-    notes = tuple(f"{f.title}: нет критерия приёмки" for f in bare)
+    notes = tuple(
+        f"{f.title.strip() or 'функция без названия'}: нет критерия приёмки"
+        for f in bare
+    )
     kept = [f for f in b.functions if _has_criteria(f)]
     return replace(
         b,

@@ -299,6 +299,7 @@ def test_track_personal_refused_for_enterprise_subject(
     captured = capsys.readouterr()
     reason, todo = dfl.TRACK_PERSONAL_TAKEN.format(subject="t1").split(" — ")
     assert reason in captured.err and todo in captured.err
+    assert "'t1'" in captured.err and "<тема>" not in captured.err
     assert personal.runs == [] and env.spec_calls == []
 
 
@@ -314,6 +315,7 @@ def test_abandon_personal_run(
     assert env.run("abandon") == 0
     out = capsys.readouterr().out
     assert f"брошен: {live.run_id}" in out and "PR" in out
+    assert dfl.ABANDON_ENTERPRISE_LEFT in out  # ревью #774: enterprise назван
     assert not ps.run_dir(live.run_id).exists()
     gone = list((env.tmp / "personal-runs-abandoned").glob(f"*/{live.run_id}"))
     assert len(gone) == 1 and (gone[0] / "run.json").is_file()
@@ -331,6 +333,16 @@ def test_abandon_personal_by_subject(
     assert env.run("abandon", "--subject", SUBJECT) == 0
     assert not ps.run_dir(live.run_id).exists()
     assert ps.run_dir(other.run_id).exists()
+
+
+def test_abandon_personal_without_enterprise_no_hint(
+    env: Env,  # noqa: F811
+    personal: Advance,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _active(env)
+    assert env.run("abandon") == 0
+    assert dfl.ABANDON_ENTERPRISE_LEFT not in capsys.readouterr().out
 
 
 TRACK_HINT_TEXT = (
