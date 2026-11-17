@@ -720,8 +720,10 @@ def _open_spec_pr(ctx: _Ctx) -> bool:
         foreign = _foreign(run, ops.changed_paths(target, base)[1])
         if foreign:
             return ctx.stop(
-                f"ветка прогона {branch} несёт чужие изменения: {foreign} — "
-                f"уберите эти коммиты из ветки и повторите dfl run ({ABANDON})"
+                f"ветка прогона {branch} несёт чужие изменения относительно "
+                f"origin/{base}: {foreign} — это коммит в ветке прогона или "
+                f"незапушенный коммит локальной {base}; уберите его из ветки "
+                f"прогона (или запушьте {base}) и повторите dfl run ({ABANDON})"
             )
         ops.push_branch(target, branch)
         run.spec_head = ops.head_sha(target, branch)

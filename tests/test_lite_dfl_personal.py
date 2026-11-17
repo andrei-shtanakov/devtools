@@ -335,6 +335,24 @@ def test_abandon_personal_by_subject(
     assert ps.run_dir(other.run_id).exists()
 
 
+def test_abandon_personal_with_broken_journal_still_ok(
+    env: Env,  # noqa: F811
+    personal: Advance,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ревью #797: нечитаемый журнал репо не превращает состоявшийся бросок
+    личного прогона в отказ — код 0 и честное «не проверены»."""
+    from tests.test_lite_dfl import _broken
+
+    live = _active(env)
+    _broken("WS-9-a")
+    assert env.run("abandon") == 0
+    out = capsys.readouterr().out
+    assert f"брошен: {live.run_id}" in out
+    assert dfl.ABANDON_ENTERPRISE_UNKNOWN in out
+    assert dfl.ABANDON_ENTERPRISE_LEFT not in out
+
+
 def test_abandon_personal_without_enterprise_no_hint(
     env: Env,  # noqa: F811
     personal: Advance,

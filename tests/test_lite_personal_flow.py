@@ -946,7 +946,8 @@ def test_spec_pr_foreign_commit_on_committed_branch_stops_before_push(run) -> No
     ops.branch, ops.run_head = f"spec/{run.ws_id}-personal", "bundle-sha"
     ops.extra_changed = ["src/app.py"]
     assert _advance(run, ops) == 1
-    assert "чужие изменения: src/app.py" in run.stop_reason
+    assert "origin/master: src/app.py" in run.stop_reason
+    assert "незапушенный коммит локальной master" in run.stop_reason
     assert run.step == "spec-pr"
     assert not {"push_branch", "create_pr", "human_merge"} & set(ops.names())
 

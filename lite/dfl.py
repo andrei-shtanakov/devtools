@@ -141,6 +141,10 @@ ABANDON_ENTERPRISE_LEFT = (
     "незаконченный enterprise-конвейер репо не тронут — бросить и его: "
     "повторите dfl abandon"
 )
+ABANDON_ENTERPRISE_UNKNOWN = (
+    "enterprise-конвейеры репо не проверены — журнал прогона не читается "
+    "(dfl status назовёт его)"
+)
 TRACK_ENTERPRISE_TAKEN = (
     "тема «{subject}» ведётся личным путём (прогон {run_id}), --track enterprise "
     "не применим — продолжить её: dfl run без --track; enterprise-конвейер для "
@@ -1992,8 +1996,12 @@ def abandon(cwd: Path, subject: str | None) -> int:
     personal = personal_state.active_for(slug, subject=subject)
     if personal is not None:
         rc = _abandon_personal(personal)
-        if subject is None and _enterprise_unfinished(target.repo):
-            print(ABANDON_ENTERPRISE_LEFT)
+        if subject is None:
+            left = _enterprise_unfinished(target.repo)
+            if left is None:
+                print(ABANDON_ENTERPRISE_UNKNOWN)
+            elif left:
+                print(ABANDON_ENTERPRISE_LEFT)
         return rc
     runs = _readable_runs(target.repo)
     cust = _existing_customer(runs, subject)
@@ -2018,9 +2026,14 @@ def abandon(cwd: Path, subject: str | None) -> int:
     return 0
 
 
-def _enterprise_unfinished(repo: str) -> bool:
-    """В репо есть незаконченный enterprise-конвейер (customer-прогон)."""
-    runs = _readable_runs(repo)
+def _enterprise_unfinished(repo: str) -> bool | None:
+    """В репо есть незаконченный enterprise-конвейер (customer-прогон);
+    `None` — не установлено (журнал не читается): подсказка после
+    состоявшегося броска не меняет его исход (ревью #797)."""
+    try:
+        runs = _readable_runs(repo)
+    except DflError:
+        return None
     return any(_frame(s) == "customer" and not _finished(s, runs) for s in runs)
 
 
