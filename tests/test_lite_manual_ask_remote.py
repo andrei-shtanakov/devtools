@@ -113,3 +113,15 @@ def test_recorded_reply_used_in_terminal(tmp_path: Path) -> None:
     reason, published = _settle(record, tmp_path, tty=True, read=read)
     assert reason is None and published == ["x"]
     assert set(record["answers"]) == {"BEH-01", "BEH-02"}
+
+
+def test_terminal_answer_clears_pending(tmp_path: Path) -> None:
+    record: dict = {}
+    _settle(record, tmp_path)
+    assert pending.load(tmp_path) is not None
+    lines = iter(["1", "1"])
+    reason, published = _settle(
+        record, tmp_path, tty=True, read=lambda _p: next(lines, None)
+    )
+    assert reason is None and published == ["x"]
+    assert pending.load(tmp_path) is None

@@ -80,7 +80,12 @@ def _answer(
         return ask_one(check, read) if tty else None
     if tty:
         recorded = _parsed(pending.take(run_dir, q))
-        return recorded or ask_one(check, read)
+        if recorded:
+            return recorded
+        live = ask_one(check, read)
+        if live is not None:
+            pending.clear(run_dir)  # терминал побеждает: вопрос снят
+        return live
     ask = pending.asker(run_dir)
     while True:
         text = ask(q)
