@@ -48,8 +48,8 @@ from lite import interview_chat as ic
 from lite import interview_view as iview
 from lite import manual_ask as ma
 from lite import owner_review as orv
+from lite import pending, runlog
 from lite import review_pause as rp
-from lite import runlog
 from lite import stop_findings as sf
 from lite import structure as st
 from lite.init_repo import DEVTOOLS, InitError, init_repo, real_gh
@@ -441,7 +441,10 @@ def _dispatch(
 
     Лог вызова открывается после строки режима test (её отказ лога не пишет)."""
     try:
-        _require_test_mode(status_header=args.command == "status")
+        _require_test_mode(
+            status_header=args.command == "status",
+            quiet=args.command == "pending" and args.json,
+        )
         _open_log(args, cwd, raw)
         if args.command == "status":
             return status(cwd), None
@@ -461,6 +464,10 @@ def _dispatch(
             return abandon(cwd, args.subject), None
         if args.command == "interview":
             return interview(cwd, args.subject), None
+        if args.command == "pending":
+            return pending_cmd(cwd, args.subject, as_json=args.json), None
+        if args.command == "reply":
+            return reply_cmd(cwd, args.subject, args.id, _reply_text(args)), None
         if args.command == "correct":
             return correct(cwd, args.text, args.subject), None
         code = run(
@@ -470,6 +477,16 @@ def _dispatch(
     except REFUSALS as exc:
         say(refusal(f"dfl {args.command}", str(exc)), 0, err=True)
         return 2, exc
+
+
+def _reply_text(args: argparse.Namespace) -> str:
+    """Текст ответа `dfl reply`: `--text` или содержимое `--file`."""
+    if args.text is not None:
+        return str(args.text)
+    try:
+        return Path(args.file).read_text(encoding="utf-8")
+    except (OSError, ValueError) as exc:
+        raise DflError(f"файл ответа не прочитан: {exc}") from exc
 
 
 def _verbose_parent(dest: str) -> argparse.ArgumentParser:
@@ -522,6 +539,15 @@ def _parser() -> argparse.ArgumentParser:
     p_cor = add("correct", help="поправить собранное текстом")
     p_cor.add_argument("text", help="поправка, например: не раз в неделю, а в месяц")
     p_cor.add_argument("--subject", help="тема конвейера, если их несколько")
+    p_pen = add("pending", help="вопрос, на котором прогон ждёт ответа")
+    p_pen.add_argument("--json", action="store_true", help="запись как JSON")
+    p_pen.add_argument("--subject", help="тема конвейера, если их несколько")
+    p_rpl = add("reply", help="ответ на ждущий вопрос (затем dfl run)")
+    p_rpl.add_argument("--id", required=True, help="id вопроса из dfl pending")
+    src = p_rpl.add_mutually_exclusive_group(required=True)
+    src.add_argument("--text", help="текст ответа")
+    src.add_argument("--file", help="файл с текстом ответа")
+    p_rpl.add_argument("--subject", help="тема конвейера, если их несколько")
     add("status", help="прогоны репо и что дальше")
     add("init-repo", help="PR с шаблонами DarkFactory в репо")
     p_rep = add(
@@ -546,7 +572,7 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _require_test_mode(*, status_header: bool = False) -> None:
+def _require_test_mode(*, status_header: bool = False, quiet: bool = False) -> None:
     """Конфиг обязан быть в режиме test (иначе отказ); печать баннера.
 
     Полный баннер — на уровне 3; у `dfl status` (`status_header`) — уже с
@@ -559,6 +585,8 @@ def _require_test_mode(*, status_header: bool = False) -> None:
             "(install.sh существующий конфиг не переписывает) или работайте "
             "через make"
         )
+    if quiet:  # машинный вывод (`pending --json`): без баннера в stdout
+        return
     level = verbosity()
     full = level >= runlog.PASSTHROUGH_LEVEL or (status_header and level >= 1)
     banner = df_config.test_banner(cfg) if full else df_config.test_banner_line(cfg)
@@ -602,6 +630,61 @@ def run(
         raise DflError(CHAT_HARNESS_REFUSAL)
     _say_owner_review_wait(target.repo, subject, tty=chatting)
     return code
+
+
+def _pending_dir(cwd: Path, subject: str | None) -> Path | None:
+    """Каталог прогона, который продолжит `dfl run`: активный личный, иначе
+    enterprise (engineer-прогон, если он есть); прогона нет — `None`."""
+    target = user_targets.register(cwd)
+    slug = user_targets.slug_from_url(target.repo_url)
+    active = personal_state.active_for(slug, subject=subject)
+    if active is not None:
+        return personal_state.run_dir(active.run_id)
+    state = _current_run(target.repo, subject)
+    return rs.run_dir(state.run_id) if state is not None else None
+
+
+def _pending_lines(rec: dict) -> list[str]:
+    """Вывод `dfl pending` по записи `pending.json`."""
+    lines = [str(rec.get("text", ""))]
+    for n, option in enumerate(rec.get("options") or [], start=1):
+        lines.append(f"  {n}. {option}")
+    lines += [f"ссылка: {link}" for link in rec.get("links") or []]
+    if rec.get("accepts"):
+        lines.append(f"принимается: {rec['accepts']}")
+    lines.append(f"ответ: dfl reply --id {rec.get('id', '')} --text '…'")
+    return lines
+
+
+def pending_cmd(cwd: Path, subject: str | None, *, as_json: bool) -> int:
+    """`dfl pending`: вопрос, на котором прогон ждёт человека (код 0)."""
+    run_dir = _pending_dir(cwd, subject)
+    rec = pending.load(run_dir) if run_dir is not None else None
+    if as_json:
+        say(json.dumps(rec, ensure_ascii=False, indent=2))
+        return 0
+    if rec is None:
+        say("вопросов нет")
+        return 0
+    for line in _pending_lines(rec):
+        say(line)
+    return 0
+
+
+def reply_cmd(cwd: Path, subject: str | None, qid: str, text: str) -> int:
+    """`dfl reply`: записать ответ на ждущий вопрос `qid`; дальше — `dfl run`."""
+    run_dir = _pending_dir(cwd, subject)
+    if run_dir is None:
+        raise DflError(pending.NO_PENDING)
+    try:
+        with run_lock.run_lock(run_dir.name):
+            pending.record(run_dir, qid, text)
+    except run_lock.LockBusy as exc:
+        raise DflError(f"{exc} — дождитесь конца dfl run и повторите") from exc
+    except pending.PendingError as exc:
+        raise DflError(str(exc)) from exc
+    say("ответ записан — продолжить: dfl run")
+    return 0
 
 
 def resolve_review(flag: str | None, stages: tuple[str, ...]) -> tuple[str, ...]:
