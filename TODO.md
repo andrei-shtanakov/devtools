@@ -3093,7 +3093,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
 
 ## dfl — интервью разговором (devtools#748)
 
-- [ ] `lite/interview_probe.py` → публичная команда просмотра сессии discovery вместо импорта внутреннего API (`effective_entries`, `entry_holders`, `readiness`, приватный `_answered_coverage_keys`, `FRAMES`) @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:dfl-interview-probe-public-api @blocked_by:todo://discovery/discovery-session-view
+- [x] `lite/interview_probe.py` → публичная команда просмотра сессии discovery вместо импорта внутреннего API (`effective_entries`, `entry_holders`, `readiness`, приватный `_answered_coverage_keys`, `FRAMES`) — сделано в #763 (`discovery show`, discovery PR #72; зонд удалён) @owner:github:andrei-shtanakov @epic:eco.dark-factory @id:dfl-interview-probe-public-api
 
 ## Ре-вендор контракта discovery v1.3 (inbox devtools#773)
 
