@@ -14,9 +14,9 @@ import pytest
 
 from governance import run_lock
 from governance import run_state as rs
-from lite import pending
+from lite import dfl, pending
 from lite.personal import state as ps
-from tests.test_lite_dfl import REPO, SLUG, Env, _run, env  # noqa: F401
+from tests.test_lite_dfl import REPO, SLUG, URL, Env, _run, env  # noqa: F401
 
 QUESTION = pending.Question(pending.MANUAL, "BEH-01", "Проверьте кнопку входа")
 
@@ -109,3 +109,21 @@ def test_reply_text_from_file(env: Env, tmp_path: Path) -> None:  # noqa: F811
     assert env.run("reply", "--id", QUESTION.id, "--file", str(answer)) == 0
     replies = json.loads((run_dir / pending.REPLIES_FILE).read_text("utf-8"))
     assert replies[QUESTION.id] == "3: первая строка\nвторая строка\n"
+
+
+def test_status_shows_pending(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    target = env.tmp / "target"
+    monkeypatch.setattr(
+        dfl.user_targets,
+        "load",
+        lambda: {REPO: dfl.user_targets.UserTarget(REPO, target.resolve(), URL)},
+    )
+    _enterprise(QUESTION.text)
+    assert env.run("status") == 0
+    out = capsys.readouterr().out
+    assert "ждёт ответа:" in out and "dfl pending" in out
+    assert env.registered == 0

@@ -639,7 +639,13 @@ def run(
 def _pending_dir(cwd: Path, subject: str | None) -> Path | None:
     """Каталог прогона, который продолжит `dfl run`: активный личный, иначе
     enterprise (engineer-прогон, если он есть); прогона нет — `None`."""
-    target = user_targets.register(cwd)
+    return _target_run_dir(user_targets.register(cwd), subject)
+
+
+def _target_run_dir(
+    target: user_targets.UserTarget, subject: str | None
+) -> Path | None:
+    """Каталог продолжаемого прогона зарегистрированного репо (без регистрации)."""
     slug = user_targets.slug_from_url(target.repo_url)
     active = personal_state.active_for(slug, subject=subject)
     if active is not None:
@@ -1891,6 +1897,9 @@ def status(cwd: Path) -> int:
             _manual_status(state.ops.get(MANUAL_OP) or {}, state.repo_slug)
         for key, op_status in _op_statuses(state).items():
             say(f"  {key}: {op_status}", 2)
+    waiting_dir = _target_run_dir(target, None)
+    if waiting_dir is not None and (waiting := pending.wait_text(waiting_dir)):
+        say(waiting)
     active_slug = user_targets.slug_from_url(target.repo_url)
     active = personal_state.active_for(active_slug)
     if active is not None:
