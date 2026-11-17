@@ -304,9 +304,10 @@ class _LiveScreen:
     вывод раннера уходит в лог) и только в терминал. fd читается при каждой
     записи: перехват включается внутри вызова раннера."""
 
-    def __init__(self, fallback_fd: int = 1) -> None:
+    def __init__(self, fallback_fd: int = 1, *, uncaptured: bool = False) -> None:
         self.drawn = False
         self.fallback_fd = fallback_fd
+        self.uncaptured = uncaptured  # без перехвата — рисовать в `fallback_fd`
 
     @staticmethod
     def _tty(fd: int) -> int | None:
@@ -317,7 +318,9 @@ class _LiveScreen:
 
     def _fd(self) -> int | None:
         raw = os.environ.get(SCREEN_FD_ENV, "")
-        return self._tty(int(raw)) if raw.isdigit() else None
+        if raw.isdigit():
+            return self._tty(int(raw))
+        return self._tty(self.fallback_fd) if self.uncaptured else None
 
     def __call__(self, text: str) -> None:
         fd = self._fd()
@@ -394,3 +397,36 @@ def watched(
         live.clear()
         with contextlib.suppress(Exception):
             emit(watcher.summary(time.time()))
+
+
+THINKING = "… думаю · {elapsed}"
+THINKING_THREAD = "dfl-thinking"
+
+
+def thinking[R](call: Callable[[], R], *, period: float = 1.0) -> R:
+    """Вызвать агента (`call`) под живой строкой `… думаю · ММ:СС`.
+
+    Строка — только в терминал (экранный fd перехвата или stdout), без
+    терминала её нет; стирается в любом исходе, результат и исключение
+    `call` — как есть (devtools#799)."""
+    live = _LiveScreen(uncaptured=True)
+    began = time.monotonic()
+
+    def draw() -> None:
+        live(THINKING.format(elapsed=fmt_duration(time.monotonic() - began)))
+
+    draw()
+    stop = threading.Event()
+
+    def loop() -> None:
+        while not stop.wait(period):
+            draw()
+
+    thread = threading.Thread(target=loop, name=THINKING_THREAD, daemon=True)
+    thread.start()
+    try:
+        return call()
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+        live.clear()

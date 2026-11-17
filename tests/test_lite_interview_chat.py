@@ -138,7 +138,7 @@ def test_chat_answers_until_interview_complete(capsys) -> None:
     assert "Вопрос 1 (цели): Зачем это нужно?" in out
     assert "Вопрос 2 (задачи пользователей): Какие задачи" in out
     assert "из" not in out.split("Вопрос 1")[1].split(":")[0]
-    assert set(read.prompts) == {"> "}
+    assert read.prompts == ["> ", "· ", "> ", "· "]  # продолжение — `· `
     assert "{" not in out and "text:" not in out  # ни JSON, ни YAML
 
 
@@ -909,3 +909,35 @@ def test_gate_criteria_refusal_is_said(capsys) -> None:
     read = _reader("да", "")
     assert _top_up(ended, read, _agent(FR_PROPOSAL)) is ic.ChatResult.FINISHED
     assert "bad" in capsys.readouterr().out
+
+
+# --- devtools#799: приглашения ввода ------------------------------------------
+
+
+def _prompting_reader(*lines: str):
+    """`read`, записывающий приглашения."""
+    seen: list[str] = []
+    it = iter(lines)
+
+    def read(prompt: str) -> str | None:
+        seen.append(prompt)
+        return next(it, None)
+
+    return read, seen
+
+
+def test_read_answer_continuation_prompt(monkeypatch) -> None:
+    monkeypatch.setattr(ic, "_hinted", [True])
+    read, seen = _prompting_reader("а", "б", "")
+    assert ic.read_answer(read) == "а\nб"
+    assert seen == [ic.PROMPT, ic.MORE_PROMPT, ic.MORE_PROMPT]
+    read, seen = _prompting_reader("", "2")
+    assert ic.read_answer(read, quick=str.isdigit) == "2"
+    assert seen == [ic.PROMPT, ic.PROMPT]  # лишний Enter — ответ не начат
+
+
+def test_send_hint_once_per_process(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(ic, "_hinted", [])
+    ic.read_answer(_reader("а", ""))
+    ic.read_answer(_reader("б", ""))
+    assert capsys.readouterr().out.count(ic.SEND_HINT) == 1
