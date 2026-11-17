@@ -468,7 +468,13 @@ def _review(ctx: _Ctx, stage: str, files: list[str]) -> bool:
     rd = run_dir(ctx.run.run_id)
     paths = [ctx.bundle / name for name in files]
     label = STAGE_LABELS[stage]
-    if not _awaiting_reply(rd, stage):
+    awaiting = _awaiting_reply(rd, stage)
+    if awaiting and stage in _STAGE_KINDS and _edited_on_pause(ctx, stage):
+        # правка руками, пока пауза ждала `dfl reply`: шаг этапа уже
+        # перепроверил узел — ответ был о старом содержимом, пауза заново
+        pending.discard(rd, rp.question(stage, label, paths))
+        awaiting = False
+    if not awaiting:
         _remember_checked(ctx, stage)
     round_no = 0
     while True:

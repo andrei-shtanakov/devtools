@@ -88,8 +88,8 @@ def test_pause_manual_edit_then_done_rechecks(tmp_path) -> None:
     _reply(run)
     check = checker("PASS")
     assert _advance(run, FakeOps(run), read=_no_read, check=check, tty=False) == 0
-    # перепроверка, затем пауза снова: вопрос записан заново
-    assert check.calls[0] == "personal-design-vs-brief"  # type: ignore[attr-defined]
+    # одна перепроверка (как в терминале), затем пауза снова: вопрос заново
+    assert check.calls == ["personal-design-vs-brief"]  # type: ignore[attr-defined]
     assert run.step == "design"
     _waiting_line(run)
     _reply(run)

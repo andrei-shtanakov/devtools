@@ -2496,3 +2496,16 @@ def test_status_shows_done_personal_run_summary(env: Env, monkeypatch, capsys) -
         in out
     )
     assert "BEH-01 (TASK-001): не выполнено → issue #24 (открыт)" in out
+
+
+def test_public_argv_hides_reply_text() -> None:
+    """Текст ответа `dfl reply` не уходит в запись сбоя (`dfl report`)."""
+    raw = ["reply", "--id", "manual:B:1", "--text", "тел. 123", "--text=имя"]
+    assert dfl._public_argv(raw) == [
+        "reply",
+        "--id",
+        "manual:B:1",
+        "--text",
+        "…",
+        "--text=…",
+    ]

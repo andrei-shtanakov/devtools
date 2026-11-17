@@ -397,8 +397,13 @@ def _record(
         print(f"запись сбоя не удалась: {err}", file=sys.stderr)
 
 
+#: текст ответа `dfl reply` не попадает в запись сбоя и `dfl report`
+HIDDEN_TEXT = "…"
+
+
 def _public_argv(raw: list[str]) -> list[str]:
-    """argv без `--cwd`; у `--file` — только имя файла (обе формы: `--x v`, `--x=v`)."""
+    """argv без `--cwd`; у `--file` — только имя файла, `--text` скрыт
+    (обе формы: `--x v`, `--x=v`)."""
     out: list[str] = []
     skip = False
     for i, arg in enumerate(raw):
@@ -414,6 +419,10 @@ def _public_argv(raw: list[str]) -> list[str]:
             arg = "--file=" + Path(arg.removeprefix("--file=")).name  # noqa: PLW2901
         elif i > 0 and raw[i - 1] == "--file":
             arg = Path(arg).name  # noqa: PLW2901
+        elif arg.startswith("--text="):
+            arg = "--text=" + HIDDEN_TEXT  # noqa: PLW2901
+        elif i > 0 and raw[i - 1] == "--text":
+            arg = HIDDEN_TEXT  # noqa: PLW2901
         out.append(arg)
     return out
 
