@@ -17,6 +17,11 @@ from governance.task_bridge import _TASK_HEAD_RE, _TASK_META_RE
 #: префикс ветки прогона spec-runner (`--integration-pr`)
 RUN_BRANCH_PREFIX = "spec-runner/run-"
 
+#: код выхода, записываемый вместо 0, когда spec-runner вышел штатно, но
+#: задачи на ветке PR сделаны не все: его штатная остановка по SIGINT/SIGTERM
+#: без упавших задач возвращает 0, и PR без этой сверки приняли бы за готовый
+INCOMPLETE_EXIT = -1
+
 
 class _BranchReader(Protocol):
     def fetch_branch(self, target_dir: str, branch: str) -> bool: ...
@@ -64,15 +69,43 @@ def task_progress(text: str) -> tuple[int, int] | None:
     return done, len(heads)
 
 
+def incomplete(progress: tuple[int, int] | None) -> bool:
+    """Счётчик прочитан и задачи сделаны не все (`None` решает вызывающий)."""
+    return progress is not None and progress[0] < progress[1]
+
+
+def unread_stop(branch: str, pr: int) -> str:
+    """Причина остановки: готовность PR прогона не установлена.
+
+    Счётчик здесь — вход решения «PR готов», не украшение плашки:
+    неизвестность — стоп, а не «всё сделано» (fail-closed, ревью #805).
+    """
+    return (
+        f"счётчик задач ветки {branch} не прочитан — integration-PR #{pr} "
+        "не принят как готовый; повторите dfl run (сбой сети пройдёт), "
+        "а если tasks.md на ветке нет — разберите PR вручную"
+    )
+
+
+def pr_branch(prs: list[dict], pr: int) -> str | None:
+    """Ветка ОТКРЫТОГО PR прогона `pr`; нет такого — `None`."""
+    found = [head for n, head in resume_candidates(prs, []) if n == pr]
+    return found[0] if found else None
+
+
 def read_progress(
     ops: _BranchReader, target_dir: str, branch: str, tasks_rel: str
 ) -> tuple[int, int] | None:
-    """Счётчик задач на `origin/<branch>`; не прочитан — `None` (не стоп)."""
+    """Счётчик задач на `origin/<branch>`; не прочитан — `None`.
+
+    Что значит `None`, решает вызывающий: для плашки упавшей попытки — лишь
+    «счётчик не прочитан», для приёмки PR после кода 0 — стоп (`unread_stop`).
+    """
     try:
         if not ops.fetch_branch(target_dir, branch):
             return None
         text = ops.show_file(target_dir, f"origin/{branch}", tasks_rel)
-    except Exception:  # noqa: BLE001 - счётчик лишь украшает плашку
+    except Exception:  # noqa: BLE001 - любой сбой = «не прочитан»
         return None
     return None if text is None else task_progress(text)
 

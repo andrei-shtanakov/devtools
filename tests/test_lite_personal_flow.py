@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from governance import manual_checks as mc
 from governance import run_resume
 from governance.author_launch import LaunchOutcome
 from governance.brief_facts import DefaultBranch
@@ -60,7 +61,8 @@ class FakeOps:
         self.ancestor: bool | None = False
         self.push_fail = False
         self.fetched = True
-        self.tasks_md: str | None = None
+        #: tasks.md ветки прогона; по умолчанию все задачи сделаны
+        self.tasks_md: str | None = "### TASK-001: a\nP1 | ✅ DONE\n"
         #: пути ветки прогона сверх закоммиченных прогоном (чужой коммит)
         self.extra_changed: list[str] = []
 
@@ -289,6 +291,8 @@ def test_happy_path_to_code_pr(run, capsys) -> None:
             target,
             ["run", "--all", "--no-strict", f"--spec-prefix={ws}-", "--integration-pr"],
         ),
+        ("fetch_branch", "spec-runner/run-1"),
+        ("show_file", "origin/spec-runner/run-1", tasks_path),
         ("pr_facts", "o/repo", CODE_PR),
     ]
     rd = state.run_dir(run.run_id)
@@ -670,6 +674,112 @@ def test_spec_runner_failure_with_partial_pr_promises_banner(run) -> None:
     assert _advance(run, ops) == 1
     assert "перезапустит" not in run.stop_reason
     assert "не создаст новую ветку" in run.stop_reason
+
+
+INCOMPLETE_TASKS = "### TASK-001: a\nP1 | ✅ DONE\n\n### TASK-002: b\nP1 | TODO\n"
+
+
+def test_code_run_exit_zero_with_unfinished_tasks_stops_with_banner(
+    run, capsys
+) -> None:
+    """spec-runner, остановленный штатно (SIGINT), выходит 0 и открывает
+    частичный PR — не принимать за готовый: плашка и стоп (#767)."""
+    ops = FakeOps(run)
+    run.step = "code-run"
+    ops.tasks_md = INCOMPLETE_TASKS
+    assert _advance(run, ops) == 1
+    expected = run_resume.banner(
+        run.subject, run.repo_slug, "spec-runner/run-1", (1, 2)
+    )
+    assert expected in capsys.readouterr().out
+    assert run.stop_reason == run_resume.resume_stop("spec-runner/run-1", CODE_PR)
+    assert run.step == "code-run" and run.code_pr is None
+    assert run.run_exit == run_resume.INCOMPLETE_EXIT
+    # Повтор: тот же стоп, раннер второй раз не запускается.
+    ops.calls.clear()
+    assert _advance(run, ops) == 1
+    assert "spec_runner" not in ops.names()
+    assert run.stop_reason == run_resume.resume_stop("spec-runner/run-1", CODE_PR)
+
+
+def test_code_run_unfinished_pr_merged_by_human_reruns(run) -> None:
+    """Частичный PR влит человеком — раннер доделывает остальное."""
+    ops = FakeOps(run)
+    run.step = "code-run"
+    run.before_prs = []
+    run.run_exit = run_resume.INCOMPLETE_EXIT
+    ops.prs.append(_partial(7, "MERGED"))
+    assert _advance(run, ops) == 0
+    assert "spec_runner" in ops.names() and run.code_pr == CODE_PR
+
+
+def test_code_run_all_tasks_done_takes_pr(run) -> None:
+    ops = FakeOps(run)
+    run.step = "code-run"
+    ops.tasks_md = INCOMPLETE_TASKS.replace("P1 | TODO", "P1 | ✅ DONE")
+    assert _advance(run, ops) == 0
+    assert run.code_pr == CODE_PR and run.step == "code-pr"
+
+
+def test_code_pr_with_unfinished_tasks_returns_to_code_run(run, capsys) -> None:
+    """Запись, уже принявшая частичный PR (до исправления): ручные проверки
+    и мерж не начинаются, прогон возвращается к развилке #767."""
+    ops = FakeOps(run)
+    run.step = "code-pr"
+    run.code_pr = CODE_PR
+    run.before_prs = []
+    ops.prs.append(
+        {"number": CODE_PR, "state": "OPEN", "head": {"ref": "spec-runner/run-1"}}
+    )
+    ops.tasks_md = INCOMPLETE_TASKS
+    assert _advance(run, ops) == 1
+    assert "pr_facts" not in ops.names()
+    assert "▶ продолжаю проект" in capsys.readouterr().out
+    assert run.step == "code-run" and run.code_pr is None
+    assert run.run_exit == run_resume.INCOMPLETE_EXIT
+    assert state.load(run.run_id).step == "code-run"
+
+
+def test_code_pr_unread_task_counter_stops_without_accepting(run) -> None:
+    """Счётчик не прочитан — PR не принимается как готовый (fail-closed),
+    шаг не меняется: повтор сверит снова (ревью #805)."""
+    ops = FakeOps(run)
+    run.step = "code-pr"
+    run.code_pr = CODE_PR
+    ops.prs.append(
+        {"number": CODE_PR, "state": "OPEN", "head": {"ref": "spec-runner/run-1"}}
+    )
+    ops.fetched = False
+    assert _advance(run, ops) == 1
+    assert "pr_facts" not in ops.names()
+    assert run.stop_reason == run_resume.unread_stop("spec-runner/run-1", CODE_PR)
+    assert run.step == "code-pr" and run.code_pr == CODE_PR
+    ops.fetched = True
+    assert _advance(run, ops) == 0
+    assert "pr_facts" in ops.names()
+
+
+def test_unfinished_pr_reopens_completed_manual_checks(run) -> None:
+    """Ручные проверки, пройденные по брошенному частичному PR, для
+    следующего задаются заново: запись сбрасывается целиком, и `settle`
+    соберёт проверки и спросит их снова (ревью #805)."""
+    ops = FakeOps(run)
+    run.step = "code-pr"
+    run.code_pr = CODE_PR
+    run.manual_checks = True
+    run.manual = {
+        "status": "completed",
+        "checks": [{"beh_id": "BEH-1", "task": "TASK-001", "text": "t"}],
+        "answers": {"BEH-1": {"verdict": mc.NOT_DONE, "issue": 5, "at": "x"}},
+        "commented": True,
+    }
+    ops.prs.append(
+        {"number": CODE_PR, "state": "OPEN", "head": {"ref": "spec-runner/run-1"}}
+    )
+    ops.tasks_md = INCOMPLETE_TASKS
+    assert _advance(run, ops) == 1
+    assert run.manual == {} and state.load(run.run_id).manual == {}
+    assert mc.pending(run.manual_checks, run.manual)
 
 
 def test_code_pr_merged_marks_done(run, capsys) -> None:

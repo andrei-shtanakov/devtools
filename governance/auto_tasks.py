@@ -276,7 +276,7 @@ def _spec_run(state: RunState, ops: Ops) -> int | None:
         old = list(previous.get("before", []))
         pending = [n for n in current if n not in old]
         if pending and previous.get("exit") == 0:
-            return _take_new_pr(state, key, pending)
+            return _take_new_pr(state, ops, key, pending)
         if pending and "exit" not in previous:
             partial = ", ".join(f"#{n}" for n in pending)
             _stop(
@@ -307,12 +307,45 @@ def _spec_run(state: RunState, ops: Ops) -> int | None:
     after = _open_run_prs(state, ops)
     if after is None:
         return None
-    return _take_new_pr(state, key, [n for n in after if n not in before])
+    return _take_new_pr(state, ops, key, [n for n in after if n not in before])
 
 
-def _take_new_pr(state: RunState, key: str, new: list[int]) -> int | None:
-    """Ровно один новый PR после кода 0 — операция завершена; иначе стоп."""
+def _incomplete_stop(state: RunState, ops: Ops, key: str, pr: int) -> bool:
+    """Открытый PR прогона с несделанными задачами — плашка и стоп; `True` — стоп.
+
+    Сверяется только приёмка нового PR: запись `completed`, принявшая
+    частичный PR до этой сверки, сознательно не пересматривается —
+    enterprise-путь в test-режиме, таких живых записей нет (ревью #805).
+    """
+    prs = _run_prs(state, ops)
+    if prs is None:
+        return True
+    branch = run_resume.pr_branch(prs, pr)
+    if branch is None:
+        return False
+    tasks_rel = f"spec/{state.ws_id}-tasks.md"
+    progress = run_resume.read_progress(ops, state.target_dir, branch, tasks_rel)
+    if progress is None:  # `exit = 0` остаётся: повтор сверит снова
+        _screen_stop(run_resume.unread_stop(branch, pr))
+        return True
+    if not run_resume.incomplete(progress):
+        return False
+    state.ops[key]["exit"] = run_resume.INCOMPLETE_EXIT
+    save(state)
+    notice(run_resume.banner(state.subject, state.repo_slug, branch, progress))
+    _screen_stop(run_resume.resume_stop(branch, pr))
+    return True
+
+
+def _take_new_pr(state: RunState, ops: Ops, key: str, new: list[int]) -> int | None:
+    """Ровно один новый PR после кода 0 — операция завершена; иначе стоп.
+
+    Задачи на ветке PR сделаны не все (штатная остановка раннера тоже даёт
+    код 0) — запись становится упавшей попыткой, плашка и стоп (#767).
+    """
     if len(new) == 1:
+        if _incomplete_stop(state, ops, key, new[0]):
+            return None
         _complete(state, key, pr=new[0], exit=0)
         return new[0]
     if new:
