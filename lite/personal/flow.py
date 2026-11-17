@@ -31,7 +31,7 @@ from governance.facts import Outcome as FactOutcome
 from governance.ops import Ops
 from lite import edge_journal as ej
 from lite import manual_ask as ma
-from lite import node_guard
+from lite import node_guard, pending
 from lite import owner_review as orv
 from lite import review_pause as rp
 from lite.edge_resolve import MAX_ROUNDS, Outcome, PaidCalls, Scope, resolve_scope
@@ -468,15 +468,19 @@ def _review(ctx: _Ctx, stage: str, files: list[str]) -> bool:
     rd = run_dir(ctx.run.run_id)
     paths = [ctx.bundle / name for name in files]
     label = STAGE_LABELS[stage]
-    _remember_checked(ctx, stage)
-    if not ctx.tty():
-        # ждёт человека, не сбой: код 0, как `/стоп` на паузе
-        ctx.run.stop_reason = NO_TTY.format(label=label, links=orv.links(paths))
-        say(ctx.run.stop_reason)
-        return False
+    awaiting = _awaiting_reply(rd, stage)
+    if awaiting and stage in _STAGE_KINDS and _edited_on_pause(ctx, stage):
+        # правка руками, пока пауза ждала `dfl reply`: шаг этапа уже
+        # перепроверил узел — ответ был о старом содержимом, пауза заново
+        pending.discard(rd, rp.question(stage, label, paths))
+        awaiting = False
+    if not awaiting:
+        _remember_checked(ctx, stage)
     round_no = 0
     while True:
         batch = rp.pending(rd, stage)
+        if batch and not ctx.tty():
+            return _stop_wait(ctx, NO_TTY.format(label=label, links=orv.links(paths)))
         if batch:
             round_no += 1
             say(f"замечания к этапу «{label}» — правка, круг {round_no}")
@@ -484,7 +488,9 @@ def _review(ctx: _Ctx, stage: str, files: list[str]) -> bool:
                 return False
             rp.mark_applied(rd, stage, len(batch))
         else:
-            answer = rp.ask(label, paths, read=ctx.read)
+            answer = _pause_answer(ctx, stage, label, paths)
+            if answer is None and not ctx.tty():
+                return False  # вопрос записан, `stop_reason` — «ждёт ответа»
             if answer is None:
                 ctx.run.stop_reason = REVIEW_PAUSED.format(label=label)
                 say(ctx.run.stop_reason)
@@ -507,6 +513,52 @@ def _review(ctx: _Ctx, stage: str, files: list[str]) -> bool:
         if stage in _STAGE_KINDS and not _recheck(ctx, stage):
             return False
         _remember_checked(ctx, stage)
+
+
+def _awaiting_reply(rd: Path, stage: str) -> bool:
+    """Пауза этого узла уже показана без терминала и ждёт `dfl reply`: хэш
+    «проверено» остаётся прежним — правка руками между вызовами видна (#766)."""
+    rec = pending.load(rd)
+    return (
+        rec is not None
+        and rec.get("kind") == pending.REVIEW
+        and rec.get("key") == stage
+        and stage in _passed_marks_of(rd)
+    )
+
+
+def _stop_wait(ctx: _Ctx, reason: str) -> bool:
+    """Стоп «ждёт человека» (код 0, не сбой): причина записана и показана."""
+    ctx.run.stop_reason = reason
+    say(reason)
+    return False
+
+
+def _pause_answer(ctx: _Ctx, stage: str, label: str, paths: list[Path]) -> str | None:
+    """Ответ на паузе: `""` — «дальше»; `None` — стоп или ввод прерван.
+
+    Без терминала вопрос записывается для `dfl reply` (`stop_reason` — строка
+    ожидания); в терминале — `_ask_pause`."""
+    if ctx.tty():
+        return _ask_pause(ctx, stage, label, paths)
+    rd = run_dir(ctx.run.run_id)
+    answer = rp.ask_remote(stage, label, paths, ask=pending.asker(rd))
+    if answer is None:
+        _stop_wait(ctx, pending.wait_line(rp.question(stage, label, paths)))
+    return answer
+
+
+def _ask_pause(ctx: _Ctx, stage: str, label: str, paths: list[Path]) -> str | None:
+    """Экран паузы в терминале: ответ, записанный `dfl reply`, иначе живой
+    (терминал побеждает: после живого ответа вопрос снят)."""
+    rd = run_dir(ctx.run.run_id)
+    q = rp.question(stage, label, paths)
+    if pending.take(rd, q) is not None:
+        return ""
+    answer = rp.ask(label, paths, read=ctx.read)
+    if answer is not None:
+        pending.discard(rd, q)
+    return answer
 
 
 def _recheck(ctx: _Ctx, stage: str) -> bool:
@@ -580,7 +632,11 @@ def _node_digest(ctx: _Ctx, stage: str) -> str:
 
 
 def _passed_marks(ctx: _Ctx) -> dict[str, str]:
-    path = run_dir(ctx.run.run_id) / REVIEW_PASSED
+    return _passed_marks_of(run_dir(ctx.run.run_id))
+
+
+def _passed_marks_of(rd: Path) -> dict[str, str]:
+    path = rd / REVIEW_PASSED
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -1006,6 +1062,7 @@ def _manual(ctx: _Ctx, pr: int) -> bool:
         pr_url=f"https://github.com/{run.repo_slug}/pull/{pr}",
         run_id=run.run_id,
         save=lambda: save(run),
+        run_dir=run_dir(run.run_id),
     )
     if reason is None:
         return True

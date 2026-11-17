@@ -27,10 +27,11 @@ from governance.review_remarks import (  # noqa: F401 — публичные и�
     pr_section,
     record,
 )
+from lite import pending as pending_mod
 from lite.interview_chat import STOP_WORD, Read, read_answer
 
 PERSONAL_STAGES = ("brief", "design", "decomposition")
-DONE_WORDS = frozenset({"дальше", "да", "ок", "1"})
+DONE_WORDS = pending_mod.REVIEW_DONE_WORDS
 _YES_WORDS = frozenset({"1", "да"})
 _NO_WORDS = frozenset({"2", "нет", "оставить", "оставить как было"})
 UNCLEAR_ANSWER = "не понял ответ — номер или слово варианта"
@@ -81,6 +82,26 @@ def ask(stage_label: str, paths: list[Path], *, read: Read) -> str | None:
     if answer is None:
         return None
     return "" if answer.casefold() in DONE_WORDS else answer
+
+
+def question(stage: str, stage_label: str, paths: list[Path]) -> pending_mod.Question:
+    """Вопрос паузы для `dfl pending`; один и тот же в терминале и без него."""
+    return pending_mod.Question(
+        pending_mod.REVIEW,
+        stage,
+        f"этап «{stage_label}» готов и прошёл проверку — посмотрите",
+        links=tuple(f"file://{p.resolve()}" for p in paths),
+        accepts="«дальше»",
+    )
+
+
+def ask_remote(
+    stage: str, stage_label: str, paths: list[Path], *, ask: pending_mod.Ask
+) -> str | None:
+    """Пауза без терминала: `""` — «дальше»; `None` — ответа ещё нет
+    (вопрос записан, прогон ждёт)."""
+    answer = ask(question(stage, stage_label, paths))
+    return None if answer is None else ""
 
 
 def confirm_removals(

@@ -48,8 +48,8 @@ from lite import interview_chat as ic
 from lite import interview_view as iview
 from lite import manual_ask as ma
 from lite import owner_review as orv
+from lite import pending, runlog
 from lite import review_pause as rp
-from lite import runlog
 from lite import stop_findings as sf
 from lite import structure as st
 from lite.init_repo import DEVTOOLS, InitError, init_repo, real_gh
@@ -166,6 +166,8 @@ TRACK_NO_TTY_HINT = (
 #: хэши файлов волны на момент показа паузы (экран или ссылки без терминала):
 #: «дальше» после ручной правки сверяется с ними (final review #768, I1)
 REVIEW_SHOWN = "review-shown.json"
+#: узлы паузы волны, на которые «дальше» уже получено без терминала (#766)
+REVIEW_ACKED = "review-acked.json"
 OWNER_REVIEW_PAUSED = "просмотр этапа «{label}» прерван — продолжить: dfl run"
 OWNER_NEEDS_CLAUDE = (
     "замечания на паузе поддерживаются только с автором claude "
@@ -395,8 +397,13 @@ def _record(
         print(f"запись сбоя не удалась: {err}", file=sys.stderr)
 
 
+#: текст ответа `dfl reply` не попадает в запись сбоя и `dfl report`
+HIDDEN_TEXT = "…"
+
+
 def _public_argv(raw: list[str]) -> list[str]:
-    """argv без `--cwd`; у `--file` — только имя файла (обе формы: `--x v`, `--x=v`)."""
+    """argv без `--cwd`; у `--file` — только имя файла, `--text` скрыт
+    (обе формы: `--x v`, `--x=v`)."""
     out: list[str] = []
     skip = False
     for i, arg in enumerate(raw):
@@ -412,6 +419,10 @@ def _public_argv(raw: list[str]) -> list[str]:
             arg = "--file=" + Path(arg.removeprefix("--file=")).name  # noqa: PLW2901
         elif i > 0 and raw[i - 1] == "--file":
             arg = Path(arg).name  # noqa: PLW2901
+        elif arg.startswith("--text="):
+            arg = "--text=" + HIDDEN_TEXT  # noqa: PLW2901
+        elif i > 0 and raw[i - 1] == "--text":
+            arg = HIDDEN_TEXT  # noqa: PLW2901
         out.append(arg)
     return out
 
@@ -441,7 +452,10 @@ def _dispatch(
 
     Лог вызова открывается после строки режима test (её отказ лога не пишет)."""
     try:
-        _require_test_mode(status_header=args.command == "status")
+        _require_test_mode(
+            status_header=args.command == "status",
+            quiet=args.command == "pending" and args.json,
+        )
         _open_log(args, cwd, raw)
         if args.command == "status":
             return status(cwd), None
@@ -461,6 +475,10 @@ def _dispatch(
             return abandon(cwd, args.subject), None
         if args.command == "interview":
             return interview(cwd, args.subject), None
+        if args.command == "pending":
+            return pending_cmd(cwd, args.subject, as_json=args.json), None
+        if args.command == "reply":
+            return reply_cmd(cwd, args.subject, args.id, _reply_text(args)), None
         if args.command == "correct":
             return correct(cwd, args.text, args.subject), None
         code = run(
@@ -470,6 +488,16 @@ def _dispatch(
     except REFUSALS as exc:
         say(refusal(f"dfl {args.command}", str(exc)), 0, err=True)
         return 2, exc
+
+
+def _reply_text(args: argparse.Namespace) -> str:
+    """Текст ответа `dfl reply`: `--text` или содержимое `--file`."""
+    if args.text is not None:
+        return str(args.text)
+    try:
+        return Path(args.file).read_text(encoding="utf-8")
+    except (OSError, ValueError) as exc:
+        raise DflError(f"файл ответа не прочитан: {exc}") from exc
 
 
 def _verbose_parent(dest: str) -> argparse.ArgumentParser:
@@ -522,6 +550,15 @@ def _parser() -> argparse.ArgumentParser:
     p_cor = add("correct", help="поправить собранное текстом")
     p_cor.add_argument("text", help="поправка, например: не раз в неделю, а в месяц")
     p_cor.add_argument("--subject", help="тема конвейера, если их несколько")
+    p_pen = add("pending", help="вопрос, на котором прогон ждёт ответа")
+    p_pen.add_argument("--json", action="store_true", help="запись как JSON")
+    p_pen.add_argument("--subject", help="тема конвейера, если их несколько")
+    p_rpl = add("reply", help="ответ на ждущий вопрос (затем dfl run)")
+    p_rpl.add_argument("--id", required=True, help="id вопроса из dfl pending")
+    src = p_rpl.add_mutually_exclusive_group(required=True)
+    src.add_argument("--text", help="текст ответа")
+    src.add_argument("--file", help="файл с текстом ответа")
+    p_rpl.add_argument("--subject", help="тема конвейера, если их несколько")
     add("status", help="прогоны репо и что дальше")
     add("init-repo", help="PR с шаблонами DarkFactory в репо")
     p_rep = add(
@@ -546,7 +583,7 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _require_test_mode(*, status_header: bool = False) -> None:
+def _require_test_mode(*, status_header: bool = False, quiet: bool = False) -> None:
     """Конфиг обязан быть в режиме test (иначе отказ); печать баннера.
 
     Полный баннер — на уровне 3; у `dfl status` (`status_header`) — уже с
@@ -559,6 +596,8 @@ def _require_test_mode(*, status_header: bool = False) -> None:
             "(install.sh существующий конфиг не переписывает) или работайте "
             "через make"
         )
+    if quiet:  # машинный вывод (`pending --json`): без баннера в stdout
+        return
     level = verbosity()
     full = level >= runlog.PASSTHROUGH_LEVEL or (status_header and level >= 1)
     banner = df_config.test_banner(cfg) if full else df_config.test_banner_line(cfg)
@@ -598,10 +637,92 @@ def run(
     if chatting and _author_is_claude():
         return _run_chatting(target, subject, role, review)
     code = _step(target, subject, role, chatting=False, review=review)
+    if not _is_tty() and _owner_review_run(target.repo, subject) is not None:
+        return _owner_review_rounds(target, subject, role, code, remote=True)
     if chatting and _waiting_run(target.repo, subject) is not None:
         raise DflError(CHAT_HARNESS_REFUSAL)
     _say_owner_review_wait(target.repo, subject, tty=chatting)
     return code
+
+
+NO_UNFINISHED = "незаконченного прогона нет"
+
+
+def _pending_dir(cwd: Path, subject: str | None, *, register: bool) -> Path | None:
+    """Каталог прогона, который продолжит `dfl run`: активный личный, иначе
+    enterprise (engineer-прогон, если он есть); прогона нет — `None`.
+    Неоднозначность тем (`--subject`) — `DflError`, как у `dfl run`;
+    `register=False` (`pending`) репо не регистрирует."""
+    target = user_targets.register(cwd) if register else _registered_target(cwd)
+    slug = user_targets.slug_from_url(target.repo_url)
+    active = personal_state.active_for(slug, subject=subject)
+    if active is not None:
+        return personal_state.run_dir(active.run_id)
+    runs, _ = _repo_runs(target.repo)
+    try:
+        cust = _select_customer(runs, subject)
+    except DflError as exc:
+        if str(exc).startswith(NO_UNFINISHED):
+            return None
+        raise
+    if cust is None:
+        return None
+    return rs.run_dir((_engineer_of(cust, runs) or cust).run_id)
+
+
+def _target_run_dir(
+    target: user_targets.UserTarget, subject: str | None
+) -> Path | None:
+    """Каталог продолжаемого прогона зарегистрированного репо (без регистрации)."""
+    slug = user_targets.slug_from_url(target.repo_url)
+    active = personal_state.active_for(slug, subject=subject)
+    if active is not None:
+        return personal_state.run_dir(active.run_id)
+    state = _current_run(target.repo, subject)
+    return rs.run_dir(state.run_id) if state is not None else None
+
+
+def _pending_lines(rec: dict) -> list[str]:
+    """Вывод `dfl pending` по записи `pending.json`."""
+    lines = [str(rec.get("text", ""))]
+    for n, option in enumerate(rec.get("options") or [], start=1):
+        lines.append(f"  {n}. {option}")
+    lines += [f"ссылка: {link}" for link in rec.get("links") or []]
+    if rec.get("accepts"):
+        lines.append(f"принимается: {rec['accepts']}")
+    lines.append(f"ответ: dfl reply --id {rec.get('id', '')} --text '…'")
+    return lines
+
+
+def pending_cmd(cwd: Path, subject: str | None, *, as_json: bool) -> int:
+    """`dfl pending`: вопрос, на котором прогон ждёт человека (код 0)."""
+    run_dir = _pending_dir(cwd, subject, register=False)
+    rec = pending.load(run_dir) if run_dir is not None else None
+    if as_json:
+        say(json.dumps(rec, ensure_ascii=False, indent=2))
+        return 0
+    if rec is None:
+        say("вопросов нет")
+        return 0
+    for line in _pending_lines(rec):
+        say(line)
+    return 0
+
+
+def reply_cmd(cwd: Path, subject: str | None, qid: str, text: str) -> int:
+    """`dfl reply`: записать ответ на ждущий вопрос `qid`; дальше — `dfl run`."""
+    run_dir = _pending_dir(cwd, subject, register=True)
+    if run_dir is None:
+        raise DflError(pending.NO_PENDING)
+    try:
+        with run_lock.run_lock(run_dir.name):
+            pending.record(run_dir, qid, text)
+    except run_lock.LockBusy as exc:
+        raise DflError(f"{exc} — дождитесь конца dfl run и повторите") from exc
+    except pending.PendingError as exc:
+        raise DflError(str(exc)) from exc
+    say("ответ записан — продолжить: dfl run")
+    return 0
 
 
 def resolve_review(flag: str | None, stages: tuple[str, ...]) -> tuple[str, ...]:
@@ -882,7 +1003,12 @@ def _current_run(repo: str, subject: str | None) -> rs.RunState | None:
 
 
 def _owner_review_rounds(
-    target: user_targets.UserTarget, subject: str | None, role: str, code: int
+    target: user_targets.UserTarget,
+    subject: str | None,
+    role: str,
+    code: int,
+    *,
+    remote: bool = False,
 ) -> int:
     """Пауза просмотра волны (`WAITING_OWNER_REVIEW`): замечания владельца
     к выбранным узлам, затем op паузы и шаг (resume) — пока прогон снова
@@ -890,21 +1016,26 @@ def _owner_review_rounds(
 
     Правка сбрасывает проверку волны: повторный шаг проверяет её заново
     (стоп проверки — разбор `_resolve_rounds`), и пауза показывается снова.
-    `/стоп` — код 0, стоп правки — 1; число платных вызовов печатается."""
+    `/стоп` — код 0, стоп правки — 1; число платных вызовов печатается.
+
+    `remote` — без терминала (#766): «дальше» приходит через `dfl reply`
+    (`pending.asker` каталога прогона), вопрос ждёт — код 0."""
     calls = er.PaidCalls()
     while (state := _owner_review_run(target.repo, subject)) is not None:
-        stopped = _owner_pause(state, calls)
+        ask = pending.asker(rs.run_dir(state.run_id)) if remote else None
+        stopped = _owner_pause(state, calls, ask)
         if stopped is not None:
             if calls.spent():
                 say(calls.line())
             return stopped
         revised = _pause_revised(state.run_id)
-        code = _step(target, subject, role, chatting=True)
+        code = _step(target, subject, role, chatting=not remote)
         if revised and _edge_ran(state):
             calls.check += 1
         if calls.spent():
             say(calls.line())
-        code = _resolve_rounds(target, subject, role, code)
+        if not remote:
+            code = _resolve_rounds(target, subject, role, code)
     return code
 
 
@@ -942,13 +1073,15 @@ def _say_owner_review_wait(repo: str, subject: str | None, *, tty: bool) -> None
     say(orv.NO_TTY.format(label=label, links=links))
 
 
-def _owner_pause(state: rs.RunState, calls: er.PaidCalls) -> int | None:
+def _owner_pause(
+    state: rs.RunState, calls: er.PaidCalls, ask: pending.Ask | None = None
+) -> int | None:
     """Один показ паузы: узлы волны по очереди (W4 — оба подряд). `None` —
     пауза пройдена и op записан; иначе код выхода."""
     files = _pause_files(state)
     _remember_shown(state, files)
     for stage, path in files:
-        stopped = _owner_node(state, stage, path, calls)
+        stopped = _owner_node(state, stage, path, calls, ask)
         if stopped is not None:
             return stopped
     _write_pause_op(state, complete=True)
@@ -956,20 +1089,27 @@ def _owner_pause(state: rs.RunState, calls: er.PaidCalls) -> int | None:
 
 
 def _owner_node(
-    state: rs.RunState, stage: str, path: Path, calls: er.PaidCalls
+    state: rs.RunState,
+    stage: str,
+    path: Path,
+    calls: er.PaidCalls,
+    ask: pending.Ask | None = None,
 ) -> int | None:
     """Узел на паузе: недоигранные замечания (RF-1: без вопроса) или ответ
     на экране паузы; правка принята — op помечен «правлено», затем
     замечания «применены». «Дальше» после ручной правки файла (хэш ≠
     снятому при показе) — тоже «правлено»: перепроверка и пауза снова.
-    `None` — дальше; иначе код (0 — пауза)."""
+    `ask` — без терминала (#766): «дальше» через `dfl reply`, замечания
+    пока только в терминале. `None` — дальше; иначе код (0 — пауза)."""
     rd = rs.run_dir(state.run_id)
     label = rp.STAGE_LABELS[stage]
     batch = rp.pending(rd, stage)
+    if batch and ask is not None:
+        say(orv.NO_TTY.format(label=label, links=orv.links([path])))
+        return 0
     if not batch:
-        answer = rp.ask(label, [path], read=ic.stdin_read)
+        answer = _owner_answer(state, stage, label, path, ask)
         if answer is None:
-            say(OWNER_REVIEW_PAUSED.format(label=label))
             return 0
         if not answer:
             if _edited_on_pause(state, stage, path):
@@ -997,6 +1137,71 @@ def _owner_node(
         return 1
     say(f"{detail} — продолжить: dfl run")
     return 1
+
+
+def _owner_answer(
+    state: rs.RunState,
+    stage: str,
+    label: str,
+    path: Path,
+    ask: pending.Ask | None,
+) -> str | None:
+    """Ответ на экране паузы узла: `""` — «дальше»; `None` — пауза (строка
+    о ней уже напечатана). Терминал: записанный `dfl reply` берётся вместо
+    ввода, живой ответ снимает вопрос (терминал побеждает, спека §5.1)."""
+    if ask is not None:
+        return _owner_answer_remote(state, stage, label, path, ask)
+    if stage in _acked(state):
+        return ""
+    rd = rs.run_dir(state.run_id)
+    q = rp.question(stage, label, [path])
+    if pending.take(rd, q) is not None:
+        return ""
+    answer = rp.ask(label, [path], read=ic.stdin_read)
+    if answer is None:
+        say(OWNER_REVIEW_PAUSED.format(label=label))
+        return None
+    pending.discard(rd, q)
+    return answer
+
+
+def _acked_path(state: rs.RunState) -> Path:
+    return rs.run_dir(state.run_id) / REVIEW_ACKED
+
+
+def _acked(state: rs.RunState) -> list[str]:
+    """Узлы волны, на которые «дальше» уже получено (W4: по одному на вызов)."""
+    try:
+        data = json.loads(_acked_path(state).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict) or data.get("wave") != state.wave:
+        return []
+    stages = data.get("stages")
+    return [str(x) for x in stages] if isinstance(stages, list) else []
+
+
+def _owner_answer_remote(
+    state: rs.RunState,
+    stage: str,
+    label: str,
+    path: Path,
+    ask: pending.Ask,
+) -> str | None:
+    """«Дальше» узла без терминала: уже полученное запоминается в
+    `review-acked.json` — иначе второй узел W4 вернул бы первый на вопрос."""
+    acked = _acked(state)
+    if stage in acked:
+        return ""
+    answer = rp.ask_remote(stage, label, [path], ask=ask)
+    if answer is None:
+        say(pending.wait_text(rs.run_dir(state.run_id)))
+        return None
+    _acked_path(state).write_text(
+        json.dumps({"wave": state.wave, "stages": [*acked, stage]}) + "\n",
+        encoding="utf-8",
+    )
+    return answer
 
 
 def _owner_revise(
@@ -1097,6 +1302,7 @@ def _write_pause_op(state: rs.RunState, *, complete: bool) -> None:
             if complete:
                 rs.op_complete(now, key, revised=revised)
                 (rs.run_dir(now.run_id) / REVIEW_SHOWN).unlink(missing_ok=True)
+                _acked_path(now).unlink(missing_ok=True)
             else:
                 rs.op_start(now, key, revised=True)
     except run_lock.LockBusy as exc:
@@ -1555,6 +1761,7 @@ def _manual_step(state: rs.RunState, url: str) -> int | None:
         pr_url=url,
         run_id=state.run_id,
         save=lambda: _manual_save(state),
+        run_dir=rs.run_dir(state.run_id),
     )
     if reason is None:
         return None
@@ -1594,7 +1801,7 @@ def _select_customer(
     if len(unfinished) == 1:
         return unfinished[0]
     if not unfinished:
-        raise DflError(f"незаконченного прогона нет — {NEW_RUN_HINT}")
+        raise DflError(f"{NO_UNFINISHED} — {NEW_RUN_HINT}")
     names = ", ".join(c.run_id for c in unfinished)
     raise DflError(
         f"незаконченных прогонов несколько: {names} — выберите: "
@@ -1718,6 +1925,9 @@ def status(cwd: Path) -> int:
             _manual_status(state.ops.get(MANUAL_OP) or {}, state.repo_slug)
         for key, op_status in _op_statuses(state).items():
             say(f"  {key}: {op_status}", 2)
+    waiting_dir = _target_run_dir(target, None)
+    if waiting_dir is not None and (waiting := pending.wait_text(waiting_dir)):
+        say(waiting)
     active_slug = user_targets.slug_from_url(target.repo_url)
     active = personal_state.active_for(active_slug)
     if active is not None:

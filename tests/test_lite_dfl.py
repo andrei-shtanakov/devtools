@@ -24,6 +24,7 @@ from governance.facts import Fact, Outcome
 from lite import dfl, runlog
 from lite import edge_resolve as er
 from lite import failure_log as fl
+from lite import pending as pend
 from lite.output import VERBOSITY_ENV, verbosity
 from tests.conftest import _STRICT_GH_DIRS
 from tests.df_config_fixture import use_test_real_home, write_config
@@ -2349,7 +2350,9 @@ def test_new_run_no_tty_stops_with_hint(env: Env, capsys) -> None:
     _manual_eng(env)
     assert env.run("run", "--subject", "тема") == 0
     out = capsys.readouterr().out
-    assert "ждут ответа 1 ручных проверок — запустите dfl run в терминале" in out
+    assert "ждёт ответа: Ручная проверка BEH-01" in out
+    held = pend.load(rs.run_dir("WS-1-eng-b"))
+    assert held is not None and held["kind"] == pend.MANUAL
     assert "PR с кодом проверен" not in out
     assert rs.load("WS-1-eng-b").ops["manual-checks"]["status"] == "started"
 
@@ -2493,3 +2496,16 @@ def test_status_shows_done_personal_run_summary(env: Env, monkeypatch, capsys) -
         in out
     )
     assert "BEH-01 (TASK-001): не выполнено → issue #24 (открыт)" in out
+
+
+def test_public_argv_hides_reply_text() -> None:
+    """Текст ответа `dfl reply` не уходит в запись сбоя (`dfl report`)."""
+    raw = ["reply", "--id", "manual:B:1", "--text", "тел. 123", "--text=имя"]
+    assert dfl._public_argv(raw) == [
+        "reply",
+        "--id",
+        "manual:B:1",
+        "--text",
+        "…",
+        "--text=…",
+    ]

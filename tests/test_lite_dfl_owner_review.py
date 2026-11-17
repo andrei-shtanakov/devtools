@@ -270,12 +270,8 @@ def test_no_tty_stop_hint(env: Env, monkeypatch, capfd) -> None:  # noqa: F811
     monkeypatch.setattr(ic, "stdin_read", lambda prompt: pytest.fail("без tty"))
     assert env.run("run", "--subject", "t") == 0
     out, _ = _read(capfd)
-    bundle = (env.tmp / "target" / "workstreams/WS-1/spec").resolve()
-    assert (
-        "ждёт просмотра этапа «дизайн, приёмка» — откройте "
-        f"file://{bundle / '20-design.md'}, file://{bundle / '25-acceptance.md'}; "
-        "замечания — dfl run в терминале"
-    ) in out
+    assert "ждёт ответа: этап «дизайн» готов и прошёл проверку" in out
+    assert "dfl reply --id review:design:" in out
     assert seen == [] and len(env.spec_calls) == 1
 
 
@@ -449,12 +445,12 @@ def test_manual_edit_after_no_tty_hint_marks_revised(
 
 
 def test_no_tty_only_links_line(env: Env, monkeypatch, capfd) -> None:  # noqa: F811
-    """Final review #768 minor 5: без терминала — одна строка ожидания (со
-    ссылками), без «ждёт просмотра этапа: dfl run» перед ней."""
+    """Final review #768 minor 5: без терминала — одна строка ожидания,
+    без «ждёт просмотра этапа: dfl run» перед ней (с #766 — «ждёт ответа»)."""
     _bind_streams(monkeypatch)
     _tty(monkeypatch, False)
     _steps(env, monkeypatch)
     assert env.run("run", "--subject", "t") == 0
     out, _ = _read(capfd)
     assert "ждёт просмотра этапа: dfl run" not in out
-    assert out.count("ждёт просмотра этапа «дизайн, приёмка» — откройте") == 1
+    assert out.count("ждёт ответа: этап «дизайн»") == 1

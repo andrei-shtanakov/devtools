@@ -354,9 +354,8 @@ def test_no_tty_stops_with_link_hint(tmp_path) -> None:
     run = _run(tmp_path, ("design",))
     assert _advance(run, FakeOps(run), read=_no_read, tty=False) == 0
     assert run.step == "design"
-    link = f"file://{(_bundle(run) / '20-design.md').resolve()}"
-    assert "ждёт просмотра этапа «дизайн»" in run.stop_reason
-    assert f"откройте {link}; замечания — dfl run в терминале" in run.stop_reason
+    assert run.stop_reason.startswith("ждёт ответа: этап «дизайн»")
+    assert "dfl reply --id review:design:" in run.stop_reason
 
 
 class _BodyOps(FakeOps):
