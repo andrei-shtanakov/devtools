@@ -96,12 +96,16 @@ def pr_branch(prs: list[dict], pr: int) -> str | None:
 def read_progress(
     ops: _BranchReader, target_dir: str, branch: str, tasks_rel: str
 ) -> tuple[int, int] | None:
-    """Счётчик задач на `origin/<branch>`; не прочитан — `None` (не стоп)."""
+    """Счётчик задач на `origin/<branch>`; не прочитан — `None`.
+
+    Что значит `None`, решает вызывающий: для плашки упавшей попытки — лишь
+    «счётчик не прочитан», для приёмки PR после кода 0 — стоп (`unread_stop`).
+    """
     try:
         if not ops.fetch_branch(target_dir, branch):
             return None
         text = ops.show_file(target_dir, f"origin/{branch}", tasks_rel)
-    except Exception:  # noqa: BLE001 - счётчик лишь украшает плашку
+    except Exception:  # noqa: BLE001 - любой сбой = «не прочитан»
         return None
     return None if text is None else task_progress(text)
 

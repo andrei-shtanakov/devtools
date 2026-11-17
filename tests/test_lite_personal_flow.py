@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from governance import manual_checks as mc
 from governance import run_resume
 from governance.author_launch import LaunchOutcome
 from governance.brief_facts import DefaultBranch
@@ -759,23 +760,26 @@ def test_code_pr_unread_task_counter_stops_without_accepting(run) -> None:
 
 
 def test_unfinished_pr_reopens_completed_manual_checks(run) -> None:
-    """Ручные проверки, пройденные по брошенному частичному PR, будут
-    заданы для следующего; ответы и заведённые issue сохраняются."""
+    """Ручные проверки, пройденные по брошенному частичному PR, для
+    следующего задаются заново: запись сбрасывается целиком, и `settle`
+    соберёт проверки и спросит их снова (ревью #805)."""
     ops = FakeOps(run)
     run.step = "code-pr"
     run.code_pr = CODE_PR
+    run.manual_checks = True
     run.manual = {
         "status": "completed",
+        "checks": [{"beh_id": "BEH-1", "task": "TASK-001", "text": "t"}],
+        "answers": {"BEH-1": {"verdict": mc.NOT_DONE, "issue": 5, "at": "x"}},
         "commented": True,
-        "answers": {"BEH-1": {"verdict": "not-done", "issue": 5}},
     }
     ops.prs.append(
         {"number": CODE_PR, "state": "OPEN", "head": {"ref": "spec-runner/run-1"}}
     )
     ops.tasks_md = INCOMPLETE_TASKS
     assert _advance(run, ops) == 1
-    assert run.manual == {"answers": {"BEH-1": {"verdict": "not-done", "issue": 5}}}
-    assert state.load(run.run_id).manual == run.manual
+    assert run.manual == {} and state.load(run.run_id).manual == {}
+    assert mc.pending(run.manual_checks, run.manual)
 
 
 def test_code_pr_merged_marks_done(run, capsys) -> None:
