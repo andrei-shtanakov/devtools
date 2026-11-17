@@ -52,3 +52,17 @@ def test_no_draft_approval_line(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tasks, "_DRAFT_SENTENCE", "нет такой строки")
     with pytest.raises(RuntimeError):
         _render()
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("---\nа: 1\n---\n\n# Задачи\n", "# Задачи\n"),
+        ("# Задачи\n---\nx\n---\n", "# Задачи\n---\nx\n---\n"),  # не ведущий
+        ("---\nа: 1\nбез конца\n", "---\nа: 1\nбез конца\n"),  # незакрытый
+    ],
+)
+def test_strip_frontmatter(text: str, expected: str) -> None:
+    """Ревью #774 (Task 7): срез frontmatter — только ведущий закрытый блок
+    (с `anchor_blob=None` рендер его не выдаёт — страховка на будущее)."""
+    assert tasks._strip_frontmatter(text) == expected
