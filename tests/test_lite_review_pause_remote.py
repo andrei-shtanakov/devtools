@@ -6,14 +6,15 @@ import pytest
 
 from governance import run_state as rs
 from governance import runner
+from lite import dfl, pending
 from lite import interview_chat as ic
-from lite import pending
 from lite import review_pause as rp
 from lite.personal import state
 from tests.test_lite_dfl import Env, _bind_streams, _read, _tty, env  # noqa: F401
 from tests.test_lite_dfl_owner_review import (
     DESIGN,
     RUN_ID,
+    _design,
     _steps,
 )
 from tests.test_lite_personal_flow import FakeOps, checker
@@ -188,3 +189,28 @@ def test_ask_remote_unit(tmp_path) -> None:
     assert q.accepts == "«дальше»" and q.links == (f"file://{path.resolve()}",)
     pending.record(tmp_path, q.id, "ок")
     assert rp.ask_remote("design", "дизайн", [path], ask=ask) == ""
+
+
+def test_w4_manual_edit_keeps_acked_nodes(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ручная правка первого узла W4 не возвращает его на вопрос: узлы,
+    принятые в этой паузе, остаются принятыми (`review-acked.json`)."""
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch, False)
+    seen = _steps(env, monkeypatch)
+    assert env.run("run", "--subject", "t") == 0
+    rd = rs.run_dir(RUN_ID)
+    _design(env).write_text(DESIGN + "\nправка руками\n", encoding="utf-8")
+    asked: list[str] = []
+    for _ in range(4):
+        rec = pending.load(rd)
+        if rec is None:
+            break
+        asked.append(str(rec["key"]))
+        pending.record(rd, str(rec["id"]), "дальше")
+        assert env.run("run", "--subject", "t") == 0
+    assert asked == ["design", "acceptance"]
+    assert seen == [{"status": "completed", "revised": True}]
+    assert not (rd / dfl.REVIEW_ACKED).exists()

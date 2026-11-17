@@ -1115,9 +1115,11 @@ def _owner_answer(
     """Ответ на экране паузы узла: `""` — «дальше»; `None` — пауза (строка
     о ней уже напечатана). Терминал: записанный `dfl reply` берётся вместо
     ввода, живой ответ снимает вопрос (терминал побеждает, спека §5.1)."""
-    rd = rs.run_dir(state.run_id)
     if ask is not None:
         return _owner_answer_remote(state, stage, label, path, ask)
+    if stage in _acked(state):
+        return ""
+    rd = rs.run_dir(state.run_id)
     q = rp.question(stage, label, [path])
     if pending.take(rd, q) is not None:
         return ""
@@ -1266,9 +1268,9 @@ def _write_pause_op(state: rs.RunState, *, complete: bool) -> None:
             if complete:
                 rs.op_complete(now, key, revised=revised)
                 (rs.run_dir(now.run_id) / REVIEW_SHOWN).unlink(missing_ok=True)
+                _acked_path(now).unlink(missing_ok=True)
             else:
                 rs.op_start(now, key, revised=True)
-            _acked_path(now).unlink(missing_ok=True)
     except run_lock.LockBusy as exc:
         raise DflError(f"{exc} — дождитесь конца dfl run и повторите") from exc
 
