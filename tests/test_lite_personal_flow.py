@@ -14,7 +14,7 @@ from governance.brief_facts import DefaultBranch
 from governance.facts import Fact, Outcome
 from lite import edge_journal as ej
 from lite import edge_resolve as er
-from lite import manual_ask as ma
+from lite import pending
 from lite.personal import flow, state
 from lite.personal.brief import Brief, Context, Function, Goal, brief_from_json
 from lite.personal.interviewer import Halt
@@ -1112,8 +1112,21 @@ def test_personal_asks_before_merge_line(run, capsys) -> None:
 def test_personal_no_tty_stops(run, capsys) -> None:
     ops = _manual_run(run)
     assert _go(run, ops, tty=False) == 0
-    assert run.stop_reason == ma.NO_TTY.format(n=1)
+    assert (run.stop_reason or "").startswith("ждёт ответа:")
+    rec = pending.load(state.run_dir(run.run_id))
+    assert rec is not None and rec["kind"] == pending.MANUAL
+    assert rec["key"] == "BEH-01"
     assert run.step == "code-pr" and "смержите" not in capsys.readouterr().out
+
+
+def test_personal_no_tty_reply_answers_next_advance(run) -> None:
+    ops = _manual_run(run)
+    assert _go(run, ops, tty=False) == 0
+    rd = state.run_dir(run.run_id)
+    pending.record(rd, pending.load(rd)["id"], "1")
+    assert _go(run, ops, tty=False) == 0
+    assert run.manual["answers"]["BEH-01"]["verdict"] == "done"
+    assert pending.load(rd) is None
 
 
 def test_personal_merged_line_has_summary(run, capsys) -> None:

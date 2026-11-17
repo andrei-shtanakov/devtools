@@ -1006,6 +1006,7 @@ def _manual(ctx: _Ctx, pr: int) -> bool:
         pr_url=f"https://github.com/{run.repo_slug}/pull/{pr}",
         run_id=run.run_id,
         save=lambda: save(run),
+        run_dir=run_dir(run.run_id),
     )
     if reason is None:
         return True
