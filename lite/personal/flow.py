@@ -472,7 +472,7 @@ def _review(ctx: _Ctx, stage: str, files: list[str]) -> bool:
     if awaiting and stage in _STAGE_KINDS and _edited_on_pause(ctx, stage):
         # правка руками, пока пауза ждала `dfl reply`: шаг этапа уже
         # перепроверил узел — ответ был о старом содержимом, пауза заново
-        pending.discard(rd, rp.question(stage, label, paths))
+        pending.discard(rd)
         awaiting = False
     if not awaiting:
         _remember_checked(ctx, stage)
@@ -557,7 +557,7 @@ def _ask_pause(ctx: _Ctx, stage: str, label: str, paths: list[Path]) -> str | No
         return ""
     answer = rp.ask(label, paths, read=ctx.read)
     if answer is not None:
-        pending.discard(rd, q)
+        pending.discard(rd)
     return answer
 
 

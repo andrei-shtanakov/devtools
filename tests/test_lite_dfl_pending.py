@@ -198,3 +198,59 @@ def test_status_shows_personal_pending(
     assert env.run("status") == 0
     out = capsys.readouterr().out
     assert "ждёт ответа:" in out and "личный вопрос" in out
+
+
+def test_pending_and_status_after_reply_show_answered(
+    env: Env,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """После `dfl reply` вопрос не приглашает ответить снова (ревью #803)."""
+    _enterprise(QUESTION.text)
+    assert env.run("reply", "--id", QUESTION.id, "--text", "1") == 0
+    capsys.readouterr()
+    assert env.run("pending") == 0
+    out = capsys.readouterr().out
+    assert pending.ANSWERED in out and "dfl reply --id" not in out
+    assert env.run("pending", "--json") == 0
+    assert json.loads(capsys.readouterr().out)["answered"] is True
+    assert env.run("status") == 0
+    out = capsys.readouterr().out
+    assert pending.ANSWERED in out and "ждёт ответа:" not in out
+
+
+def test_status_personal_answered_once(
+    env: Env,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_dir = _personal()
+    qid = str(pending.load(run_dir)["id"])
+    assert env.run("reply", "--id", qid, "--text", "1") == 0
+    capsys.readouterr()
+    assert env.run("status") == 0
+    out = capsys.readouterr().out
+    assert out.count(pending.ANSWERED) == 1 and "ждёт ответа:" not in out
+
+
+def test_status_shows_pending_with_two_subjects(
+    env: Env,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Два незаконченных конвейера: строка ожидания не теряется (ревью #803)."""
+    _two_subjects()
+    q = pending.Question(pending.MANUAL, "BEH-02", "вопрос второй темы")
+    pending.asker(rs.run_dir("20260102-000000-bbbb"))(q)
+    assert env.run("status") == 0
+    out = capsys.readouterr().out
+    assert "ждёт ответа: вопрос второй темы" in out
+    # подсказка ведёт к работающей команде: с темой прогона
+    assert f"dfl reply --subject 'два' --id {q.id}" in out
+    assert env.run("reply", "--subject", "два", "--id", q.id, "--text", "1") == 0
+
+
+def test_reply_abbreviated_flag_refused(env: Env) -> None:  # noqa: F811
+    """Сокращение `--te` не принимается: текст ответа иначе обходил бы
+    скрытие в записи сбоя."""
+    _enterprise(QUESTION.text)
+    with pytest.raises(SystemExit) as exc:
+        env.run("reply", "--id", QUESTION.id, "--te", "1")
+    assert exc.value.code == 2

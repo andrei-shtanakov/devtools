@@ -514,11 +514,14 @@ def _verbose_parent(dest: str) -> argparse.ArgumentParser:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="dfl", parents=[_verbose_parent("verbose_root")]
+        prog="dfl", parents=[_verbose_parent("verbose_root")], allow_abbrev=False
     )
     parser.add_argument("--cwd", required=True, help="каталог репо цели")
     sub = parser.add_subparsers(dest="command", required=True)
-    add = functools.partial(sub.add_parser, parents=[_verbose_parent("verbose")])
+    # без сокращений: `--te` вместо `--text` обходил бы скрытие в `_public_argv`
+    add = functools.partial(
+        sub.add_parser, parents=[_verbose_parent("verbose")], allow_abbrev=False
+    )
     p_run = add("run", help="следующий шаг конвейера")
     p_run.add_argument("--subject", help="тема нового прогона")
     p_run.add_argument("--stakeholder", default="customer")
@@ -670,27 +673,19 @@ def _pending_dir(cwd: Path, subject: str | None, *, register: bool) -> Path | No
     return rs.run_dir((_engineer_of(cust, runs) or cust).run_id)
 
 
-def _target_run_dir(
-    target: user_targets.UserTarget, subject: str | None
-) -> Path | None:
-    """Каталог продолжаемого прогона зарегистрированного репо (без регистрации)."""
-    slug = user_targets.slug_from_url(target.repo_url)
-    active = personal_state.active_for(slug, subject=subject)
-    if active is not None:
-        return personal_state.run_dir(active.run_id)
-    state = _current_run(target.repo, subject)
-    return rs.run_dir(state.run_id) if state is not None else None
-
-
-def _pending_lines(rec: dict) -> list[str]:
-    """Вывод `dfl pending` по записи `pending.json`."""
+def _pending_lines(rec: dict, *, answered: bool = False) -> list[str]:
+    """Вывод `dfl pending` по записи `pending.json`; ответ уже записан —
+    вместо приглашения ответить `pending.ANSWERED`."""
     lines = [str(rec.get("text", ""))]
     for n, option in enumerate(rec.get("options") or [], start=1):
         lines.append(f"  {n}. {option}")
     lines += [f"ссылка: {link}" for link in rec.get("links") or []]
     if rec.get("accepts"):
         lines.append(f"принимается: {rec['accepts']}")
-    lines.append(f"ответ: dfl reply --id {rec.get('id', '')} --text '…'")
+    if answered:
+        lines.append(pending.ANSWERED)
+    else:
+        lines.append(f"ответ: dfl reply --id {rec.get('id', '')} --text '…'")
     return lines
 
 
@@ -698,13 +693,15 @@ def pending_cmd(cwd: Path, subject: str | None, *, as_json: bool) -> int:
     """`dfl pending`: вопрос, на котором прогон ждёт человека (код 0)."""
     run_dir = _pending_dir(cwd, subject, register=False)
     rec = pending.load(run_dir) if run_dir is not None else None
+    done = run_dir is not None and pending.answered(run_dir)
     if as_json:
-        say(json.dumps(rec, ensure_ascii=False, indent=2))
+        out = None if rec is None else {**rec, "answered": done}
+        say(json.dumps(out, ensure_ascii=False, indent=2))
         return 0
     if rec is None:
         say("вопросов нет")
         return 0
-    for line in _pending_lines(rec):
+    for line in _pending_lines(rec, answered=done):
         say(line)
     return 0
 
@@ -721,7 +718,7 @@ def reply_cmd(cwd: Path, subject: str | None, qid: str, text: str) -> int:
         raise DflError(f"{exc} — дождитесь конца dfl run и повторите") from exc
     except pending.PendingError as exc:
         raise DflError(str(exc)) from exc
-    say("ответ записан — продолжить: dfl run")
+    say(pending.ANSWERED)
     return 0
 
 
@@ -1161,7 +1158,7 @@ def _owner_answer(
     if answer is None:
         say(OWNER_REVIEW_PAUSED.format(label=label))
         return None
-    pending.discard(rd, q)
+    pending.discard(rd)
     return answer
 
 
@@ -1805,8 +1802,8 @@ def _select_customer(
     names = ", ".join(c.run_id for c in unfinished)
     raise DflError(
         f"незаконченных прогонов несколько: {names} — выберите: "
-        "dfl run --subject '<тема одного из них>' (то же для dfl answer и "
-        "dfl abandon)"
+        "dfl run --subject '<тема одного из них>' (то же для dfl answer, "
+        "dfl abandon, dfl pending и dfl reply)"
     )
 
 
@@ -1915,24 +1912,33 @@ def status(cwd: Path) -> int:
     """Прогоны репо из журнала и следующий шаг; форджа и эффектов нет."""
     target = _registered_target(cwd)
     runs, broken = _repo_runs(target.repo)
+    unfinished = [s for s in runs if _frame(s) == "customer" and not _finished(s, runs)]
+    ambiguous = len(unfinished) > 1
     for run_id in broken:
         say(f"{run_id}  не читается: {rs.run_dir(run_id)}/run.json")
     for state in runs:
         line = f"{state.run_id}  {_frame(state) or '-'}  {state.status}"
         hint = _next_hint(state, runs)
         say(f"{line}  дальше: {hint}" if hint else line)
+        # у каждого прогона свой вопрос: при нескольких темах не теряется,
+        # и подсказка называет тему — без неё pending/reply откажут
+        pick = state.subject if ambiguous else None
+        if waiting := pending.wait_text(rs.run_dir(state.run_id), pick):
+            say(f"  {waiting}")
         if verbosity() >= 1:
             _manual_status(state.ops.get(MANUAL_OP) or {}, state.repo_slug)
         for key, op_status in _op_statuses(state).items():
             say(f"  {key}: {op_status}", 2)
-    waiting_dir = _target_run_dir(target, None)
-    if waiting_dir is not None and (waiting := pending.wait_text(waiting_dir)):
-        say(waiting)
     active_slug = user_targets.slug_from_url(target.repo_url)
     active = personal_state.active_for(active_slug)
     if active is not None:
         line = f"личный прогон {active.run_id}: шаг {active.step}"
-        say(f"{line} — {active.stop_reason}" if active.stop_reason else line)
+        # вопрос из `pending.json` точнее причины стопа (ответ мог быть записан)
+        reason = (
+            pending.wait_text(personal_state.run_dir(active.run_id))
+            or active.stop_reason
+        )
+        say(f"{line} — {reason}" if reason else line)
         if verbosity() >= 1:
             _manual_status(active.manual, active.repo_slug)
     for done in personal_state.finished_for(active_slug):
