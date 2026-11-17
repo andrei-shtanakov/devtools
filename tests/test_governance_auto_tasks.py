@@ -497,6 +497,32 @@ def test_spec_run_failed_attempt_closed_partial_pr_reruns(state):
     }
 
 
+def test_spec_run_exit_zero_with_unfinished_tasks_stops_with_banner(state, capsys):
+    """Штатная остановка раннера даёт код 0 и частичный PR — не принимать
+    (#767): запись становится упавшей попыткой, повтор не перезапускает."""
+    ops = _ops()
+    ops.prs = [_run_pr(5)]
+    ops.tasks_md = _tasks_md(2, 5)
+    assert auto_tasks._spec_run(state, ops) is None
+    out = capsys.readouterr().out
+    assert run_resume.banner("s", "o/alpha", "spec-runner/run-9", (2, 5)) in out
+    assert run_resume.resume_stop("spec-runner/run-9", 9) in out
+    record = rs.load(state.run_id).ops["spec-run"]
+    assert record["status"] == "started"
+    assert record["exit"] == run_resume.INCOMPLETE_EXIT
+    calls = len(_run_calls(ops))
+    assert auto_tasks._spec_run(state, ops) is None
+    assert len(_run_calls(ops)) == calls
+    assert run_resume.resume_stop("spec-runner/run-9", 9) in capsys.readouterr().out
+
+
+def test_spec_run_exit_zero_all_tasks_done_completes(state):
+    ops = _ops()
+    ops.prs = [_run_pr(5)]
+    ops.tasks_md = _tasks_md(3, 3)
+    assert auto_tasks._spec_run(state, ops) == 9
+
+
 def test_spec_run_resume_after_crash_does_not_take_pr(state, capsys):
     """Падение контроллера: PR без наблюдённого кода 0 не принимается и
     раннер не перезапускается, пока PR открыт — его закрывает человек."""

@@ -1023,6 +1023,34 @@ def _step_code_run(ctx: _Ctx) -> bool:
     return _take_new_pr(ctx, [n for n in after if n not in before])
 
 
+def _incomplete_stop(ctx: _Ctx, pr: int) -> bool:
+    """PR прогона открыт, а задачи на его ветке сделаны не все — плашка и стоп.
+
+    spec-runner, остановленный штатно (SIGINT/SIGTERM), выходит кодом 0 и
+    открывает частичный PR; без сверки dfl принял бы его за готовый.
+    Запись переводится в «упавшую попытку» (`code-run`, `INCOMPLETE_EXIT`),
+    дальше — та же развилка, что после ненулевого кода (#767). `True` — стоп.
+    """
+    run = ctx.run
+    prs = _run_prs(ctx)
+    if prs is None:
+        return True
+    branch = run_resume.pr_branch(prs, pr)
+    if branch is None:
+        return False
+    progress = run_resume.read_progress(
+        ctx.ops, run.target_dir, branch, TASKS_PATH.format(ws_id=run.ws_id)
+    )
+    if not run_resume.incomplete(progress):
+        return False
+    run.step, run.code_pr = "code-run", None
+    run.run_exit = run_resume.INCOMPLETE_EXIT
+    save(run)
+    say(run_resume.banner(run.subject, run.repo_slug, branch, progress))
+    ctx.stop(run_resume.resume_stop(branch, pr))
+    return True
+
+
 def _take_new_pr(ctx: _Ctx, new: list[int]) -> bool:
     if len(new) != 1:
         found = f"найдено {len(new)}: {new}" if new else "не найден"
@@ -1080,6 +1108,8 @@ def _step_code_pr(ctx: _Ctx) -> bool:
     pr = run.code_pr
     if pr is None:
         return ctx.stop("integration-PR прогона не известен — повторите dfl run")
+    if _incomplete_stop(ctx, pr):  # первая сверка нового PR (и старых записей)
+        return False
     if not _manual(ctx, pr):
         return False
     facts = _facts(ctx, pr)

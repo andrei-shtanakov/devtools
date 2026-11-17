@@ -17,6 +17,11 @@ from governance.task_bridge import _TASK_HEAD_RE, _TASK_META_RE
 #: префикс ветки прогона spec-runner (`--integration-pr`)
 RUN_BRANCH_PREFIX = "spec-runner/run-"
 
+#: код выхода, записываемый вместо 0, когда spec-runner вышел штатно, но
+#: задачи на ветке PR сделаны не все: его штатная остановка по SIGINT/SIGTERM
+#: без упавших задач возвращает 0, и PR без этой сверки приняли бы за готовый
+INCOMPLETE_EXIT = -1
+
 
 class _BranchReader(Protocol):
     def fetch_branch(self, target_dir: str, branch: str) -> bool: ...
@@ -62,6 +67,17 @@ def task_progress(text: str) -> tuple[int, int] | None:
                 done += meta.group("status").upper().endswith("DONE")
                 break
     return done, len(heads)
+
+
+def incomplete(progress: tuple[int, int] | None) -> bool:
+    """Счётчик прочитан и задачи сделаны не все; не прочитан — не стоп."""
+    return progress is not None and progress[0] < progress[1]
+
+
+def pr_branch(prs: list[dict], pr: int) -> str | None:
+    """Ветка ОТКРЫТОГО PR прогона `pr`; нет такого — `None`."""
+    found = [head for n, head in resume_candidates(prs, []) if n == pr]
+    return found[0] if found else None
 
 
 def read_progress(
