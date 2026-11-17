@@ -215,10 +215,10 @@ def _screen_stop(reason: str) -> None:
     notice(f"spec-loop (test): {reason}")
 
 
-#: реализация идёт долго и молча — как смотреть прогресс (devtools#765 б)
+#: прогресс задач виден в окне dfl (devtools#765); TUI — по желанию, подробнее
 TUI_HINT = (
-    "spec-loop (test): реализация задач запущена — прогресс в другом "
-    "терминале, в каталоге проекта: spec-runner tui --spec-prefix={ws}-"
+    "spec-loop (test): реализация задач запущена · подробнее (необязательно), "
+    "в каталоге проекта: spec-runner tui --spec-prefix={ws}-"
 )
 
 
