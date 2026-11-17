@@ -650,17 +650,10 @@ def _guard(ctx: _Ctx) -> str | None:
     ветку; стоп — `None`.
     """
     run, ops = ctx.run, ctx.ops
-    own = run.bundle_dir.strip("/") + "/"
-    tasks = _tasks_rel(run)
-    foreign = [
-        p
-        for p in ops.dirty_paths(run.target_dir)
-        if not p.startswith(own) and p != tasks
-    ]
+    foreign = _foreign(run, ops.dirty_paths(run.target_dir))
     if foreign:
-        shown = ", ".join(foreign[:5]) + (" …" if len(foreign) > 5 else "")
         ctx.stop(
-            f"в {run.target_dir} незакоммиченные чужие изменения: {shown} — "
+            f"в {run.target_dir} незакоммиченные чужие изменения: {foreign} — "
             f"уберите их и повторите dfl run"
         )
         return None
@@ -673,6 +666,13 @@ def _guard(ctx: _Ctx) -> str | None:
         )
         return None
     return branch
+
+
+def _foreign(run: PersonalRun, paths: list[str]) -> str:
+    """Пути вне своих файлов прогона (бандл и `tasks.md`) строкой; нет — ""."""
+    own, tasks = run.bundle_dir.strip("/") + "/", _tasks_rel(run)
+    foreign = [p for p in paths if not p.startswith(own) and p != tasks]
+    return ", ".join(foreign[:5]) + (" …" if len(foreign) > 5 else "")
 
 
 def _open_spec_pr(ctx: _Ctx) -> bool:
@@ -705,6 +705,14 @@ def _open_spec_pr(ctx: _Ctx) -> bool:
         ops.commit_paths(
             target, [run.bundle_dir, tasks], f"spec({run.ws_id}): личный путь"
         )
+        # ветка прогона могла получить чужой коммит (возобновление): push
+        # и автомерж увезли бы его в базу под видом спеки (ревью #774)
+        foreign = _foreign(run, ops.changed_paths(target, base)[1])
+        if foreign:
+            return ctx.stop(
+                f"ветка прогона {branch} несёт чужие изменения: {foreign} — "
+                f"уберите эти коммиты из ветки и повторите dfl run ({ABANDON})"
+            )
         ops.push_branch(target, branch)
         run.spec_head = ops.head_sha(target, branch)
         save(run)  # write-ahead: мерж пинуется на запушенную голову

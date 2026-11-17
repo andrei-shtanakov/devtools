@@ -60,6 +60,8 @@ class FakeOps:
         self.push_fail = False
         self.fetched = True
         self.tasks_md: str | None = None
+        #: пути ветки прогона сверх закоммиченных прогоном (чужой коммит)
+        self.extra_changed: list[str] = []
 
     def default_branch_fact(self, repo_slug: str) -> Fact:
         self.calls.append(("default_branch_fact", repo_slug))
@@ -100,6 +102,14 @@ class FakeOps:
     def commit_paths(self, target_dir, paths, message, force_paths=()) -> None:
         self.calls.append(("commit_paths", target_dir, list(paths)))
         self.run_head = "bundle-sha"
+
+    def changed_paths(self, target_dir: str, base_branch: str):
+        self.calls.append(("changed_paths", target_dir, base_branch))
+        committed = next(c for c in reversed(self.calls) if c[0] == "commit_paths")
+        files = [
+            f"{p}/20-design.md" if p == self.run.bundle_dir else p for p in committed[2]
+        ]
+        return "base-sha", [*files, *self.extra_changed]
 
     def push_branch(self, target_dir: str, branch: str) -> None:
         self.calls.append(("push_branch", target_dir, branch))
@@ -265,6 +275,7 @@ def test_happy_path_to_code_pr(run, capsys) -> None:
         ("checkout_and_pull", target, "master"),
         ("switch_to", target, branch, "master"),
         ("commit_paths", target, [run.bundle_dir, tasks_path]),
+        ("changed_paths", target, "master"),
         ("push_branch", target, branch),
         ("head_sha", target, branch),
         ("find_pr", "o/repo", branch),
@@ -923,6 +934,20 @@ def test_spec_pr_foreign_commits_on_existing_branch_stop(run) -> None:
     assert "уже есть" in run.stop_reason and run.step == "spec-pr"
     effects = {"checkout_and_pull", "switch_to", "ensure_branch", "commit_paths"}
     assert not effects & set(ops.names())
+
+
+def test_spec_pr_foreign_commit_on_committed_branch_stops_before_push(run) -> None:
+    """Регрессия ревью #774: на ветке прогона с коммитом бандла человек
+    сделал свой коммит — push и автомерж spec-PR не увозят его в базу."""
+    _nodes_on_disk(run)
+    run.spec_committed = True
+    ops = FakeOps(run)
+    ops.branch, ops.run_head = f"spec/{run.ws_id}-personal", "bundle-sha"
+    ops.extra_changed = ["src/app.py"]
+    assert _advance(run, ops) == 1
+    assert "чужие изменения: src/app.py" in run.stop_reason
+    assert run.step == "spec-pr"
+    assert not {"push_branch", "create_pr", "human_merge"} & set(ops.names())
 
 
 def test_spec_pr_empty_existing_branch_entered_as_is(run) -> None:
