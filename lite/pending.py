@@ -37,6 +37,7 @@ REVIEW_DONE_WORDS = frozenset({"дальше", "да", "ок", "1"})
 
 NO_PENDING = "нет вопроса, ждущего ответа — dfl pending"
 STALE = "вопрос уже другой — dfl pending"
+ANSWERED = "ответ записан — продолжить: dfl run"
 REVIEW_REFUSAL = (
     "замечания к этапу пока принимаются только в терминале: dfl run; "
     "без замечаний — «дальше»"
@@ -104,8 +105,13 @@ def clear(run_dir: Path) -> None:
 def take(run_dir: Path, q: Question) -> str | None:
     """Забрать ответ на `q`: убрать из `replies.json`, снять вопрос.
 
-    Ответа нет — `None`, ничего не пишется.
+    Ответ берётся, только пока `q` — записанный ждущий вопрос: ответ,
+    переживший смену вопроса (гонка с `dfl reply`), не проходит следующий
+    показ того же вопроса. Ответа нет — `None`, ничего не пишется.
     """
+    current = load(run_dir)
+    if current is None or current.get("id") != q.id:
+        return None
     replies = _read_json(run_dir / REPLIES_FILE) or {}
     if q.id not in replies:
         return None
@@ -115,12 +121,18 @@ def take(run_dir: Path, q: Question) -> str | None:
     return text
 
 
-def discard(run_dir: Path, q: Question) -> None:
-    """Живой ответ победил: убрать записанный ответ на `q` и снять вопрос."""
-    replies = _read_json(run_dir / REPLIES_FILE) or {}
-    if replies.pop(q.id, None) is not None:
-        _write_json(run_dir / REPLIES_FILE, replies)
+def discard(run_dir: Path) -> None:
+    """Живой ответ победил (или вопрос устарел): снять вопрос и записанные
+    ответы — ответ годится только на текущий вопрос."""
+    (run_dir / REPLIES_FILE).unlink(missing_ok=True)
     clear(run_dir)
+
+
+def answered(run_dir: Path) -> bool:
+    """На ждущий вопрос уже записан ответ (`dfl reply`), ждём `dfl run`."""
+    rec = load(run_dir)
+    replies = _read_json(run_dir / REPLIES_FILE) or {}
+    return rec is not None and rec.get("id") in replies
 
 
 def asker(run_dir: Path) -> Ask:
@@ -130,6 +142,8 @@ def asker(run_dir: Path) -> Ask:
         text = take(run_dir, q)
         if text is not None:
             return text
+        # новый вопрос: ответы на прежние (гонка с `dfl reply`) не переживают его
+        (run_dir / REPLIES_FILE).unlink(missing_ok=True)
         record_ = {
             **as_dict(q),
             "run_id": run_dir.name,
@@ -155,10 +169,13 @@ def wait_line(q: Question) -> str:
 
 
 def wait_text(run_dir: Path) -> str:
-    """`wait_line` по записанному вопросу; пусто, если вопроса нет."""
+    """`wait_line` по записанному вопросу (ответ уже записан — `ANSWERED`);
+    пусто, если вопроса нет."""
     rec = load(run_dir)
     if rec is None:
         return ""
+    if answered(run_dir):
+        return ANSWERED
     return _line(str(rec.get("id", "")), str(rec.get("text", "")))
 
 

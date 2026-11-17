@@ -84,7 +84,7 @@ def _answer(
             return recorded
         live = ask_one(check, read)
         if live is not None:
-            pending.discard(run_dir, q)  # терминал побеждает: вопрос снят
+            pending.discard(run_dir)  # терминал побеждает: вопрос снят
         return live
     ask = pending.asker(run_dir)
     while True:

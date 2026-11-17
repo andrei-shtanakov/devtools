@@ -93,3 +93,22 @@ def test_wait_text(tmp_path):
 def test_load_broken_file_is_none(tmp_path):
     (tmp_path / pending.PENDING_FILE).write_text("{oops")
     assert pending.load(tmp_path) is None
+
+
+def test_reply_surviving_question_change_is_not_taken(tmp_path):
+    """Ответ, записанный по прежнему вопросу после его смены, не проходит
+    следующий показ того же вопроса (гонка `dfl reply` и `dfl run`, ревью #803)."""
+    first = pending.Question(pending.REVIEW, "design", "дизайн готов")
+    second = pending.Question(pending.REVIEW, "acceptance", "приёмка готова")
+    ask = pending.asker(tmp_path)
+    assert ask(first) is None
+    pending.record(tmp_path, first.id, "дальше")
+    assert ask(first) == "дальше"  # взят штатно
+    assert ask(second) is None  # прогон перешёл ко второму вопросу
+    # опоздавший reply на первый вопрос дописан в обход проверки (гонка)
+    (tmp_path / pending.REPLIES_FILE).write_text(
+        json.dumps({first.id: "дальше"}), encoding="utf-8"
+    )
+    assert pending.take(tmp_path, first) is None
+    assert ask(first) is None  # спрошено заново
+    assert not (tmp_path / pending.REPLIES_FILE).exists()

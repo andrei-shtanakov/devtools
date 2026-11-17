@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -144,7 +143,7 @@ def test_live_answer_drops_recorded_reply(tmp_path: Path) -> None:
 
     _settle(record, tmp_path, tty=True, read=read)
     replies = tmp_path / pending.REPLIES_FILE
-    assert q.id not in json.loads(replies.read_text("utf-8"))
+    assert not replies.exists()
     # следующий вызов без терминала спрашивает заново, а не проходит молча
     record2: dict = {}
     reason, _ = _settle(record2, tmp_path)
