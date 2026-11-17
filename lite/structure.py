@@ -25,6 +25,7 @@ from typing import Any
 
 import yaml
 
+from governance import run_progress
 from lite.interview_state import SessionView
 
 Agent = Callable[[str], str]
@@ -655,6 +656,7 @@ def _prefix_of(eid: str) -> str:
 
 def claude_agent(model: str) -> Agent:
     """Агент на `claude -p`: без инструментов, `--safe-mode`, промпт в stdin.
+    Пока агент думает — живая строка `… думаю · ММ:СС` (терминал).
 
     Сбой запуска, таймаут или ненулевой код — `AgentUnavailable` с причиной
     (первая строка stderr или ошибки), не повтор.
@@ -664,13 +666,15 @@ def claude_agent(model: str) -> Agent:
 
     def agent(prompt: str) -> str:
         try:
-            done = subprocess.run(
-                argv,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=AGENT_TIMEOUT,
-                check=False,
+            done = run_progress.thinking(
+                lambda: subprocess.run(
+                    argv,
+                    input=prompt,
+                    capture_output=True,
+                    text=True,
+                    timeout=AGENT_TIMEOUT,
+                    check=False,
+                )
             )
         except subprocess.TimeoutExpired as exc:
             raise AgentUnavailable(f"нет ответа за {AGENT_TIMEOUT} с") from exc

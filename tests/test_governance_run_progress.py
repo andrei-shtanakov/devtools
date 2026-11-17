@@ -434,3 +434,47 @@ def test_watched_survives_unreadable_tasks(tmp_path: Path) -> None:
                       prefix="WS-1-", tasks_rel="spec/x.md",
                       emit=lambda _l: None, period=0.05)  # fmt: skip
     assert code == 0 and called == [1]
+
+
+# --- devtools#799: «думаю · ММ:СС» на время вызова агента ---------------------
+
+
+def test_thinking_draws_and_clears_on_tty(monkeypatch) -> None:
+    master, slave = os.openpty()
+    monkeypatch.setenv(rp.SCREEN_FD_ENV, str(slave))
+    assert rp.thinking(lambda: (time.sleep(0.15), "ответ")[1], period=0.05) == "ответ"
+    got = _drain(master)
+    os.close(slave)
+    os.close(master)
+    assert "\r… думаю · 00:00\x1b[K".encode() in got
+    assert got.endswith(b"\r\x1b[K")
+
+
+def test_thinking_uses_stdout_without_capture(monkeypatch) -> None:
+    """Интервью идёт без перехвата — строка в stdout, если это терминал."""
+    master, slave = os.openpty()
+    monkeypatch.delenv(rp.SCREEN_FD_ENV, raising=False)
+    live = rp._LiveScreen(fallback_fd=slave, uncaptured=True)
+    live("… думаю · 00:01")
+    live.clear()
+    got = _drain(master)
+    os.close(slave)
+    os.close(master)
+    assert got == "\r… думаю · 00:01\x1b[K\r\x1b[K".encode()
+
+
+def test_thinking_no_tty_is_silent(monkeypatch, capfd) -> None:
+    monkeypatch.delenv(rp.SCREEN_FD_ENV, raising=False)
+    assert rp.thinking(lambda: 7, period=0.01) == 7
+    assert "думаю" not in capfd.readouterr().out
+
+
+def test_thinking_propagates_exception_and_stops(monkeypatch) -> None:
+    monkeypatch.delenv(rp.SCREEN_FD_ENV, raising=False)
+
+    def boom() -> int:
+        raise RuntimeError("x")
+
+    with pytest.raises(RuntimeError):
+        rp.thinking(boom, period=0.01)
+    assert not any(t.name == rp.THINKING_THREAD for t in threading.enumerate())

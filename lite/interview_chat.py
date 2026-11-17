@@ -43,6 +43,9 @@ Load = Callable[[str], SessionView]
 
 MAX_FOLLOW_UPS = 2
 PROMPT = "> "
+#: приглашение строк продолжения: ответ ещё не отправлен (devtools#799)
+MORE_PROMPT = "· "
+SEND_HINT = "(пустая строка — отправить)"
 STOP_WORD = "/стоп"
 SKIP_WORDS = frozenset({"пропустить", "не знаю"})
 REFUSED_TEXT = "ответ не принят — ответьте на вопрос ещё раз"
@@ -273,12 +276,17 @@ def read_answer(
 ) -> str | None:
     """Ответ — строки до пустой; `None` — EOF или `/стоп`.
 
+    Первая строка — под `> `, продолжение — под `· `: видно, что ответ ещё
+    не ушёл и ввод ждёт строку (devtools#799).
+
     `quick` — короткий ответ (номер варианта, «пропустить»): если ПЕРВАЯ
     строка ему отвечает, она уходит сразу, без пустой строки; пустые строки
     до первой непустой при этом пропускаются (лишний Enter — не ответ)."""
+    if quick is None:  # с `quick` пустая строка не отправляет — подсказка неверна
+        _hint_once()
     lines: list[str] = []
     while True:
-        line = read(PROMPT)
+        line = read(MORE_PROMPT if lines else PROMPT)
         if line is None or line.strip() == STOP_WORD:
             return None
         if not line.strip():
@@ -288,6 +296,16 @@ def read_answer(
         if quick is not None and not lines and quick(line.strip()):
             return line.strip()
         lines.append(line)
+
+
+_hinted: list[bool] = []
+
+
+def _hint_once() -> None:
+    """Подсказка об отправке — под первым вопросом процесса, дальше не мешает."""
+    if not _hinted:
+        _hinted.append(True)
+        say(SEND_HINT)
 
 
 def is_skip(text: str) -> bool:
