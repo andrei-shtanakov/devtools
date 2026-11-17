@@ -12,6 +12,7 @@ from governance import run_resume
 from governance.author_launch import LaunchOutcome
 from governance.brief_facts import DefaultBranch
 from governance.facts import Fact, Outcome
+from lite import edge_journal as ej
 from lite import edge_resolve as er
 from lite import manual_ask as ma
 from lite.personal import flow, state
@@ -1156,3 +1157,17 @@ def test_code_run_prints_progress_summary(run, capsys) -> None:
     assert _advance(run, ops) == 0
     out = capsys.readouterr().out
     assert "✓ TASK-001 готова" in out and "реализация: сделано 1 из 1 · " in out
+
+
+def test_foreign_findings_advice_names_the_basis_file() -> None:
+    """Ревью #774: находка ребра декомпозиции на `20-design.md` — совет
+    про дизайн, а не про бриф; бриф упоминается, только если он назван."""
+    f = ej.Finding("30-decomposition.md", "e", "R1", "major", "x", "20-design.md", "3")
+    text = flow._foreign_findings_reason("30-decomposition.md", [f])
+    assert "20-design.md можно поправить вручную" in text
+    assert "00-brief.md" not in text
+    brief = ej.Finding(
+        "30-decomposition.md", "e", "R2", "major", "y", "00-brief.md", "1"
+    )
+    text = flow._foreign_findings_reason("30-decomposition.md", [f, brief])
+    assert "00-brief.md подтверждён в разговоре" in text

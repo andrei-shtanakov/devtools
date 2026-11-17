@@ -399,13 +399,23 @@ def _foreign_findings_reason(name: str, foreign: list[ej.Finding]) -> str:
         f"{f.rule_id} {f.cls} ({f.path or 'без файла'}:{f.lines}): {f.statement}"
         for f in foreign
     )
-    files = ", ".join(sorted({f.path or "без файла" for f in foreign}))
+    paths = sorted({f.path or "без файла" for f in foreign})
+    brief = FILENAMES["brief"]
+    nodes = [p for p in paths if p != brief and p in FILENAMES.values()]
+    advice = [f"если замечание на деле о {name} — поправьте его вручную"]
+    advice += [
+        f"{p} можно поправить вручную (его собственное ребро не перепроверяется)"
+        for p in nodes
+    ]
+    if brief in paths:
+        advice.append(
+            f"{brief} подтверждён в разговоре и меняется только новым интервью"
+        )
     return (
-        f"edge-check {name}: замечания указывают не на {name}, а на {files} — "
-        f"{shown}. Разбор правит только {name}. Если замечание на деле о "
-        f"дизайне — поправьте {name} вручную и повторите dfl run (повтор "
-        f"платный); бриф подтверждён в разговоре и меняется только новым "
-        f"интервью — {ABANDON}"
+        f"edge-check {name}: замечания указывают не на {name}, а на "
+        f"{', '.join(paths)} — {shown}. Разбор правит только {name}: "
+        f"{'; '.join(advice)}; затем повторите dfl run (повтор платный) — "
+        f"{ABANDON}"
     )
 
 
