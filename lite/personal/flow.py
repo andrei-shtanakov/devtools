@@ -399,13 +399,23 @@ def _foreign_findings_reason(name: str, foreign: list[ej.Finding]) -> str:
         f"{f.rule_id} {f.cls} ({f.path or 'без файла'}:{f.lines}): {f.statement}"
         for f in foreign
     )
-    files = ", ".join(sorted({f.path or "без файла" for f in foreign}))
+    paths = sorted({f.path or "без файла" for f in foreign})
+    brief = FILENAMES["brief"]
+    nodes = [p for p in paths if p != brief and p in FILENAMES.values()]
+    advice = [f"если замечание на деле о {name} — поправьте его вручную"]
+    advice += [
+        f"{p} можно поправить вручную (его собственное ребро не перепроверяется)"
+        for p in nodes
+    ]
+    if brief in paths:
+        advice.append(
+            f"{brief} подтверждён в разговоре и меняется только новым интервью"
+        )
     return (
-        f"edge-check {name}: замечания указывают не на {name}, а на {files} — "
-        f"{shown}. Разбор правит только {name}. Если замечание на деле о "
-        f"дизайне — поправьте {name} вручную и повторите dfl run (повтор "
-        f"платный); бриф подтверждён в разговоре и меняется только новым "
-        f"интервью — {ABANDON}"
+        f"edge-check {name}: замечания указывают не на {name}, а на "
+        f"{', '.join(paths)} — {shown}. Разбор правит только {name}: "
+        f"{'; '.join(advice)}; затем повторите dfl run (повтор платный) — "
+        f"{ABANDON}"
     )
 
 
@@ -650,17 +660,10 @@ def _guard(ctx: _Ctx) -> str | None:
     ветку; стоп — `None`.
     """
     run, ops = ctx.run, ctx.ops
-    own = run.bundle_dir.strip("/") + "/"
-    tasks = _tasks_rel(run)
-    foreign = [
-        p
-        for p in ops.dirty_paths(run.target_dir)
-        if not p.startswith(own) and p != tasks
-    ]
+    foreign = _foreign(run, ops.dirty_paths(run.target_dir))
     if foreign:
-        shown = ", ".join(foreign[:5]) + (" …" if len(foreign) > 5 else "")
         ctx.stop(
-            f"в {run.target_dir} незакоммиченные чужие изменения: {shown} — "
+            f"в {run.target_dir} незакоммиченные чужие изменения: {foreign} — "
             f"уберите их и повторите dfl run"
         )
         return None
@@ -673,6 +676,13 @@ def _guard(ctx: _Ctx) -> str | None:
         )
         return None
     return branch
+
+
+def _foreign(run: PersonalRun, paths: list[str]) -> str:
+    """Пути вне своих файлов прогона (бандл и `tasks.md`) строкой; нет — ""."""
+    own, tasks = run.bundle_dir.strip("/") + "/", _tasks_rel(run)
+    foreign = [p for p in paths if not p.startswith(own) and p != tasks]
+    return ", ".join(foreign[:5]) + (" …" if len(foreign) > 5 else "")
 
 
 def _open_spec_pr(ctx: _Ctx) -> bool:
@@ -705,6 +715,16 @@ def _open_spec_pr(ctx: _Ctx) -> bool:
         ops.commit_paths(
             target, [run.bundle_dir, tasks], f"spec({run.ws_id}): личный путь"
         )
+        # ветка прогона могла получить чужой коммит (возобновление): push
+        # и автомерж увезли бы его в базу под видом спеки (ревью #774)
+        foreign = _foreign(run, ops.changed_paths(target, base)[1])
+        if foreign:
+            return ctx.stop(
+                f"ветка прогона {branch} несёт чужие изменения относительно "
+                f"origin/{base}: {foreign} — это коммит в ветке прогона или "
+                f"незапушенный коммит локальной {base}; уберите его из ветки "
+                f"прогона (или запушьте {base}) и повторите dfl run ({ABANDON})"
+            )
         ops.push_branch(target, branch)
         run.spec_head = ops.head_sha(target, branch)
         save(run)  # write-ahead: мерж пинуется на запушенную голову
