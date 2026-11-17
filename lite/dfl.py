@@ -1802,8 +1802,8 @@ def _select_customer(
     names = ", ".join(c.run_id for c in unfinished)
     raise DflError(
         f"незаконченных прогонов несколько: {names} — выберите: "
-        "dfl run --subject '<тема одного из них>' (то же для dfl answer и "
-        "dfl abandon)"
+        "dfl run --subject '<тема одного из них>' (то же для dfl answer, "
+        "dfl abandon, dfl pending и dfl reply)"
     )
 
 
@@ -1912,14 +1912,18 @@ def status(cwd: Path) -> int:
     """Прогоны репо из журнала и следующий шаг; форджа и эффектов нет."""
     target = _registered_target(cwd)
     runs, broken = _repo_runs(target.repo)
+    unfinished = [s for s in runs if _frame(s) == "customer" and not _finished(s, runs)]
+    ambiguous = len(unfinished) > 1
     for run_id in broken:
         say(f"{run_id}  не читается: {rs.run_dir(run_id)}/run.json")
     for state in runs:
         line = f"{state.run_id}  {_frame(state) or '-'}  {state.status}"
         hint = _next_hint(state, runs)
         say(f"{line}  дальше: {hint}" if hint else line)
-        # у каждого прогона свой вопрос: при нескольких темах не теряется
-        if waiting := pending.wait_text(rs.run_dir(state.run_id)):
+        # у каждого прогона свой вопрос: при нескольких темах не теряется,
+        # и подсказка называет тему — без неё pending/reply откажут
+        pick = state.subject if ambiguous else None
+        if waiting := pending.wait_text(rs.run_dir(state.run_id), pick):
             say(f"  {waiting}")
         if verbosity() >= 1:
             _manual_status(state.ops.get(MANUAL_OP) or {}, state.repo_slug)

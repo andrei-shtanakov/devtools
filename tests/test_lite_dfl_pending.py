@@ -242,6 +242,9 @@ def test_status_shows_pending_with_two_subjects(
     assert env.run("status") == 0
     out = capsys.readouterr().out
     assert "ждёт ответа: вопрос второй темы" in out
+    # подсказка ведёт к работающей команде: с темой прогона
+    assert f"dfl reply --subject 'два' --id {q.id}" in out
+    assert env.run("reply", "--subject", "два", "--id", q.id, "--text", "1") == 0
 
 
 def test_reply_abbreviated_flag_refused(env: Env) -> None:  # noqa: F811

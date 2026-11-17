@@ -142,8 +142,11 @@ def asker(run_dir: Path) -> Ask:
         text = take(run_dir, q)
         if text is not None:
             return text
-        # новый вопрос: ответы на прежние (гонка с `dfl reply`) не переживают его
-        (run_dir / REPLIES_FILE).unlink(missing_ok=True)
+        current = load(run_dir)
+        if current is None or current.get("id") != q.id:
+            # вопрос сменился: ответы на прежний (гонка с `dfl reply`) не
+            # переживают его; тот же вопрос — ответ мог прийти только что
+            (run_dir / REPLIES_FILE).unlink(missing_ok=True)
         record_ = {
             **as_dict(q),
             "run_id": run_dir.name,
@@ -155,11 +158,12 @@ def asker(run_dir: Path) -> Ask:
     return ask
 
 
-def _line(qid: str, text: str) -> str:
+def _line(qid: str, text: str, subject: str | None = None) -> str:
     first = text.splitlines()[0] if text.strip() else ""
+    pick = f" --subject '{subject}'" if subject else ""
     return (
-        f"ждёт ответа: {first} — вопрос: dfl pending; "
-        f"ответ: dfl reply --id {qid} --text '…'"
+        f"ждёт ответа: {first} — вопрос: dfl pending{pick}; "
+        f"ответ: dfl reply{pick} --id {qid} --text '…'"
     )
 
 
@@ -168,15 +172,16 @@ def wait_line(q: Question) -> str:
     return _line(q.id, q.text)
 
 
-def wait_text(run_dir: Path) -> str:
+def wait_text(run_dir: Path, subject: str | None = None) -> str:
     """`wait_line` по записанному вопросу (ответ уже записан — `ANSWERED`);
-    пусто, если вопроса нет."""
+    пусто, если вопроса нет. `subject` — тема в подсказке, когда без неё
+    `dfl pending`/`dfl reply` не выберут прогон."""
     rec = load(run_dir)
     if rec is None:
         return ""
     if answered(run_dir):
         return ANSWERED
-    return _line(str(rec.get("id", "")), str(rec.get("text", "")))
+    return _line(str(rec.get("id", "")), str(rec.get("text", "")), subject)
 
 
 def parse_manual(text: str) -> dict:
