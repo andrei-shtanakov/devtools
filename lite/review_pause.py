@@ -27,10 +27,11 @@ from governance.review_remarks import (  # noqa: F401 — публичные и�
     pr_section,
     record,
 )
+from lite import pending as pending_mod
 from lite.interview_chat import STOP_WORD, Read, read_answer
 
 PERSONAL_STAGES = ("brief", "design", "decomposition")
-DONE_WORDS = frozenset({"дальше", "да", "ок", "1"})
+DONE_WORDS = pending_mod.REVIEW_DONE_WORDS
 _YES_WORDS = frozenset({"1", "да"})
 _NO_WORDS = frozenset({"2", "нет", "оставить", "оставить как было"})
 UNCLEAR_ANSWER = "не понял ответ — номер или слово варианта"

@@ -12,6 +12,7 @@ from datetime import date
 
 from governance import manual_checks as mc
 from governance.auto_tasks import notice
+from lite import pending
 from lite.interview_chat import Read, read_answer
 
 NO_TTY = "ждут ответа {n} ручных проверок — запустите dfl run в терминале"
@@ -25,17 +26,6 @@ def is_wait(reason: str) -> bool:
     return reason == PAUSED or reason.startswith(NO_TTY.split("{", 1)[0])
 
 
-_WORDS = {
-    "1": mc.DONE,
-    "выполнено": mc.DONE,
-    "2": mc.NOT_DONE,
-    "не выполнено": mc.NOT_DONE,
-    "3": mc.CAVEAT,
-    "с оговоркой": mc.CAVEAT,
-    "принять с оговоркой": mc.CAVEAT,
-}
-
-
 def ask_one(check: mc.ManualCheck, read: Read) -> dict | None:
     """Ответ на одну проверку: `{"verdict", "note"}`; `None` — стоп/EOF."""
     while True:
@@ -43,7 +33,7 @@ def ask_one(check: mc.ManualCheck, read: Read) -> dict | None:
         answer = read_answer(read, quick=lambda _s: True)
         if answer is None:
             return None
-        verdict = _WORDS.get(answer.strip().casefold())
+        verdict = pending.VERDICT_WORDS.get(answer.strip().casefold())
         if verdict is None:
             continue
         if verdict == mc.DONE:
