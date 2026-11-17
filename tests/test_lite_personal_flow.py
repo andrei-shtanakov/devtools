@@ -60,7 +60,8 @@ class FakeOps:
         self.ancestor: bool | None = False
         self.push_fail = False
         self.fetched = True
-        self.tasks_md: str | None = None
+        #: tasks.md ветки прогона; по умолчанию все задачи сделаны
+        self.tasks_md: str | None = "### TASK-001: a\nP1 | ✅ DONE\n"
         #: пути ветки прогона сверх закоммиченных прогоном (чужой коммит)
         self.extra_changed: list[str] = []
 
@@ -736,6 +737,45 @@ def test_code_pr_with_unfinished_tasks_returns_to_code_run(run, capsys) -> None:
     assert run.step == "code-run" and run.code_pr is None
     assert run.run_exit == run_resume.INCOMPLETE_EXIT
     assert state.load(run.run_id).step == "code-run"
+
+
+def test_code_pr_unread_task_counter_stops_without_accepting(run) -> None:
+    """Счётчик не прочитан — PR не принимается как готовый (fail-closed),
+    шаг не меняется: повтор сверит снова (ревью #805)."""
+    ops = FakeOps(run)
+    run.step = "code-pr"
+    run.code_pr = CODE_PR
+    ops.prs.append(
+        {"number": CODE_PR, "state": "OPEN", "head": {"ref": "spec-runner/run-1"}}
+    )
+    ops.fetched = False
+    assert _advance(run, ops) == 1
+    assert "pr_facts" not in ops.names()
+    assert run.stop_reason == run_resume.unread_stop("spec-runner/run-1", CODE_PR)
+    assert run.step == "code-pr" and run.code_pr == CODE_PR
+    ops.fetched = True
+    assert _advance(run, ops) == 0
+    assert "pr_facts" in ops.names()
+
+
+def test_unfinished_pr_reopens_completed_manual_checks(run) -> None:
+    """Ручные проверки, пройденные по брошенному частичному PR, будут
+    заданы для следующего; ответы и заведённые issue сохраняются."""
+    ops = FakeOps(run)
+    run.step = "code-pr"
+    run.code_pr = CODE_PR
+    run.manual = {
+        "status": "completed",
+        "commented": True,
+        "answers": {"BEH-1": {"verdict": "not-done", "issue": 5}},
+    }
+    ops.prs.append(
+        {"number": CODE_PR, "state": "OPEN", "head": {"ref": "spec-runner/run-1"}}
+    )
+    ops.tasks_md = INCOMPLETE_TASKS
+    assert _advance(run, ops) == 1
+    assert run.manual == {"answers": {"BEH-1": {"verdict": "not-done", "issue": 5}}}
+    assert state.load(run.run_id).manual == run.manual
 
 
 def test_code_pr_merged_marks_done(run, capsys) -> None:

@@ -311,7 +311,12 @@ def _spec_run(state: RunState, ops: Ops) -> int | None:
 
 
 def _incomplete_stop(state: RunState, ops: Ops, key: str, pr: int) -> bool:
-    """Открытый PR прогона с несделанными задачами — плашка и стоп; `True` — стоп."""
+    """Открытый PR прогона с несделанными задачами — плашка и стоп; `True` — стоп.
+
+    Сверяется только приёмка нового PR: запись `completed`, принявшая
+    частичный PR до этой сверки, сознательно не пересматривается —
+    enterprise-путь в test-режиме, таких живых записей нет (ревью #805).
+    """
     prs = _run_prs(state, ops)
     if prs is None:
         return True
@@ -320,6 +325,9 @@ def _incomplete_stop(state: RunState, ops: Ops, key: str, pr: int) -> bool:
         return False
     tasks_rel = f"spec/{state.ws_id}-tasks.md"
     progress = run_resume.read_progress(ops, state.target_dir, branch, tasks_rel)
+    if progress is None:  # `exit = 0` остаётся: повтор сверит снова
+        _screen_stop(run_resume.unread_stop(branch, pr))
+        return True
     if not run_resume.incomplete(progress):
         return False
     state.ops[key]["exit"] = run_resume.INCOMPLETE_EXIT

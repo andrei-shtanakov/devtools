@@ -1029,7 +1029,10 @@ def _incomplete_stop(ctx: _Ctx, pr: int) -> bool:
     spec-runner, остановленный штатно (SIGINT/SIGTERM), выходит кодом 0 и
     открывает частичный PR; без сверки dfl принял бы его за готовый.
     Запись переводится в «упавшую попытку» (`code-run`, `INCOMPLETE_EXIT`),
-    дальше — та же развилка, что после ненулевого кода (#767). `True` — стоп.
+    дальше — та же развилка, что после ненулевого кода (#767); ручные
+    проверки, уже пройденные по этому PR, переспрашиваются для следующего
+    (ответы и заведённые issue сохраняются). Счётчик не прочитан — стоп без
+    смены шага: неизвестность не значит «готов». `True` — стоп.
     """
     run = ctx.run
     prs = _run_prs(ctx)
@@ -1041,10 +1044,16 @@ def _incomplete_stop(ctx: _Ctx, pr: int) -> bool:
     progress = run_resume.read_progress(
         ctx.ops, run.target_dir, branch, TASKS_PATH.format(ws_id=run.ws_id)
     )
+    if progress is None:  # готовность не установлена — запись не трогаем
+        ctx.stop(run_resume.unread_stop(branch, pr))
+        return True
     if not run_resume.incomplete(progress):
         return False
     run.step, run.code_pr = "code-run", None
     run.run_exit = run_resume.INCOMPLETE_EXIT
+    if run.manual:  # снимок ручных проверок ушёл в брошенный PR — переспросить
+        run.manual.pop("status", None)
+        run.manual.pop("commented", None)
     save(run)
     say(run_resume.banner(run.subject, run.repo_slug, branch, progress))
     ctx.stop(run_resume.resume_stop(branch, pr))

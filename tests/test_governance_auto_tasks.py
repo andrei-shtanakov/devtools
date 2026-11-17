@@ -48,7 +48,8 @@ class _ChainOps:
         self.prs_exc: Exception | None = None
         self.workflows: list[str] | None = ["ci.yml"]
         self.fetched = True
-        self.tasks_md: str | None = None
+        #: tasks.md ветки прогона; по умолчанию все задачи сделаны
+        self.tasks_md: str | None = "### TASK-001: t\nP1 | ✅ DONE\n"
 
     def fetch_branch(self, target_dir: str, branch: str) -> bool:
         self.calls.append(("fetch", branch))
@@ -521,6 +522,22 @@ def test_spec_run_exit_zero_all_tasks_done_completes(state):
     ops.prs = [_run_pr(5)]
     ops.tasks_md = _tasks_md(3, 3)
     assert auto_tasks._spec_run(state, ops) == 9
+
+
+def test_spec_run_unread_task_counter_does_not_complete(state, capsys):
+    """Счётчик не прочитан — PR не принимается; `exit = 0` остаётся, и
+    повтор сверяет снова без второго запуска раннера (ревью #805)."""
+    ops = _ops()
+    ops.prs = [_run_pr(5)]
+    ops.fetched = False
+    assert auto_tasks._spec_run(state, ops) is None
+    assert run_resume.unread_stop("spec-runner/run-9", 9) in capsys.readouterr().out
+    record = rs.load(state.run_id).ops["spec-run"]
+    assert record["status"] == "started" and record["exit"] == 0
+    calls = len(_run_calls(ops))
+    ops.fetched = True
+    assert auto_tasks._spec_run(state, ops) == 9
+    assert len(_run_calls(ops)) == calls
 
 
 def test_spec_run_resume_after_crash_does_not_take_pr(state, capsys):

@@ -70,8 +70,21 @@ def task_progress(text: str) -> tuple[int, int] | None:
 
 
 def incomplete(progress: tuple[int, int] | None) -> bool:
-    """Счётчик прочитан и задачи сделаны не все; не прочитан — не стоп."""
+    """Счётчик прочитан и задачи сделаны не все (`None` решает вызывающий)."""
     return progress is not None and progress[0] < progress[1]
+
+
+def unread_stop(branch: str, pr: int) -> str:
+    """Причина остановки: готовность PR прогона не установлена.
+
+    Счётчик здесь — вход решения «PR готов», не украшение плашки:
+    неизвестность — стоп, а не «всё сделано» (fail-closed, ревью #805).
+    """
+    return (
+        f"счётчик задач ветки {branch} не прочитан — integration-PR #{pr} "
+        "не принят как готовый; повторите dfl run (сбой сети пройдёт), "
+        "а если tasks.md на ветке нет — разберите PR вручную"
+    )
 
 
 def pr_branch(prs: list[dict], pr: int) -> str | None:
