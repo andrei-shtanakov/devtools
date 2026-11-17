@@ -115,6 +115,14 @@ def take(run_dir: Path, q: Question) -> str | None:
     return text
 
 
+def discard(run_dir: Path, q: Question) -> None:
+    """Живой ответ победил: убрать записанный ответ на `q` и снять вопрос."""
+    replies = _read_json(run_dir / REPLIES_FILE) or {}
+    if replies.pop(q.id, None) is not None:
+        _write_json(run_dir / REPLIES_FILE, replies)
+    clear(run_dir)
+
+
 def asker(run_dir: Path) -> Ask:
     """Спрашивалка без терминала: ответ из `replies.json` или запись вопроса."""
 
@@ -122,7 +130,11 @@ def asker(run_dir: Path) -> Ask:
         text = take(run_dir, q)
         if text is not None:
             return text
-        record_ = {**as_dict(q), "at": datetime.now().astimezone().isoformat()}
+        record_ = {
+            **as_dict(q),
+            "run_id": run_dir.name,
+            "at": datetime.now().astimezone().isoformat(),
+        }
         _write_json(run_dir / PENDING_FILE, record_)
         return None
 

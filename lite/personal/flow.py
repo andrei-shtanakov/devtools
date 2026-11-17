@@ -551,7 +551,7 @@ def _ask_pause(ctx: _Ctx, stage: str, label: str, paths: list[Path]) -> str | No
         return ""
     answer = rp.ask(label, paths, read=ctx.read)
     if answer is not None:
-        pending.clear(rd)
+        pending.discard(rd, q)
     return answer
 
 

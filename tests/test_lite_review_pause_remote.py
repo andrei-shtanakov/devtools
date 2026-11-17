@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from governance import run_state as rs
@@ -214,3 +216,50 @@ def test_w4_manual_edit_keeps_acked_nodes(
     assert asked == ["design", "acceptance"]
     assert seen == [{"status": "completed", "revised": True}]
     assert not (rd / dfl.REVIEW_ACKED).exists()
+
+
+def test_personal_live_answer_drops_recorded_reply(tmp_path) -> None:
+    """Reply, записанный во время живого ввода, не проходит следующую паузу."""
+    run = _run(tmp_path, ("design",))
+    assert _advance(run, FakeOps(run), read=_no_read, tty=False) == 0
+    rd = state.run_dir(run.run_id)
+    qid = str(pending.load(rd)["id"])
+
+    def read(prompt: str) -> str:
+        pending.record(rd, qid, "дальше")  # приходит после take, до ответа
+        return "дальше"
+
+    assert _advance(run, FakeOps(run), read=read, tty=True) == 0
+    assert run.step == "code-pr"
+    replies = rd / pending.REPLIES_FILE
+    assert not replies.exists() or qid not in json.loads(replies.read_text("utf-8"))
+    run.step = "design"  # та же пауза снова: человека спрашивают заново
+    run.stop_reason = ""
+    assert _advance(run, FakeOps(run), read=_no_read, tty=False) == 0
+    assert run.step == "design"
+    _waiting_line(run)
+
+
+def test_enterprise_live_answer_drops_recorded_reply(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch, False)
+    _steps(env, monkeypatch)
+    assert env.run("run", "--subject", "t") == 0
+    rd = rs.run_dir(RUN_ID)
+    rec = pending.load(rd)
+    assert rec is not None
+    qid = str(rec["id"])
+    _tty(monkeypatch)
+
+    def read(prompt: str) -> str:
+        if pending.load(rd) is not None and not (rd / pending.REPLIES_FILE).exists():
+            pending.record(rd, qid, "дальше")  # во время живого ввода
+        return "дальше"
+
+    monkeypatch.setattr(ic, "stdin_read", read)
+    assert env.run("run", "--subject", "t") == 0
+    replies = rd / pending.REPLIES_FILE
+    assert not replies.exists() or qid not in json.loads(replies.read_text("utf-8"))

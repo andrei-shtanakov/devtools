@@ -636,10 +636,29 @@ def run(
     return code
 
 
-def _pending_dir(cwd: Path, subject: str | None) -> Path | None:
+NO_UNFINISHED = "незаконченного прогона нет"
+
+
+def _pending_dir(cwd: Path, subject: str | None, *, register: bool) -> Path | None:
     """Каталог прогона, который продолжит `dfl run`: активный личный, иначе
-    enterprise (engineer-прогон, если он есть); прогона нет — `None`."""
-    return _target_run_dir(user_targets.register(cwd), subject)
+    enterprise (engineer-прогон, если он есть); прогона нет — `None`.
+    Неоднозначность тем (`--subject`) — `DflError`, как у `dfl run`;
+    `register=False` (`pending`) репо не регистрирует."""
+    target = user_targets.register(cwd) if register else _registered_target(cwd)
+    slug = user_targets.slug_from_url(target.repo_url)
+    active = personal_state.active_for(slug, subject=subject)
+    if active is not None:
+        return personal_state.run_dir(active.run_id)
+    runs, _ = _repo_runs(target.repo)
+    try:
+        cust = _select_customer(runs, subject)
+    except DflError as exc:
+        if str(exc).startswith(NO_UNFINISHED):
+            return None
+        raise
+    if cust is None:
+        return None
+    return rs.run_dir((_engineer_of(cust, runs) or cust).run_id)
 
 
 def _target_run_dir(
@@ -668,7 +687,7 @@ def _pending_lines(rec: dict) -> list[str]:
 
 def pending_cmd(cwd: Path, subject: str | None, *, as_json: bool) -> int:
     """`dfl pending`: вопрос, на котором прогон ждёт человека (код 0)."""
-    run_dir = _pending_dir(cwd, subject)
+    run_dir = _pending_dir(cwd, subject, register=False)
     rec = pending.load(run_dir) if run_dir is not None else None
     if as_json:
         say(json.dumps(rec, ensure_ascii=False, indent=2))
@@ -683,7 +702,7 @@ def pending_cmd(cwd: Path, subject: str | None, *, as_json: bool) -> int:
 
 def reply_cmd(cwd: Path, subject: str | None, qid: str, text: str) -> int:
     """`dfl reply`: записать ответ на ждущий вопрос `qid`; дальше — `dfl run`."""
-    run_dir = _pending_dir(cwd, subject)
+    run_dir = _pending_dir(cwd, subject, register=True)
     if run_dir is None:
         raise DflError(pending.NO_PENDING)
     try:
@@ -1133,7 +1152,7 @@ def _owner_answer(
     if answer is None:
         say(OWNER_REVIEW_PAUSED.format(label=label))
         return None
-    pending.clear(rd)
+    pending.discard(rd, q)
     return answer
 
 
@@ -1773,7 +1792,7 @@ def _select_customer(
     if len(unfinished) == 1:
         return unfinished[0]
     if not unfinished:
-        raise DflError(f"незаконченного прогона нет — {NEW_RUN_HINT}")
+        raise DflError(f"{NO_UNFINISHED} — {NEW_RUN_HINT}")
     names = ", ".join(c.run_id for c in unfinished)
     raise DflError(
         f"незаконченных прогонов несколько: {names} — выберите: "

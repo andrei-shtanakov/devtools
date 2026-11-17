@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -125,3 +126,26 @@ def test_terminal_answer_clears_pending(tmp_path: Path) -> None:
     )
     assert reason is None and published == ["x"]
     assert pending.load(tmp_path) is None
+
+
+def test_live_answer_drops_recorded_reply(tmp_path: Path) -> None:
+    """Ответ, записанный пока человек отвечал в терминале, не переживает его."""
+    record: dict = {}
+    _settle(record, tmp_path)
+    q = _q(record, 0)
+    lines = iter(["2", "", "1"])
+    sent: list[int] = []
+
+    def read(_prompt: str):
+        if not sent:
+            sent.append(1)
+            pending.record(tmp_path, q.id, "1")  # reply приходит во время ввода
+        return next(lines, None)
+
+    _settle(record, tmp_path, tty=True, read=read)
+    replies = tmp_path / pending.REPLIES_FILE
+    assert q.id not in json.loads(replies.read_text("utf-8"))
+    # следующий вызов без терминала спрашивает заново, а не проходит молча
+    record2: dict = {}
+    reason, _ = _settle(record2, tmp_path)
+    assert reason is not None and ma.is_wait(reason)

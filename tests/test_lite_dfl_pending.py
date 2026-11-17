@@ -21,6 +21,17 @@ from tests.test_lite_dfl import REPO, SLUG, URL, Env, _run, env  # noqa: F401
 QUESTION = pending.Question(pending.MANUAL, "BEH-01", "Проверьте кнопку входа")
 
 
+@pytest.fixture(autouse=True)
+def _known_target(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
+    """Репо уже зарегистрировано: `pending` его не регистрирует сам."""
+    target = env.tmp / "target"
+    monkeypatch.setattr(
+        dfl.user_targets,
+        "load",
+        lambda: {REPO: dfl.user_targets.UserTarget(REPO, target.resolve(), URL)},
+    )
+
+
 def _enterprise(text: str = "") -> Path:
     state = _run("20260101-000000-aaaa", "WS-1", "customer", "RUNNING")
     run_dir = rs.run_dir(state.run_id)
@@ -113,17 +124,77 @@ def test_reply_text_from_file(env: Env, tmp_path: Path) -> None:  # noqa: F811
 
 def test_status_shows_pending(
     env: Env,  # noqa: F811
-    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    target = env.tmp / "target"
-    monkeypatch.setattr(
-        dfl.user_targets,
-        "load",
-        lambda: {REPO: dfl.user_targets.UserTarget(REPO, target.resolve(), URL)},
-    )
     _enterprise(QUESTION.text)
     assert env.run("status") == 0
     out = capsys.readouterr().out
     assert "ждёт ответа:" in out and "dfl pending" in out
     assert env.registered == 0
+
+
+def test_pending_record_has_run_id(env: Env) -> None:  # noqa: F811
+    run_dir = _enterprise(QUESTION.text)
+    assert pending.load(run_dir)["run_id"] == run_dir.name == "20260101-000000-aaaa"
+    personal = _personal()
+    assert pending.load(personal)["run_id"] == personal.name
+
+
+def test_pending_does_not_register(env: Env) -> None:  # noqa: F811
+    _enterprise(QUESTION.text)
+    assert env.run("pending") == 0
+    assert env.registered == 0
+
+
+def _two_subjects() -> None:
+    _run("20260101-000000-aaaa", "WS-1", "customer", "RUNNING", subject="раз")
+    _run("20260102-000000-bbbb", "WS-2", "customer", "RUNNING", subject="два")
+
+
+def test_pending_ambiguous_subjects_surface(
+    env: Env,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _two_subjects()
+    assert env.run("pending") == 2
+    assert "выберите" in capsys.readouterr().err
+    assert env.run("reply", "--id", QUESTION.id, "--text", "1") == 2
+    assert "выберите" in capsys.readouterr().err
+
+
+def test_reply_to_personal_run(env: Env) -> None:  # noqa: F811
+    run_dir = _personal()
+    qid = str(pending.load(run_dir)["id"])
+    assert env.run("reply", "--id", qid, "--text", "1") == 0
+    replies = json.loads((run_dir / pending.REPLIES_FILE).read_text("utf-8"))
+    assert replies == {qid: "1"}
+
+
+def test_reply_unreadable_file(
+    env: Env,  # noqa: F811
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_dir = _enterprise(QUESTION.text)
+    missing = tmp_path / "нет.txt"
+    assert env.run("reply", "--id", QUESTION.id, "--file", str(missing)) == 2
+    assert "Traceback" not in capsys.readouterr().err
+    assert not (run_dir / pending.REPLIES_FILE).exists()
+
+
+def test_reply_no_run_at_all(
+    env: Env,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert env.run("reply", "--id", QUESTION.id, "--text", "1") == 2
+    assert "нет вопроса, ждущего ответа" in capsys.readouterr().err
+
+
+def test_status_shows_personal_pending(
+    env: Env,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _personal()
+    assert env.run("status") == 0
+    out = capsys.readouterr().out
+    assert "ждёт ответа:" in out and "личный вопрос" in out
