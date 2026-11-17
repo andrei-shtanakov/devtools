@@ -345,7 +345,10 @@ def test_spec_run_prints_tui_hint(state, capsys):
     ops = _ops()
     ops.prs = [_run_pr(5)]
     auto_tasks._spec_run(state, ops)
-    assert f"spec-runner tui --spec-prefix={state.ws_id}-" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert f"spec-runner tui --spec-prefix={state.ws_id}-" in out
+    assert "в другом терминале" not in out  # прогресс уже в окне dfl (#765)
+    assert "необязательно" in out
 
 
 def test_spec_run_two_new_prs_stop(state, capsys):
