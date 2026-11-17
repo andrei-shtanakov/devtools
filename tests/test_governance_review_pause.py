@@ -182,6 +182,54 @@ def test_w4_no_pause_for_other_wave_stage(
     assert state.status == "running"
 
 
+@pytest.mark.parametrize("revised", [False, True])
+def test_dfl_pause_op_drives_real_runner(
+    tmp_path: Path, runs_root, monkeypatch, revised: bool
+) -> None:
+    """#778, стык раннер+dfl: op паузы пишет настоящий `dfl._write_pause_op`
+    (не заглушка `_pass_review`), продолжает настоящий раннер — без правки
+    candidate без перепроверки, с правкой — перепроверка и пауза снова."""
+    from lite import dfl
+
+    run_id = f"r-rp-dfl-{revised}"
+    state, ops = _paused(tmp_path, monkeypatch, run_id)
+    if revised:
+        dfl._write_pause_op(state, complete=False)  # правка принята
+    dfl._write_pause_op(state, complete=True)
+    assert runner.review_pause_passed(rs.load(run_id))
+    before = _names(ops)
+    state = locked_runner.resume(run_id, ops)
+    after = _names(ops)[len(before) :]
+    if revised:
+        assert "edge_check_level" in after and "propose_from_source" not in after
+        assert state.status == runner.WAITING_OWNER_REVIEW
+    else:
+        assert "edge_check_level" not in after and "propose_from_source" in after
+        assert state.status == "waiting_human_merge"
+
+
+@pytest.mark.parametrize("stage", ["design", "acceptance"])
+def test_w4_pause_reached_through_real_waves(
+    tmp_path: Path, runs_root, monkeypatch, stage: str
+) -> None:
+    """#778: W4 доходит до паузы настоящим проходом W1–W3 (мержи заявок,
+    resume), а не ранним выходом `_step_edge`; после «дальше» — candidate."""
+    from tests.test_governance_runner import _drive_waves_to
+
+    run_id = f"r-rp-w4-real-{stage}"
+    ops = _ops()
+    state = _drive_waves_to(
+        tmp_path, run_id, ops, monkeypatch, 5, review_pause=(stage,)
+    )
+    assert state.wave == 4 and state.status == runner.WAITING_OWNER_REVIEW
+    assert state.ops["edge-4"]["status"] == "completed"
+    assert "candidate-4" not in state.ops
+    assert all(f"candidate-{w}" in state.ops for w in (1, 2, 3))
+    _pass_review(run_id, revised=False)
+    state = locked_runner.resume(run_id, ops)
+    assert state.status == "waiting_human_merge" and "candidate-4" in state.ops
+
+
 def test_spec_loop_does_not_autoresume_waiting_owner_review(
     tmp_path: Path, runs_root, monkeypatch, capsys
 ) -> None:
