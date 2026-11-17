@@ -166,6 +166,8 @@ TRACK_NO_TTY_HINT = (
 #: хэши файлов волны на момент показа паузы (экран или ссылки без терминала):
 #: «дальше» после ручной правки сверяется с ними (final review #768, I1)
 REVIEW_SHOWN = "review-shown.json"
+#: узлы паузы волны, на которые «дальше» уже получено без терминала (#766)
+REVIEW_ACKED = "review-acked.json"
 OWNER_REVIEW_PAUSED = "просмотр этапа «{label}» прерван — продолжить: dfl run"
 OWNER_NEEDS_CLAUDE = (
     "замечания на паузе поддерживаются только с автором claude "
@@ -626,6 +628,8 @@ def run(
     if chatting and _author_is_claude():
         return _run_chatting(target, subject, role, review)
     code = _step(target, subject, role, chatting=False, review=review)
+    if not _is_tty() and _owner_review_run(target.repo, subject) is not None:
+        return _owner_review_rounds(target, subject, role, code, remote=True)
     if chatting and _waiting_run(target.repo, subject) is not None:
         raise DflError(CHAT_HARNESS_REFUSAL)
     _say_owner_review_wait(target.repo, subject, tty=chatting)
@@ -965,7 +969,12 @@ def _current_run(repo: str, subject: str | None) -> rs.RunState | None:
 
 
 def _owner_review_rounds(
-    target: user_targets.UserTarget, subject: str | None, role: str, code: int
+    target: user_targets.UserTarget,
+    subject: str | None,
+    role: str,
+    code: int,
+    *,
+    remote: bool = False,
 ) -> int:
     """Пауза просмотра волны (`WAITING_OWNER_REVIEW`): замечания владельца
     к выбранным узлам, затем op паузы и шаг (resume) — пока прогон снова
@@ -973,21 +982,26 @@ def _owner_review_rounds(
 
     Правка сбрасывает проверку волны: повторный шаг проверяет её заново
     (стоп проверки — разбор `_resolve_rounds`), и пауза показывается снова.
-    `/стоп` — код 0, стоп правки — 1; число платных вызовов печатается."""
+    `/стоп` — код 0, стоп правки — 1; число платных вызовов печатается.
+
+    `remote` — без терминала (#766): «дальше» приходит через `dfl reply`
+    (`pending.asker` каталога прогона), вопрос ждёт — код 0."""
     calls = er.PaidCalls()
     while (state := _owner_review_run(target.repo, subject)) is not None:
-        stopped = _owner_pause(state, calls)
+        ask = pending.asker(rs.run_dir(state.run_id)) if remote else None
+        stopped = _owner_pause(state, calls, ask)
         if stopped is not None:
             if calls.spent():
                 say(calls.line())
             return stopped
         revised = _pause_revised(state.run_id)
-        code = _step(target, subject, role, chatting=True)
+        code = _step(target, subject, role, chatting=not remote)
         if revised and _edge_ran(state):
             calls.check += 1
         if calls.spent():
             say(calls.line())
-        code = _resolve_rounds(target, subject, role, code)
+        if not remote:
+            code = _resolve_rounds(target, subject, role, code)
     return code
 
 
@@ -1025,13 +1039,15 @@ def _say_owner_review_wait(repo: str, subject: str | None, *, tty: bool) -> None
     say(orv.NO_TTY.format(label=label, links=links))
 
 
-def _owner_pause(state: rs.RunState, calls: er.PaidCalls) -> int | None:
+def _owner_pause(
+    state: rs.RunState, calls: er.PaidCalls, ask: pending.Ask | None = None
+) -> int | None:
     """Один показ паузы: узлы волны по очереди (W4 — оба подряд). `None` —
     пауза пройдена и op записан; иначе код выхода."""
     files = _pause_files(state)
     _remember_shown(state, files)
     for stage, path in files:
-        stopped = _owner_node(state, stage, path, calls)
+        stopped = _owner_node(state, stage, path, calls, ask)
         if stopped is not None:
             return stopped
     _write_pause_op(state, complete=True)
@@ -1039,20 +1055,27 @@ def _owner_pause(state: rs.RunState, calls: er.PaidCalls) -> int | None:
 
 
 def _owner_node(
-    state: rs.RunState, stage: str, path: Path, calls: er.PaidCalls
+    state: rs.RunState,
+    stage: str,
+    path: Path,
+    calls: er.PaidCalls,
+    ask: pending.Ask | None = None,
 ) -> int | None:
     """Узел на паузе: недоигранные замечания (RF-1: без вопроса) или ответ
     на экране паузы; правка принята — op помечен «правлено», затем
     замечания «применены». «Дальше» после ручной правки файла (хэш ≠
     снятому при показе) — тоже «правлено»: перепроверка и пауза снова.
-    `None` — дальше; иначе код (0 — пауза)."""
+    `ask` — без терминала (#766): «дальше» через `dfl reply`, замечания
+    пока только в терминале. `None` — дальше; иначе код (0 — пауза)."""
     rd = rs.run_dir(state.run_id)
     label = rp.STAGE_LABELS[stage]
     batch = rp.pending(rd, stage)
+    if batch and ask is not None:
+        say(orv.NO_TTY.format(label=label, links=orv.links([path])))
+        return 0
     if not batch:
-        answer = rp.ask(label, [path], read=ic.stdin_read)
+        answer = _owner_answer(state, stage, label, path, ask)
         if answer is None:
-            say(OWNER_REVIEW_PAUSED.format(label=label))
             return 0
         if not answer:
             if _edited_on_pause(state, stage, path):
@@ -1080,6 +1103,69 @@ def _owner_node(
         return 1
     say(f"{detail} — продолжить: dfl run")
     return 1
+
+
+def _owner_answer(
+    state: rs.RunState,
+    stage: str,
+    label: str,
+    path: Path,
+    ask: pending.Ask | None,
+) -> str | None:
+    """Ответ на экране паузы узла: `""` — «дальше»; `None` — пауза (строка
+    о ней уже напечатана). Терминал: записанный `dfl reply` берётся вместо
+    ввода, живой ответ снимает вопрос (терминал побеждает, спека §5.1)."""
+    rd = rs.run_dir(state.run_id)
+    if ask is not None:
+        return _owner_answer_remote(state, stage, label, path, ask)
+    q = rp.question(stage, label, [path])
+    if pending.take(rd, q) is not None:
+        return ""
+    answer = rp.ask(label, [path], read=ic.stdin_read)
+    if answer is None:
+        say(OWNER_REVIEW_PAUSED.format(label=label))
+        return None
+    pending.clear(rd)
+    return answer
+
+
+def _acked_path(state: rs.RunState) -> Path:
+    return rs.run_dir(state.run_id) / REVIEW_ACKED
+
+
+def _acked(state: rs.RunState) -> list[str]:
+    """Узлы волны, на которые «дальше» уже получено (W4: по одному на вызов)."""
+    try:
+        data = json.loads(_acked_path(state).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict) or data.get("wave") != state.wave:
+        return []
+    stages = data.get("stages")
+    return [str(x) for x in stages] if isinstance(stages, list) else []
+
+
+def _owner_answer_remote(
+    state: rs.RunState,
+    stage: str,
+    label: str,
+    path: Path,
+    ask: pending.Ask,
+) -> str | None:
+    """«Дальше» узла без терминала: уже полученное запоминается в
+    `review-acked.json` — иначе второй узел W4 вернул бы первый на вопрос."""
+    acked = _acked(state)
+    if stage in acked:
+        return ""
+    answer = rp.ask_remote(stage, label, [path], ask=ask)
+    if answer is None:
+        say(pending.wait_text(rs.run_dir(state.run_id)))
+        return None
+    _acked_path(state).write_text(
+        json.dumps({"wave": state.wave, "stages": [*acked, stage]}) + "\n",
+        encoding="utf-8",
+    )
+    return answer
 
 
 def _owner_revise(
@@ -1182,6 +1268,7 @@ def _write_pause_op(state: rs.RunState, *, complete: bool) -> None:
                 (rs.run_dir(now.run_id) / REVIEW_SHOWN).unlink(missing_ok=True)
             else:
                 rs.op_start(now, key, revised=True)
+            _acked_path(now).unlink(missing_ok=True)
     except run_lock.LockBusy as exc:
         raise DflError(f"{exc} — дождитесь конца dfl run и повторите") from exc
 

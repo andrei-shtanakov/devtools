@@ -84,6 +84,26 @@ def ask(stage_label: str, paths: list[Path], *, read: Read) -> str | None:
     return "" if answer.casefold() in DONE_WORDS else answer
 
 
+def question(stage: str, stage_label: str, paths: list[Path]) -> pending_mod.Question:
+    """Вопрос паузы для `dfl pending`; один и тот же в терминале и без него."""
+    return pending_mod.Question(
+        pending_mod.REVIEW,
+        stage,
+        f"этап «{stage_label}» готов и прошёл проверку — посмотрите",
+        links=tuple(f"file://{p.resolve()}" for p in paths),
+        accepts="«дальше»",
+    )
+
+
+def ask_remote(
+    stage: str, stage_label: str, paths: list[Path], *, ask: pending_mod.Ask
+) -> str | None:
+    """Пауза без терминала: `""` — «дальше»; `None` — ответа ещё нет
+    (вопрос записан, прогон ждёт)."""
+    answer = ask(question(stage, stage_label, paths))
+    return None if answer is None else ""
+
+
 def confirm_removals(
     ids: list[str],
     *,
