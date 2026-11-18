@@ -269,7 +269,7 @@ def _converse(
             continue
         summary = render_brief(brief, lang=lang)
         log.append({"role": "agent", "kind": "summary", "text": summary})
-        if _confirmed(summary, log, read):
+        if _confirmed(summary, log, read, lang):
             return brief
 
 
@@ -447,9 +447,10 @@ def _checks_in_row(entries: list[Entry]) -> int:
     return count
 
 
-def _confirmed(summary: str, log: _Log, read: Read) -> bool:
+def _confirmed(summary: str, log: _Log, read: Read, lang: str) -> bool:
     """Сводка `summary` и «верно?»: «1»/«да»/«верно»/«ок» — да; «пропустить»,
-    `/стоп`, EOF — стоп; иное (и «не знаю») — поправка записывается, `False`."""
+    `/стоп`, EOF — стоп; иное (и «не знаю») — поправка записывается, `False`,
+    с префиксом языка прогона `lang` (текст уходит агенту)."""
     say(summary)
     while True:
         say(i18n.t(CONFIRM))
@@ -461,7 +462,7 @@ def _confirmed(summary: str, log: _Log, read: Read) -> bool:
             return True
         fix = _correction(text, read)
         if fix:
-            log.append({"role": "human", "text": FIX_PREFIXES[i18n.current()] + fix})
+            log.append({"role": "human", "text": FIX_PREFIXES[lang] + fix})
             return False
 
 

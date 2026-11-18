@@ -18,10 +18,11 @@ from governance.author_launch import LaunchOutcome
 from governance.edge_check import prompt as ec_prompt
 from governance.edge_check.inputs import prepare_input
 from governance.edge_check.rules import load_rules
-from lite import edge_triage
+from lite import edge_triage, i18n
 from lite import owner_review as orv
 from lite import review_pause as rp
 from lite.edge_journal import Decision, Finding
+from lite.personal import check as personal_check
 from lite.personal import flow, interviewer, nodes, state
 from lite.personal.brief import (
     brief_from_json,
@@ -285,3 +286,57 @@ def test_en_run_threads_language_to_agents(
     assert len(prompts) == 2 and cyrillic("\n".join(prompts)) == []
     assert [c["lang"] for c in checks] == ["en", "en"]
     assert {c["contracts_dir"] for c in checks} == {contracts_dir("en")}
+
+
+def test_fix_prefix_follows_run_language_not_global(tmp_path: Path) -> None:
+    """Поправка на подтверждении пишется агенту префиксом языка прогона, даже
+    когда глобальный язык вызова иной (ревью #769 M1)."""
+    replies = iter([EN_BRIEF_TURN, EN_BRIEF_TURN])
+    lines = iter(["2. platform Linux", "", "1"])
+    prompts: list[str] = []
+
+    def agent(prompt: str) -> str:
+        prompts.append(prompt)
+        return next(replies)
+
+    with i18n.language("ru"):
+        interviewer.interview(
+            tmp_path,
+            SUBJECT,
+            read=lambda prompt: next(lines, None),
+            agent=agent,
+            lang="en",
+        )
+    entries = [
+        json.loads(ln)
+        for ln in (tmp_path / interviewer.TRANSCRIPT).read_text().splitlines()
+    ]
+    assert {"role": "human", "text": "fix: platform Linux"} in entries
+    assert "поправить" not in prompts[-1]
+
+
+@pytest.mark.parametrize(
+    ("lang", "missing"), [("ru", "без причины"), ("en", "no reason")]
+)
+def test_unmet_without_reason_in_run_language(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lang: str, missing: str
+) -> None:
+    """Критерий без причины в стопе «criteria not met» — на языке прогона
+    (ревью #769 M2)."""
+    monkeypatch.setattr(state, "PERSONAL_ROOT", tmp_path / "personal-runs")
+    run = state.new_personal_run(
+        SUBJECT, "repo", "o/repo", str(tmp_path), date(2026, 11, 18), language=lang
+    )
+    state.save(run)
+
+    def fake(edge_id, bundle, subject, bases, **kw):  # noqa: ANN001, ANN003, ANN202
+        criteria = [{"id": "C1", "status": "fail"}]
+        return {
+            "edge": edge_id,
+            "verdict": "FAIL",
+            "findings": [],
+            "criteria": criteria,
+        }
+
+    res = personal_check.check_node(run, "personal-design", check=fake)
+    assert res.unmet == (f"C1 (fail): {missing}",)

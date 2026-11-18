@@ -39,6 +39,7 @@ _UNCOVERED = {
     "ru": "критерий {ref} не покрыт ни одной проверкой BEH",
     "en": "criterion {ref} is not covered by any BEH check",
 }
+_UNMET_NO_REASON = {"ru": "без причины", "en": "no reason"}
 
 
 def contracts_dir(lang: str) -> Path:
@@ -95,15 +96,18 @@ def check_node(
         reason = f"{result.get('error_code', '')}: {result.get('reason', '')}"
         return NodeCheck(verdict, [], reason.strip(": ") or "ERROR")
     findings = ej.blocking_findings(run_dir(run.run_id), wave)
-    return NodeCheck(verdict, findings, "", _unmet(result.get("criteria")))
+    unmet = _unmet(result.get("criteria"), run.language)
+    return NodeCheck(verdict, findings, "", unmet)
 
 
-def _unmet(criteria: object) -> tuple[str, ...]:
-    """Критерии записи со статусом не `pass` — «id (status): reason»."""
+def _unmet(criteria: object, lang: str) -> tuple[str, ...]:
+    """Критерии записи со статусом не `pass` — «id (status): reason»; нет
+    причины — пометка на языке прогона `lang`."""
     if not isinstance(criteria, list):
         return ()
+    none = _UNMET_NO_REASON[lang]
     return tuple(
-        f"{c.get('id')} ({c.get('status')}): {c.get('reason') or 'без причины'}"
+        f"{c.get('id')} ({c.get('status')}): {c.get('reason') or none}"
         for c in criteria
         if isinstance(c, dict) and c.get("status") != "pass"
     )
