@@ -639,7 +639,15 @@ def run(
     chatting = chat and _is_tty()
     if chatting and _author_is_claude():
         return _run_chatting(target, subject, role, review)
-    code = _step(target, subject, role, chatting=False, review=review)
+    remote = chat and not _is_tty() and _author_is_claude()
+    if remote and _edge_waiting(target.repo, subject):
+        code = _resolve_rounds(target, subject, role, 1, remote=True)
+    else:
+        code = _step(
+            target, subject, role, chatting=False, review=review, resolving=remote
+        )
+        if remote:
+            code = _resolve_rounds(target, subject, role, code, remote=True)
     if not _is_tty() and _owner_review_run(target.repo, subject) is not None:
         return _owner_review_rounds(target, subject, role, code, remote=True)
     if chatting and _waiting_run(target.repo, subject) is not None:
@@ -915,7 +923,14 @@ def _run_chatting(
     Прогон, остановленный неполным интервью (findings 10/11), тоже ведётся
     разговором (добор тем), но один раз за вызов: человек мог оставить темы
     пустыми. Подсказки раннера (`discovery answer …`, `make …`) не
-    печатаются: вопрос показывает сам цикл."""
+    печатаются: вопрос показывает сам цикл.
+
+    Ждёт ответа вопрос разбора edge-check (`pending.EDGE`) — начального шага
+    нет: resume из `stopped_review` заново провёл бы платную проверку
+    неизменного узла; разбор продолжает записанный круг."""
+    if _edge_waiting(target.repo, subject):
+        code = _resolve_rounds(target, subject, role, 1)
+        return _owner_review_rounds(target, subject, role, code)
     with runner.quiet_interview_hints():
         code = _step(target, subject, role, chatting=True, review=review)
         incomplete = True
@@ -930,26 +945,50 @@ def _run_chatting(
 
 
 def _resolve_rounds(
-    target: user_targets.UserTarget, subject: str | None, role: str, code: int
+    target: user_targets.UserTarget,
+    subject: str | None,
+    role: str,
+    code: int,
+    *,
+    remote: bool = False,
 ) -> int:
     """Стоп edge-check с находками — разбор разговором и снова шаг, не больше
-    `er.MAX_ROUNDS` кругов за вызов; не сошлось — сводка (спека Ц4).
+    `er.MAX_ROUNDS` кругов; не сошлось — сводка (спека Ц4).
 
     Разбор не начался или остановлен — прежняя подсказка «что править»
-    (`_report_step` её отложил) и код шага."""
+    (`_report_step` её отложил) и код шага. Вопрос ушёл в `pending.json`
+    (`WAITING`, без терминала) — строка ожидания и код 0; номер круга
+    хранится в `er.WAIT_FILE` (слот волны), следующий `dfl run` продолжает
+    этот круг, а не начинает с первого (§5.6 п.5). `remote` — повторный шаг
+    без разговора интервью."""
     seen: set[tuple[str, str, str]] = set()
     calls = er.PaidCalls()
-    rounds = 0
+    rounds: int | None = None
     while (state := _review_run(target.repo, subject)) is not None:
+        rd, slot = rs.run_dir(state.run_id), _wave_slot(state)
+        if rounds is None:
+            rounds = _saved_rounds(rd, slot)
         keys = er.stop_keys(state)
         if rounds == er.MAX_ROUNDS and keys:
+            er.wait_clear(rd, slot)
             _say_not_converged(keys, seen, calls)
+            return code
+        if remote and not _resolvable(state):
+            # разбирать нечего: «что править» уже сказал шаг (`_report_step`)
+            if calls.spent():
+                say(calls.line())
             return code
         outcome = (
             _resolve(state, rounds + 1, calls)
             if rounds < er.MAX_ROUNDS
             else er.Outcome.NOT_APPLICABLE
         )
+        if outcome is er.Outcome.WAITING:  # круг записан в слот (`_resolve`)
+            say(pending.wait_text(rd))
+            if calls.spent():
+                say(calls.line())
+            return 0
+        er.wait_clear(rd, slot)
         if outcome not in (er.Outcome.REVISED, er.Outcome.OVERRIDDEN):
             _say_next(state)
             if calls.spent():
@@ -957,11 +996,41 @@ def _resolve_rounds(
             return code
         rounds += 1
         seen |= keys
-        code = _step(target, subject, role, chatting=True)
+        code = _step(target, subject, role, chatting=not remote, resolving=remote)
         if _edge_ran(state):
             calls.check += 1
         say(calls.line(), 1)
     return code
+
+
+def _wave_slot(state: rs.RunState) -> str:
+    """Слот ожидающего круга волны в `er.WAIT_FILE`."""
+    return f"wave-{state.wave}"
+
+
+def _saved_rounds(rd: Path, slot: str) -> int:
+    """Кругов, пройденных до ожидающего: записанный круг ждёт ответа и ещё
+    не пройден; записи нет — 0."""
+    saved = er.wait_load(rd, slot) or {}
+    try:
+        return max(0, min(er.MAX_ROUNDS, int(saved.get("round", 1)) - 1))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _edge_waiting(repo: str, subject: str | None) -> bool:
+    """Прогон стоит на разбираемом стопе проверки и ждёт ответа на вопрос
+    разбора edge-check (`pending.EDGE`)."""
+    state = _review_run(repo, subject)
+    if state is None or not _resolvable(state):
+        return False
+    rec = pending.load(rs.run_dir(state.run_id)) or {}
+    return rec.get("kind") == pending.EDGE
+
+
+def _resolvable(state: rs.RunState) -> bool:
+    """Стоп edge-check с находками, которые разбор может разобрать."""
+    return state.status == sf.EDGE and er.applicable_findings(state) is not None
 
 
 def _edge_ran(state: rs.RunState) -> bool:
@@ -1339,15 +1408,27 @@ def _say_not_converged(
 
 
 def _resolve(state: rs.RunState, round_no: int, calls: er.PaidCalls) -> er.Outcome:
-    """Круг разбора с настоящими терминалом, агентом и границей автора."""
-    return er.resolve(
+    """Круг разбора с настоящими терминалом, агентом и границей автора;
+    без терминала вопросы — через `dfl reply` (`pending.asker`). Партия
+    ожидающего круга — из слота волны; `WAITING` — круг `round_no` и его
+    партия записаны в слот (`_resolve_rounds` продолжит с него)."""
+    rd, slot = rs.run_dir(state.run_id), _wave_slot(state)
+    saved = er.wait_load(rd, slot) or {}
+    waiting = er.Waiting(batch=str(saved.get("batch") or ""))
+    outcome = er.resolve(
         state,
         read=ic.stdin_read,
         agent=st.claude_agent(df_config.load().author_model),
         revise=RealOps().revise,
         round_no=round_no,
         calls=calls,
+        ask=None if _is_tty() else pending.asker(rd),
+        waiting=waiting,
     )
+    if outcome is er.Outcome.WAITING:
+        data = {"round": round_no, "node": None, "findings": []}
+        er.wait_save(rd, slot, {**data, "batch": waiting.batch})
+    return outcome
 
 
 def _is_tty() -> bool:
@@ -1449,11 +1530,17 @@ def _step(
     *,
     chatting: bool,
     review: str | None = None,
+    resolving: bool = False,
 ) -> int:
     """Шаг enterprise-конвейера. Выбор этапов с паузой (`review`) пишется в
-    новый customer-прогон и переходит в engineer-прогон (`_brief_step`)."""
+    новый customer-прогон и переходит в engineer-прогон (`_brief_step`).
+    `resolving` — за шагом без разговора идёт разбор замечаний edge-check
+    (`_resolve_rounds`): разбираемый стоп (`_resolvable`) — без подсказки
+    «что править»."""
     repo = target.repo
-    loop = functools.partial(_loop, cwd=target.path, chatting=chatting)
+    loop = functools.partial(
+        _loop, cwd=target.path, chatting=chatting, resolving=resolving
+    )
     runs = _readable_runs(repo)
     cust = _select_customer(runs, subject)
     if cust is None:
@@ -1475,7 +1562,9 @@ def _step(
     return _brief_step(cust, role, loop)
 
 
-def _loop(argv: list[str], cwd: Path, *, chatting: bool) -> int:
+def _loop(
+    argv: list[str], cwd: Path, *, chatting: bool, resolving: bool = False
+) -> int:
     """`spec_loop.main` под перехватом, затем итог шага по журналу прогона.
 
     Итог (`_outcome`) и вопрос интервью — уровень 0, подсказка `_next_hint` —
@@ -1495,7 +1584,9 @@ def _loop(argv: list[str], cwd: Path, *, chatting: bool) -> int:
     if unchanged is not None:
         line = _unchanged_outcome(unchanged, code)
         ops = before_ops.get(unchanged.run_id, {})
-        _report_step(unchanged, code, ops, chatting=chatting, line=line)
+        _report_step(
+            unchanged, code, ops, chatting=chatting, line=line, resolving=resolving
+        )
         return code
     if state is None:
         if code != 0:
@@ -1503,7 +1594,12 @@ def _loop(argv: list[str], cwd: Path, *, chatting: bool) -> int:
         return code
     line = _outcome(state, code)
     _report_step(
-        state, code, before_ops.get(state.run_id, {}), chatting=chatting, line=line
+        state,
+        code,
+        before_ops.get(state.run_id, {}),
+        chatting=chatting,
+        line=line,
+        resolving=resolving,
     )
     return code
 
@@ -1529,6 +1625,7 @@ def _report_step(
     *,
     chatting: bool,
     line: str | None,
+    resolving: bool = False,
 ) -> None:
     """Итог шага по уровням для прогона `state`: строка итога `line`, вопрос,
     состояние, следующий шаг (на уровне 0, если он — действие человека).
@@ -1553,6 +1650,8 @@ def _report_step(
         return  # как отвечать — уже сказано (вопрос) или скажет цикл
     if chatting and state.status == sf.EDGE:
         return  # вместо «поправьте» — разбор; не начнётся — скажет он
+    if resolving and _resolvable(state):
+        return  # без терминала: разбор через `dfl reply`
     if screen:
         return
     _say_next(state)

@@ -12,16 +12,22 @@
 на диске после отказа прибора остаются от прошлой попытки. Файлы узлов и
 оснований читаются и пишутся только через `governance.safe_io` (без ссылок,
 только обычные файлы, с потолком размера).
+
+Без терминала (#766 срез 2) вопрос уходит в `pending.json` (`Scope.ask`), круг
+останавливается с `Outcome.WAITING`; продолжение после `dfl reply` дописывает
+ту же партию ответов (`Waiting.batch`), сортировка берётся из кэша. Номер
+ожидающего круга (и находки личного пути) вызывающий хранит в `WAIT_FILE`.
 """
 
 from __future__ import annotations
 
 import enum
+import json
 import os
 import re
 import uuid
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from governance import run_state as rs
@@ -33,7 +39,7 @@ from governance.edge_check.rules import EdgeCheckError, load_rules
 from governance.ops import _AUTHOR_FILENAMES
 from lite import edge_journal as ej
 from lite import edge_memory as em
-from lite import node_guard
+from lite import node_guard, pending
 from lite import stop_findings as sf
 from lite.edge_triage import Item, Option, triage
 from lite.interview_chat import Read, is_skip, read_answer
@@ -50,6 +56,9 @@ OVERRIDE_GROUP = (
 NOT_COVERED = "принятие вопреки не покрывает все замечания уровня — разбор остановлен"
 REVIEW_STATUS = sf.EDGE
 REVISE_DIR = "edge-revise"
+#: ожидающие круги разбора: слот (`wave-<w>` / `node-<вид>`) → круг и находки
+WAIT_FILE = "edge-wait.json"
+STOPPED_LINE = "разбор остановлен — продолжить: dfl run"
 OWN_PREFIX = "своё:"
 DISAGREE_PREFIX = "не согласен:"
 ANSWER_HELP = (
@@ -77,6 +86,7 @@ class Outcome(enum.Enum):
     REVISED = "revised"  # узел переписан — повторить шаг
     OVERRIDDEN = "overridden"  # все замечания приняты вопреки — повторить шаг
     STOPPED = "stopped"  # человек остановился или сбой — прогон стоит
+    WAITING = "waiting"  # вопрос записан (`pending.json`), прогон ждёт
     NOT_APPLICABLE = "not_applicable"  # разбирать нечего — прежний стоп
 
 
@@ -125,6 +135,70 @@ class Scope:
     can_override: bool
     filenames: Mapping[str, str]
     subject: str = ""
+    #: без терминала: вопрос через `dfl reply` (`pending.asker`)
+    ask: pending.Ask | None = None
+    #: партия ожидающего круга и записанный вопрос (`Waiting`)
+    waiting: Waiting | None = None
+
+
+@dataclass
+class Waiting:
+    """Ожидающий круг: `batch` — партия его ответов (продолжение после
+    `dfl reply` дописывает ту же; пусто — новая), `question` — вопрос,
+    записанный в `pending.json` (`Outcome.WAITING`)."""
+
+    batch: str = ""
+    question: pending.Question | None = None
+
+
+def wait_load(run_dir: Path, slot: str) -> dict | None:
+    """Ожидающий круг слота (`WAIT_FILE`) или `None` (нет, битый)."""
+    data = _wait_read(run_dir)
+    saved = data.get(slot)
+    return saved if isinstance(saved, dict) else None
+
+
+def wait_save(run_dir: Path, slot: str, data: dict) -> None:
+    """Запомнить ожидающий круг слота: вопрос ушёл в `pending.json`."""
+    _wait_write(run_dir, {**_wait_read(run_dir), slot: data})
+
+
+def wait_clear(run_dir: Path, slot: str) -> None:
+    """Снять ожидающий круг слота; файла нет — ничего не пишется."""
+    data = _wait_read(run_dir)
+    if slot not in data:
+        return
+    del data[slot]
+    if data:
+        _wait_write(run_dir, data)
+    else:
+        (run_dir / WAIT_FILE).unlink(missing_ok=True)
+
+
+def findings_json(findings: Iterable[ej.Finding]) -> list[dict]:
+    """Находки для `WAIT_FILE`."""
+    return [asdict(f) for f in findings]
+
+
+def findings_from_json(raw: Iterable[Mapping]) -> list[ej.Finding]:
+    """Находки из `WAIT_FILE` (`findings_json`); не по форме — `TypeError`
+    или `KeyError`."""
+    return [ej.Finding(**{**r, "subject": tuple(r.get("subject") or ())}) for r in raw]
+
+
+def _wait_read(run_dir: Path) -> dict:
+    try:
+        data = json.loads((run_dir / WAIT_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _wait_write(run_dir: Path, data: dict) -> None:
+    path = run_dir / WAIT_FILE
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 class _Unreadable(Exception):
@@ -139,13 +213,15 @@ def resolve(
     revise: Revise,
     round_no: int,
     calls: PaidCalls | None = None,
+    ask: pending.Ask | None = None,
+    waiting: Waiting | None = None,
 ) -> Outcome:
     """Один круг разбора замечаний волны: сортировка, вопросы, переписывание.
 
     `revise(call, kind, subject, current, findings, decisions)` — граница
-    автора (`RealOps.revise`); `round_no` — номер круга в этом `dfl run`
-    (на `MAX_ROUNDS` в `test` предлагается принять узел вопреки замечанию);
-    `calls` — счётчик платных вызовов вызывающего.
+    автора (`RealOps.revise`); `round_no` — номер круга (на `MAX_ROUNDS`
+    в `test` предлагается принять узел вопреки замечанию); `calls` — счётчик
+    платных вызовов вызывающего; `ask`/`waiting` — без терминала (`Scope`).
     """
     findings = applicable_findings(state)
     if findings is None:
@@ -158,6 +234,8 @@ def resolve(
         can_override=state.mode == "test",
         filenames=_AUTHOR_FILENAMES,
         subject=state.subject,
+        ask=ask,
+        waiting=waiting,
     )
     return resolve_scope(
         scope,
@@ -185,6 +263,11 @@ def resolve_scope(
     Находки отбирает вызывающий (волна — `applicable_findings`); пусто или
     файл находки — не узел её вида по `scope.filenames` (§9 п.4) — разбирать
     нечего. Остальное — как `resolve`.
+
+    Без терминала (`scope.ask`) вопрос без ответа — `Outcome.WAITING`,
+    вопрос — в `scope.waiting.question`. Ответы партии `scope.waiting.batch`,
+    данные до вопроса, не спрашиваются снова, а сортировка видит журнал
+    без них — тот же вход, что в начале круга (кэш, не платный вызов).
     """
     if not findings or not _nodes_match(findings, scope.filenames):
         return Outcome.NOT_APPLICABLE
@@ -196,7 +279,11 @@ def resolve_scope(
         say(f"разбор замечаний невозможен: {exc}")
         return Outcome.NOT_APPLICABLE
     run_dir = scope.run_dir
-    prior = ej.load(run_dir, scope.wave)
+    waiting = scope.waiting if scope.waiting is not None else Waiting()
+    waiting.batch = waiting.batch or uuid.uuid4().hex
+    journal = ej.load(run_dir, scope.wave)
+    prior = [d for d in journal if d.batch != waiting.batch]
+    answered = [d for d in journal if d.batch == waiting.batch]
     try:
         records = ej.level_records(run_dir, scope.wave)
     except (OSError, ValueError, KeyError, TypeError):
@@ -211,9 +298,10 @@ def resolve_scope(
         return Outcome.STOPPED
     notes: set[str] = set()
     visible = [_visible(i) for i in items]
-    chosen = _ask_all(scope, visible, prior, read, round_no, refusal, notes)
-    if chosen is None:
-        return Outcome.STOPPED
+    asked = _Asked(read, scope.ask, waiting, answered)
+    chosen = _ask_all(scope, visible, prior, asked, round_no, refusal, notes)
+    if isinstance(chosen, Outcome):
+        return chosen
     overrides = ej.overridden(run_dir, scope.wave)
     if {f.digest for f in findings} <= overrides:
         if override.accepted(records, overrides) is not None:
@@ -360,18 +448,38 @@ def _mentioned(ids: list[str], text: str) -> list[str]:
     return [i for i in ids if re.search(rf"(?<![\w-]){re.escape(i)}(?![\w-])", text)]
 
 
+@dataclass
+class _Asked:
+    """Как спрашивать в этом круге: `read` — терминал, `ask` — без него
+    (`dfl reply`); `waiting` — партия круга; `answered` — ответы партии,
+    данные до записанного вопроса (берутся по порядку, не спрашиваются)."""
+
+    read: Read
+    ask: pending.Ask | None
+    waiting: Waiting
+    answered: list[ej.Decision]
+
+    def replay(self, key: Key) -> ej.Decision | None:
+        """Ответ партии на очередной вопрос с ключом `key` или `None`."""
+        if self.answered and self.answered[0].key == key:
+            return self.answered.pop(0)
+        self.answered.clear()  # круг разошёлся с записанным — спросить
+        return None
+
+
 def _ask_all(
     scope: Scope,
     items: list[Item],
     prior: list[ej.Decision],
-    read: Read,
+    asked: _Asked,
     round_no: int,
     refusal: str | None,
     notes: set[str],
-) -> list[ej.Decision] | None:
+) -> list[ej.Decision] | Outcome:
     """Вопросы по `decision` и по тем, что журнал велит спросить снова
     (`edge_memory.recall`); каждое решение сразу в журнал. Человек
-    остановился — `None` (записанное остаётся).
+    остановился — `Outcome.STOPPED`, вопрос ушёл в `pending.json` —
+    `Outcome.WAITING` (записанное остаётся).
 
     Принятие вопреки снимает блокирующий вердикт правила на тексте узла —
     всю группу находок с общим digest: вариант добавляется к вопросу каждого
@@ -390,19 +498,21 @@ def _ask_all(
     ):
         _note(notes, refusal)
     say(FIXING.format(n=len(items) - len(questions), m=len(questions)))
-    batch = uuid.uuid4().hex
     accepted_groups: set[str] = set()
     chosen: list[ej.Decision] = []
     for q in questions:
         if q.group in accepted_groups:
             continue
         question = memory[q.item.finding.key].question or q.item.question
-        decision = _ask(q, question, read, round_no)
+        decision = asked.replay(q.item.finding.key)
         if decision is None:
-            say("разбор остановлен — продолжить: dfl run")
-            return None
-        decision = replace(decision, batch=batch)
-        ej.append(scope.run_dir, scope.wave, decision)
+            got = _ask(scope.run_dir, q, question, asked, round_no)
+            if got is Outcome.STOPPED:
+                say(STOPPED_LINE)
+            if isinstance(got, Outcome):
+                return got
+            decision = replace(got, batch=asked.waiting.batch)
+            ej.append(scope.run_dir, scope.wave, decision)
         chosen.append(decision)
         if decision.kind == "override":
             accepted_groups.add(q.group)
@@ -444,30 +554,89 @@ def _questions(
     return out
 
 
-def _ask(q: _Question, question: str, read: Read, round_no: int) -> ej.Decision | None:
-    """Один вопрос; непонятый ответ — переспросить один раз, затем стоп."""
+def edge_question(q: _Question, question: str) -> pending.Question:
+    """Вопрос для `pending.json`: текст — то, что `_ask` печатает до
+    вариантов; варианты — те же строки, «принять вопреки» последним (номер
+    ответа сверяется по ним и разбирается `_parse`)."""
+    item = q.item
+    options = tuple(_option_line(o) for o in item.options)
+    return pending.Question(
+        kind=pending.EDGE,
+        key="/".join(item.finding.key),
+        text="\n".join(_head_lines(q, question)),
+        options=options + ((q.offer,) if q.offer is not None else ()),
+        accepts=ANSWER_HELP,
+    )
+
+
+def _head_lines(q: _Question, question: str) -> list[str]:
+    """Замечание, пункты группы, которые исправлю сам, и вопрос."""
+    f = q.item.finding
+    listed = [
+        f"  то же правило, исправлю сам: {_where(one.finding)}: {one.finding.statement}"
+        for one in q.listed
+    ]
+    return [f"замечание {_where(f)}: {f.statement}", *listed, question]
+
+
+def _ask(
+    run_dir: Path, q: _Question, question: str, asked: _Asked, round_no: int
+) -> ej.Decision | Outcome:
+    """Один вопрос; непонятый ответ — переспросить один раз, затем стоп.
+
+    Без терминала (`asked.ask`) вопрос без ответа — `Outcome.WAITING`
+    (`asked.waiting.question`). В терминале сначала берётся ответ `dfl reply`
+    на записанный вопрос, иначе живой ввод; живой ответ снимает вопрос.
+    """
     item, offer = q.item, q.offer
-    say(f"замечание {_where(item.finding)}: {item.finding.statement}")
-    for one in q.listed:
-        say(
-            f"  то же правило, исправлю сам: {_where(one.finding)}: {one.finding.statement}"
-        )
-    say(question)
+    remote = edge_question(q, question)
+    if asked.ask is not None:
+        return _ask_remote(q, question, remote, asked.ask, asked.waiting, round_no)
+    for line in _head_lines(q, question):
+        say(line)
     for no, option in enumerate(item.options, 1):
         say(f"  {no}. {_option_line(option)}")
     if offer is not None:
         say(f"  {len(item.options) + 1}. {offer}")
     say(ANSWER_HELP)
+    recorded = pending.take(run_dir, remote)
+    if recorded is not None:
+        decision = _parse(item, question, recorded, offer, round_no)
+        if decision is not None:
+            return decision
     for attempt in range(2):
-        text = read_answer(read, quick=_quick)
+        text = read_answer(asked.read, quick=_quick)
+        if text is not None:
+            pending.discard(run_dir)  # терминал победил
         if text is None or is_skip(text):
-            return None
+            return Outcome.STOPPED
         decision = _parse(item, question, text, offer, round_no)
         if decision is not None:
             return decision
         if attempt == 0:
             say(NO_REASON if _starts(text, DISAGREE_PREFIX) else REASK)
-    return None
+    return Outcome.STOPPED
+
+
+def _ask_remote(
+    q: _Question,
+    question: str,
+    remote: pending.Question,
+    ask: pending.Ask,
+    waiting: Waiting,
+    round_no: int,
+) -> ej.Decision | Outcome:
+    """Ответ через `dfl reply`; нет ответа — `Outcome.WAITING`. Ответ не
+    разобран (`dfl reply` его проверил, но круг мог измениться) — вопрос
+    записывается снова."""
+    text = ask(remote)
+    if text is not None:
+        decision = _parse(q.item, question, text, q.offer, round_no)
+        if decision is not None:
+            return decision
+        ask(remote)  # ответ взят и снят: записать вопрос снова
+    waiting.question = remote
+    return Outcome.WAITING
 
 
 def _quick(line: str) -> bool:
