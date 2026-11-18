@@ -26,6 +26,201 @@ from governance.spec_runner_contract import (
 # котором `render_tasks_dt` детерминированно поднимает RuntimeError —
 # «не блокирует доставку» было ложью именно для этого входа).
 _VERIFY_GROUP_UNDERIVABLE_MARKER = "группа наблюдения не выводится"
+_VERIFY_GROUP_UNDERIVABLE_MARKER_EN = "the observation group cannot be derived"
+
+#: Находки формы и графа по-английски (личный путь `dfl` на языке прогона,
+#: #769): русский шаблон → английский. `lang="ru"` (умолчание, enterprise)
+#: — русский шаблон как есть.
+_FINDINGS_EN: dict[str, str] = {
+    "{dt_id}: negative_control объявлен {keys} раза (ожидается ровно один)": (
+        "{dt_id}: negative_control is declared {keys} times (exactly one expected)"
+    ),
+    (
+        "{dt_id}: поле negative_control объявлено, но не разобрано — "
+        "ожидается `negative_control: <селектор>`: один токен без "
+        "пробелов, без ` :: `"
+    ): (
+        "{dt_id}: the negative_control field is declared but not parsed — "
+        "expected `negative_control: <selector>`: one token without spaces, "
+        "without ` :: `"
+    ),
+    "{dt_id}: tdd_waiver объявлен {keys} раза (ожидается ровно один)": (
+        "{dt_id}: tdd_waiver is declared {keys} times (exactly one expected)"
+    ),
+    (
+        "{dt_id}: поле tdd_waiver объявлено, но не разобрано — "
+        "ожидается `tdd_waiver: <класс> · sanction: <id>`"
+    ): (
+        "{dt_id}: the tdd_waiver field is declared but not parsed — "
+        "expected `tdd_waiver: <class> · sanction: <id>`"
+    ),
+    (
+        "{dt_id}: negative_control объявлен без tdd_waiver — "
+        "контроль без снятого обязательства не имеет предмета"
+    ): (
+        "{dt_id}: negative_control is declared without tdd_waiver — a control "
+        "without a waived obligation has no subject"
+    ),
+    (
+        "{dt_id}: класс waiver'а {node_class!r} не известен контракту "
+        "(допустимы {classes})"
+    ): (
+        "{dt_id}: waiver class {node_class!r} is unknown to the contract "
+        "(allowed: {classes})"
+    ),
+    "{dt_id}: sanction {sanction!r} не соответствует форме — допустимы {forms}": (
+        "{dt_id}: sanction {sanction!r} does not match the form — allowed: {forms}"
+    ),
+    (
+        "{dt_id}: tdd_waiver запрещён при type: verify — у задачи "
+        "проверки свой режим исполнения (verify_first)"
+    ): (
+        "{dt_id}: tdd_waiver is forbidden with type: verify — a check task "
+        "has its own execution mode (verify_first)"
+    ),
+    (
+        "{dt_id}: tdd_waiver объявлен у задачи без зависимостей — "
+        "класс требует, чтобы поведение было доставлено зависимостями, "
+        "а доставлять его нечем"
+    ): (
+        "{dt_id}: tdd_waiver is declared on a task without dependencies — the "
+        "class requires the behaviour to be delivered by dependencies, and "
+        "there is nothing to deliver it"
+    ),
+    (
+        "{dt_id}: tdd_waiver объявлен без negative_control — "
+        "spec-runner ≥ 3.0.0 отказывает waived-задаче без "
+        "`**Negative-control:**` до платного вызова; ожидается "
+        "`negative_control: <селектор теста, который краснеет под патчем>`"
+    ): (
+        "{dt_id}: tdd_waiver is declared without negative_control — "
+        "spec-runner ≥ 3.0.0 refuses a waived task without "
+        "`**Negative-control:**` before a paid call; expected "
+        "`negative_control: <selector of a test that turns red under the patch>`"
+    ),
+    (
+        "{dt_id}: заголовок не соответствует машинной "
+        "грамматике DT (`#### DT-NN: <название> · type: "
+        "implement|verify · owner: <роль>`)"
+    ): (
+        "{dt_id}: the heading does not match the DT machine grammar "
+        "(`#### DT-NN: <title> · type: implement|verify · owner: <role>`)"
+    ),
+    (
+        "{dt_id}: поле verifies объявлено, но не разобрано — "
+        "ожидается блочный список `- <путь>` (отступ необязателен) "
+        "либо "
+        "инлайн `verifies: [<путь>, …]`"
+    ): (
+        "{dt_id}: the verifies field is declared but not parsed — expected a "
+        "block list `- <path>` (indent optional) or inline "
+        "`verifies: [<path>, …]`"
+    ),
+    "{dt_id}: строка scenarios отсутствует или пуста": (
+        "{dt_id}: the scenarios line is missing or empty"
+    ),
+    "{dt_id}: строка depends_on отсутствует": "{dt_id}: the depends_on line is missing",
+    "{dt_id}: строка parallel_group отсутствует": (
+        "{dt_id}: the parallel_group line is missing"
+    ),
+    "{dt_id}: verifies запрещён при type: implement": (
+        "{dt_id}: verifies is forbidden with type: implement"
+    ),
+    "{dt_id}: объявлен {count} раза (ожидается ровно один)": (
+        "{dt_id}: declared {count} times (exactly one expected)"
+    ),
+    (
+        "{dt_id}: verifies {path}: файл не создаёт ни одна "
+        "задача — дайте его задаче-реализации через checked_by "
+        "её сценария или уберите из verifies"
+    ): (
+        "{dt_id}: verifies {path}: no task creates this file — give it to an "
+        "implementation task via the checked_by of its scenario or remove it "
+        "from verifies"
+    ),
+    (
+        "{beh}: заголовок behaviour-spec не соответствует "
+        "машинной грамматике BEH (`#### BEH-NN[a-z]: <название>` — "
+        "суффикс не более одной строчной буквы)"
+    ): (
+        "{beh}: the behaviour-spec heading does not match the BEH machine "
+        "grammar (`#### BEH-NN[a-z]: <title>` — a suffix of at most one "
+        "lowercase letter)"
+    ),
+    "{dt_id}: ссылка на несуществующий {ref}": (
+        "{dt_id}: reference to a non-existent {ref}"
+    ),
+    "{dt_id}: сценарий {beh} отсутствует в behaviour-spec": (
+        "{dt_id}: scenario {beh} is missing from the behaviour-spec"
+    ),
+    (
+        "{dt_id}: depends_on ссылается на {ref}, "
+        "объявленный ниже по документу — порядок объявления "
+        "обязан быть топологическим"
+    ): (
+        "{dt_id}: depends_on refers to {ref}, declared further down the "
+        "document — the declaration order must be topological"
+    ),
+    "{beh}: не покрыт ни одной DT-задачей": "{beh}: not covered by any DT task",
+    "{beh}: покрыт дважды и более ({owners})": (
+        "{beh}: covered twice or more ({owners})"
+    ),
+    ("{target}: нарушен single-owner — checked_by-цель у {prior} и {dt_id}"): (
+        "{target}: single-owner violated — the checked_by target belongs to "
+        "{prior} and {dt_id}"
+    ),
+    (
+        "{dt_id}: negative_control {selector} "
+        "указывает на файл {control_file}, которым DT не владеет "
+        "через checked_by своих сценариев (владеет: "
+        "{own})"
+    ): (
+        "{dt_id}: negative_control {selector} points to the file "
+        "{control_file}, which the DT does not own via the checked_by of its "
+        "scenarios (owns: {own})"
+    ),
+    "ничем исполняемым": "nothing executable",
+    (
+        "{dt_id}: type: verify — "
+        "{marker} (нет ни "
+        "исполняемых checked_by-целей, ни verifies; kind: manual "
+        "не является селектором) — группу "
+        "наблюдения прогонять нечем, доставка этого DT невозможна"
+    ): (
+        "{dt_id}: type: verify — {marker} (neither executable checked_by "
+        "targets nor verifies; kind: manual is not a selector) — there is "
+        "nothing to run the observation group with, this DT cannot be "
+        "delivered"
+    ),
+    "{dt_id}: type: verify без delivered_by": (
+        "{dt_id}: type: verify without delivered_by"
+    ),
+    ("{dt_id}: delivered_by ({outside}) вне транзитивного замыкания depends_on"): (
+        "{dt_id}: delivered_by ({outside}) is outside the transitive closure "
+        "of depends_on"
+    ),
+    "{dt_id}: delivered_by запрещён при type: implement": (
+        "{dt_id}: delivered_by is forbidden with type: implement"
+    ),
+    (
+        "{dt_id}: verifies {path} — владелец {owner} вне "
+        "транзитивного замыкания depends_on {dt_id}"
+    ): (
+        "{dt_id}: verifies {path} — owner {owner} is outside the transitive "
+        "closure of depends_on {dt_id}"
+    ),
+    "depends_on: в графе есть цикл": "depends_on: the graph has a cycle",
+    ("{dt_id}: зависит от группы {group}, но не от всех её стоков (нет: {missing})"): (
+        "{dt_id}: depends on group {group}, but not on all of its sinks "
+        "(missing: {missing})"
+    ),
+}
+
+
+def _finding(lang: str, template: str, **values: object) -> str:
+    """Находка на языке `lang`: шаблон переводится до `.format()`."""
+    text = _FINDINGS_EN.get(template, template) if lang == "en" else template
+    return text.format(**values)
 
 
 _DT_HEAD_RE = re.compile(
@@ -195,6 +390,7 @@ _CONTROL_KEY_RE = re.compile(r"^negative_control:", re.MULTILINE)
 _SANCTION_BATCH_RE = re.compile(r"^batch-approve-(\d{4}-\d{2}-\d{2})$")
 _SANCTION_REF_RE = re.compile(r"^[A-Za-z0-9][\w.-]*#\d+$")
 SANCTION_FORMS = "batch-approve-<YYYY-MM-DD> либо <repo>#<номер>"
+SANCTION_FORMS_EN = "batch-approve-<YYYY-MM-DD> or <repo>#<number>"
 
 
 def _sanction_is_valid(sanction: str) -> bool:
@@ -245,7 +441,9 @@ class DtWaiver:
     control_selector: str
 
 
-def _control_field(block: str, dt_id: str) -> tuple[str | None, list[str], bool]:
+def _control_field(
+    block: str, dt_id: str, lang: str = "ru"
+) -> tuple[str | None, list[str], bool]:
     """`negative_control:` → (селектор, находки формы, ключ_присутствует).
 
     Та же дисциплина, что у `tdd_waiver`: число ключей считается раньше
@@ -259,17 +457,27 @@ def _control_field(block: str, dt_id: str) -> tuple[str | None, list[str], bool]
     if keys > 1:
         return (
             None,
-            [f"{dt_id}: negative_control объявлен {keys} раза (ожидается ровно один)"],
+            [
+                _finding(
+                    lang,
+                    "{dt_id}: negative_control объявлен {keys} раза "
+                    "(ожидается ровно один)",
+                    dt_id=dt_id,
+                    keys=keys,
+                )
+            ],
             True,
         )
     if keys != len(matches):
         return (
             None,
             [
-                (
-                    f"{dt_id}: поле negative_control объявлено, но не разобрано — "
+                _finding(
+                    lang,
+                    "{dt_id}: поле negative_control объявлено, но не разобрано — "
                     "ожидается `negative_control: <селектор>`: один токен без "
-                    "пробелов, без ` :: `"
+                    "пробелов, без ` :: `",
+                    dt_id=dt_id,
                 )
             ],
             True,
@@ -327,6 +535,7 @@ def _waiver_field(
     dt_id: str,
     dt_type: str,
     depends_on: tuple[str, ...],
+    lang: str = "ru",
 ) -> tuple[DtWaiver | None, list[str]]:
     """Объявление TDD-waiver'а либо находки — fail-closed в обе стороны.
 
@@ -365,7 +574,7 @@ def _waiver_field(
     факт не открывает дверь.
     """
     findings: list[str] = []
-    selector, control_findings, control_declared = _control_field(block, dt_id)
+    selector, control_findings, control_declared = _control_field(block, dt_id, lang)
     findings += control_findings
     matches = _WAIVER_RE.findall(block)
     # Сначала считается ЧИСЛО КЛЮЧЕЙ (минор ревью #197). Ветка `keys > 1`
@@ -376,13 +585,22 @@ def _waiver_field(
     keys = len(_WAIVER_KEY_RE.findall(block))
     if keys > 1:
         findings.append(
-            f"{dt_id}: tdd_waiver объявлен {keys} раза (ожидается ровно один)"
+            _finding(
+                lang,
+                "{dt_id}: tdd_waiver объявлен {keys} раза (ожидается ровно один)",
+                dt_id=dt_id,
+                keys=keys,
+            )
         )
         return None, findings
     if keys != len(matches):
         findings.append(
-            f"{dt_id}: поле tdd_waiver объявлено, но не разобрано — "
-            "ожидается `tdd_waiver: <класс> · sanction: <id>`"
+            _finding(
+                lang,
+                "{dt_id}: поле tdd_waiver объявлено, но не разобрано — "
+                "ожидается `tdd_waiver: <класс> · sanction: <id>`",
+                dt_id=dt_id,
+            )
         )
         return None, findings
     if not matches:
@@ -391,8 +609,12 @@ def _waiver_field(
             # TDD-waiver»): контроль без снятого обязательства не имеет
             # предмета, и молчать здесь значило бы отдать отказ соседу.
             findings.append(
-                f"{dt_id}: negative_control объявлен без tdd_waiver — "
-                "контроль без снятого обязательства не имеет предмета"
+                _finding(
+                    lang,
+                    "{dt_id}: negative_control объявлен без tdd_waiver — "
+                    "контроль без снятого обязательства не имеет предмета",
+                    dt_id=dt_id,
+                )
             )
         return None, findings
     node_class, sanction = matches[0]
@@ -403,24 +625,44 @@ def _waiver_field(
     # влияет ровно потому, что до конца доходят все.
     if node_class not in WAIVER_CLASSES:
         findings.append(
-            f"{dt_id}: класс waiver'а {node_class!r} не известен контракту "
-            f"(допустимы {', '.join(WAIVER_CLASSES)})"
+            _finding(
+                lang,
+                "{dt_id}: класс waiver'а {node_class!r} не известен контракту "
+                "(допустимы {classes})",
+                dt_id=dt_id,
+                node_class=node_class,
+                classes=", ".join(WAIVER_CLASSES),
+            )
         )
     if not _sanction_is_valid(sanction):
         findings.append(
-            f"{dt_id}: sanction {sanction!r} не соответствует форме — "
-            f"допустимы {SANCTION_FORMS}"
+            _finding(
+                lang,
+                "{dt_id}: sanction {sanction!r} не соответствует форме — "
+                "допустимы {forms}",
+                dt_id=dt_id,
+                sanction=sanction,
+                forms=SANCTION_FORMS_EN if lang == "en" else SANCTION_FORMS,
+            )
         )
     if dt_type == "verify":
         findings.append(
-            f"{dt_id}: tdd_waiver запрещён при type: verify — у задачи "
-            "проверки свой режим исполнения (verify_first)"
+            _finding(
+                lang,
+                "{dt_id}: tdd_waiver запрещён при type: verify — у задачи "
+                "проверки свой режим исполнения (verify_first)",
+                dt_id=dt_id,
+            )
         )
     if not depends_on:
         findings.append(
-            f"{dt_id}: tdd_waiver объявлен у задачи без зависимостей — "
-            "класс требует, чтобы поведение было доставлено зависимостями, "
-            "а доставлять его нечем"
+            _finding(
+                lang,
+                "{dt_id}: tdd_waiver объявлен у задачи без зависимостей — "
+                "класс требует, чтобы поведение было доставлено зависимостями, "
+                "а доставлять его нечем",
+                dt_id=dt_id,
+            )
         )
     if not control_declared:
         # Пятое условие (devtools#336). spec-runner ≥ 3.0.0 (#428)
@@ -429,10 +671,14 @@ def _waiver_field(
         # объявления DT. Пропустить объявление здесь значило бы доставить
         # задачу, которая выглядит запускаемой и не запускается никогда.
         findings.append(
-            f"{dt_id}: tdd_waiver объявлен без negative_control — "
-            "spec-runner ≥ 3.0.0 отказывает waived-задаче без "
-            "`**Negative-control:**` до платного вызова; ожидается "
-            "`negative_control: <селектор теста, который краснеет под патчем>`"
+            _finding(
+                lang,
+                "{dt_id}: tdd_waiver объявлен без negative_control — "
+                "spec-runner ≥ 3.0.0 отказывает waived-задаче без "
+                "`**Negative-control:**` до платного вызова; ожидается "
+                "`negative_control: <селектор теста, который краснеет под патчем>`",
+                dt_id=dt_id,
+            )
         )
     if findings or selector is None:
         return None, findings
@@ -443,8 +689,8 @@ def _waiver_field(
     ), findings
 
 
-def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
-    """DT-грамматика → (задачи, findings формы).
+def parse_dt_tasks(text: str, *, lang: str = "ru") -> tuple[list[DtTask], list[str]]:
+    """DT-грамматика → (задачи, findings формы); `lang` — язык находок.
 
     Findings формы (не графа — граф в graph_findings): near-miss
     заголовок, дубль DT-id, отсутствие scenarios/depends_on/
@@ -458,9 +704,13 @@ def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
     for near in _DT_NEAR_RE.finditer(text):
         if near.start() not in strict:
             findings.append(
-                f"{near.group(1)}: заголовок не соответствует машинной "
-                "грамматике DT (`#### DT-NN: <название> · type: "
-                "implement|verify · owner: <роль>`)"
+                _finding(
+                    lang,
+                    "{dt_id}: заголовок не соответствует машинной "
+                    "грамматике DT (`#### DT-NN: <название> · type: "
+                    "implement|verify · owner: <роль>`)",
+                    dt_id=near.group(1),
+                )
             )
     matches = list(_DT_HEAD_RE.finditer(text))
     seen: dict[str, int] = {}
@@ -487,20 +737,34 @@ def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
         # инвариантом и не попадал в доставленную tasks-спеку.
         if verifies_parsed is None and _VERIFIES_KEY_RE.search(block):
             findings.append(
-                f"{dt_id}: поле verifies объявлено, но не разобрано — "
-                "ожидается блочный список `- <путь>` (отступ необязателен) "
-                "либо "
-                "инлайн `verifies: [<путь>, …]`"
+                _finding(
+                    lang,
+                    "{dt_id}: поле verifies объявлено, но не разобрано — "
+                    "ожидается блочный список `- <путь>` (отступ необязателен) "
+                    "либо "
+                    "инлайн `verifies: [<путь>, …]`",
+                    dt_id=dt_id,
+                )
             )
         verifies = verifies_parsed or ()
         dt_type = m.group(3)
         group_m = re.search(r"^parallel_group:\s*(\S+)\s*$", block, re.MULTILINE)
         if scenarios is None or not scenarios:
-            findings.append(f"{dt_id}: строка scenarios отсутствует или пуста")
+            findings.append(
+                _finding(
+                    lang, "{dt_id}: строка scenarios отсутствует или пуста", dt_id=dt_id
+                )
+            )
         if depends_on is None:
-            findings.append(f"{dt_id}: строка depends_on отсутствует")
+            findings.append(
+                _finding(lang, "{dt_id}: строка depends_on отсутствует", dt_id=dt_id)
+            )
         if group_m is None:
-            findings.append(f"{dt_id}: строка parallel_group отсутствует")
+            findings.append(
+                _finding(
+                    lang, "{dt_id}: строка parallel_group отсутствует", dt_id=dt_id
+                )
+            )
         # verifies — структурное поле группы НАБЛЮДЕНИЯ (owner ruling,
         # DT-14): рекомендовано у type: verify (объявляется, когда нужна
         # multi-file группа наблюдения отдельно от checked_by-владения) и
@@ -516,7 +780,11 @@ def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
         # находка, находка только когда группу вывести решительно не из
         # чего).
         if dt_type == "implement" and verifies:
-            findings.append(f"{dt_id}: verifies запрещён при type: implement")
+            findings.append(
+                _finding(
+                    lang, "{dt_id}: verifies запрещён при type: implement", dt_id=dt_id
+                )
+            )
         # Находки формы `delivers` здесь СОЗНАТЕЛЬНО отбрасываются: их
         # единственный судья — `dt_contract_findings`, который один знает
         # объявленную версию диалекта. Парсер версии не читает, и,
@@ -525,7 +793,9 @@ def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
         # до моста не доезжает по другому пути: гейт останавливает
         # прогон на ошибках `GC-DT-CONTRACT` раньше доставки.
         _, delivers = _parse_delivers(dt_id, block)
-        waiver, waiver_findings = _waiver_field(block, dt_id, dt_type, depends_on or ())
+        waiver, waiver_findings = _waiver_field(
+            block, dt_id, dt_type, depends_on or (), lang
+        )
         findings += waiver_findings
         tasks.append(
             DtTask(
@@ -544,7 +814,14 @@ def parse_dt_tasks(text: str) -> tuple[list[DtTask], list[str]]:
         )
     for dt_id, count in seen.items():
         if count > 1:
-            findings.append(f"{dt_id}: объявлен {count} раза (ожидается ровно один)")
+            findings.append(
+                _finding(
+                    lang,
+                    "{dt_id}: объявлен {count} раза (ожидается ровно один)",
+                    dt_id=dt_id,
+                    count=count,
+                )
+            )
     return tasks, findings
 
 
@@ -625,6 +902,7 @@ def _transitive_deps(start: str, edges: dict[str, tuple[str, ...]]) -> set[str]:
 def _orphan_verifies_findings(
     tasks: list[DtTask],
     bindings: dict[str, tuple[str | None, str | None]],
+    lang: str = "ru",
 ) -> list[str]:
     """Сироты verifies — FATAL (devtools#767, решение владельца 16.11):
     элемент verifies, не являющийся checked_by-целью НИ ОДНОЙ задачи
@@ -642,9 +920,14 @@ def _orphan_verifies_findings(
             # bindings/owned_files несут ГОЛЫЕ пути.
             if f.split("::", 1)[0] not in owned_files:
                 findings.append(
-                    f"{t.dt_id}: verifies {f}: файл не создаёт ни одна "
-                    "задача — дайте его задаче-реализации через checked_by "
-                    "её сценария или уберите из verifies"
+                    _finding(
+                        lang,
+                        "{dt_id}: verifies {path}: файл не создаёт ни одна "
+                        "задача — дайте его задаче-реализации через checked_by "
+                        "её сценария или уберите из verifies",
+                        dt_id=t.dt_id,
+                        path=f,
+                    )
                 )
     return findings
 
@@ -654,8 +937,12 @@ def graph_findings(
     decomposition_text: str,
     *,
     selector_policy: SelectorPolicy | None = None,
+    lang: str = "ru",
 ) -> list[str]:
     """Инварианты графа DT (§3 спеки) + findings формы парсера.
+
+    `lang` — язык находок (личный путь `dfl` — язык прогона, #769; находки
+    `selector_policy` — только enterprise, всегда русские).
 
     Порядок проверок фиксирован, findings накапливаются (гейт показывает
     всё сразу, не по одной). Пустой список — граф валиден.
@@ -682,7 +969,7 @@ def graph_findings(
     исполняемой целью: если других целей нет, рядом стоит и
     underivable-finding (#162).
     """
-    tasks, findings = parse_dt_tasks(decomposition_text)
+    tasks, findings = parse_dt_tasks(decomposition_text, lang=lang)
     records = _parse_beh_binding_records(behaviour_text)
     bindings = {
         beh_id: (target, kind) for beh_id, (target, kind, _declared) in records.items()
@@ -696,20 +983,36 @@ def graph_findings(
     for near in _BEH_NEAR_RE.finditer(behaviour_text):
         if near.start() not in strict_beh:
             findings.append(
-                f"{near.group(1)}: заголовок behaviour-spec не соответствует "
-                "машинной грамматике BEH (`#### BEH-NN[a-z]: <название>` — "
-                "суффикс не более одной строчной буквы)"
+                _finding(
+                    lang,
+                    "{beh}: заголовок behaviour-spec не соответствует "
+                    "машинной грамматике BEH (`#### BEH-NN[a-z]: <название>` — "
+                    "суффикс не более одной строчной буквы)",
+                    beh=near.group(1),
+                )
             )
 
     # ссылки на несуществующее
     for t in tasks:
         for ref in (*t.depends_on, *t.delivered_by):
             if ref not in ids:
-                findings.append(f"{t.dt_id}: ссылка на несуществующий {ref}")
+                findings.append(
+                    _finding(
+                        lang,
+                        "{dt_id}: ссылка на несуществующий {ref}",
+                        dt_id=t.dt_id,
+                        ref=ref,
+                    )
+                )
         for beh in t.scenarios:
             if beh not in bindings:
                 findings.append(
-                    f"{t.dt_id}: сценарий {beh} отсутствует в behaviour-spec"
+                    _finding(
+                        lang,
+                        "{dt_id}: сценарий {beh} отсутствует в behaviour-spec",
+                        dt_id=t.dt_id,
+                        beh=beh,
+                    )
                 )
 
     # порядок объявления: depends_on обязан ссылаться только на DT, уже
@@ -721,9 +1024,14 @@ def graph_findings(
         for ref in t.depends_on:
             if ref in order and order[ref] > order[t.dt_id]:
                 findings.append(
-                    f"{t.dt_id}: depends_on ссылается на {ref}, "
-                    "объявленный ниже по документу — порядок объявления "
-                    "обязан быть топологическим"
+                    _finding(
+                        lang,
+                        "{dt_id}: depends_on ссылается на {ref}, "
+                        "объявленный ниже по документу — порядок объявления "
+                        "обязан быть топологическим",
+                        dt_id=t.dt_id,
+                        ref=ref,
+                    )
                 )
 
     # сюръекция BEH без дублей
@@ -734,9 +1042,18 @@ def graph_findings(
     for beh in bindings:
         owners = coverage.get(beh, [])
         if not owners:
-            findings.append(f"{beh}: не покрыт ни одной DT-задачей")
+            findings.append(
+                _finding(lang, "{beh}: не покрыт ни одной DT-задачей", beh=beh)
+            )
         elif len(owners) > 1:
-            findings.append(f"{beh}: покрыт дважды и более ({', '.join(owners)})")
+            findings.append(
+                _finding(
+                    lang,
+                    "{beh}: покрыт дважды и более ({owners})",
+                    beh=beh,
+                    owners=", ".join(owners),
+                )
+            )
 
     # single-owner тест-файла — БЕЗ исключения для verifies (round 4 ревью
     # PR #161, finding 3: узкое per-task исключение round 2/3, `target in
@@ -759,8 +1076,14 @@ def graph_findings(
             prior = file_owner.get(target)
             if prior is not None and prior != t.dt_id:
                 findings.append(
-                    f"{target}: нарушен single-owner — checked_by-цель у "
-                    f"{prior} и {t.dt_id}"
+                    _finding(
+                        lang,
+                        "{target}: нарушен single-owner — checked_by-цель у "
+                        "{prior} и {dt_id}",
+                        target=target,
+                        prior=prior,
+                        dt_id=t.dt_id,
+                    )
                 )
             file_owner.setdefault(target, t.dt_id)
 
@@ -787,10 +1110,17 @@ def graph_findings(
         control_file = t.waiver.control_selector.split("::", 1)[0]
         if control_file not in own_files:
             findings.append(
-                f"{t.dt_id}: negative_control {t.waiver.control_selector} "
-                f"указывает на файл {control_file}, которым DT не владеет "
-                "через checked_by своих сценариев (владеет: "
-                f"{', '.join(own_files) or 'ничем исполняемым'})"
+                _finding(
+                    lang,
+                    "{dt_id}: negative_control {selector} "
+                    "указывает на файл {control_file}, которым DT не владеет "
+                    "через checked_by своих сценариев (владеет: "
+                    "{own})",
+                    dt_id=t.dt_id,
+                    selector=t.waiver.control_selector,
+                    control_file=control_file,
+                    own=", ".join(own_files) or _finding(lang, "ничем исполняемым"),
+                )
             )
 
     # Группа наблюдения verify-DT не выводится ВООБЩЕ — FATAL (round 13
@@ -822,11 +1152,18 @@ def graph_findings(
                 runnable_targets.append(declared)
         if not runnable_targets:
             findings.append(
-                f"{t.dt_id}: type: verify — "
-                f"{_VERIFY_GROUP_UNDERIVABLE_MARKER} (нет ни "
-                "исполняемых checked_by-целей, ни verifies; kind: manual "
-                "не является селектором) — группу "
-                "наблюдения прогонять нечем, доставка этого DT невозможна"
+                _finding(
+                    lang,
+                    "{dt_id}: type: verify — "
+                    "{marker} (нет ни "
+                    "исполняемых checked_by-целей, ни verifies; kind: manual "
+                    "не является селектором) — группу "
+                    "наблюдения прогонять нечем, доставка этого DT невозможна",
+                    dt_id=t.dt_id,
+                    marker=_VERIFY_GROUP_UNDERIVABLE_MARKER_EN
+                    if lang == "en"
+                    else _VERIFY_GROUP_UNDERIVABLE_MARKER,
+                )
             )
         if selector_policy and not selector_policy.supports_file_targets:
             for declared in runnable_targets:
@@ -842,18 +1179,33 @@ def graph_findings(
     for t in tasks:
         if t.type == "verify":
             if not t.delivered_by:
-                findings.append(f"{t.dt_id}: type: verify без delivered_by")
+                findings.append(
+                    _finding(
+                        lang, "{dt_id}: type: verify без delivered_by", dt_id=t.dt_id
+                    )
+                )
             else:
                 closure = _transitive_deps(t.dt_id, edges)
                 outside = [d for d in t.delivered_by if d not in closure]
                 if outside:
                     findings.append(
-                        f"{t.dt_id}: delivered_by "
-                        f"({', '.join(outside)}) вне транзитивного "
-                        "замыкания depends_on"
+                        _finding(
+                            lang,
+                            "{dt_id}: delivered_by "
+                            "({outside}) вне транзитивного "
+                            "замыкания depends_on",
+                            dt_id=t.dt_id,
+                            outside=", ".join(outside),
+                        )
                     )
         elif t.delivered_by:
-            findings.append(f"{t.dt_id}: delivered_by запрещён при type: implement")
+            findings.append(
+                _finding(
+                    lang,
+                    "{dt_id}: delivered_by запрещён при type: implement",
+                    dt_id=t.dt_id,
+                )
+            )
 
     # verifies обязан ссылаться на файлы, чей владелец (checked_by, тот же
     # file_owner, что и single-owner выше) — в ТРАНЗИТИВНОМ ЗАМЫКАНИИ
@@ -879,8 +1231,14 @@ def graph_findings(
             closure = _transitive_deps(t.dt_id, edges)
             if owner not in closure:
                 findings.append(
-                    f"{t.dt_id}: verifies {f} — владелец {owner} вне "
-                    f"транзитивного замыкания depends_on {t.dt_id}"
+                    _finding(
+                        lang,
+                        "{dt_id}: verifies {path} — владелец {owner} вне "
+                        "транзитивного замыкания depends_on {dt_id}",
+                        dt_id=t.dt_id,
+                        path=f,
+                        owner=owner,
+                    )
                 )
 
     # ацикличность (DFS с цветами)
@@ -900,7 +1258,7 @@ def graph_findings(
         return False
 
     if any(color[n] == WHITE and _visit(n) for n in sorted(ids)):
-        findings.append("depends_on: в графе есть цикл")
+        findings.append(_finding(lang, "depends_on: в графе есть цикл"))
 
     # рёбра в чужую группу — от ВСЕХ стоков этой группы
     groups: dict[str, set[str]] = {}
@@ -942,10 +1300,16 @@ def graph_findings(
             missing = sinks - set(t.depends_on)
             if missing:
                 findings.append(
-                    f"{t.dt_id}: зависит от группы {g}, но не от всех её "
-                    f"стоков (нет: {', '.join(sorted(missing))})"
+                    _finding(
+                        lang,
+                        "{dt_id}: зависит от группы {group}, но не от всех её "
+                        "стоков (нет: {missing})",
+                        dt_id=t.dt_id,
+                        group=g,
+                        missing=", ".join(sorted(missing)),
+                    )
                 )
-    findings.extend(_orphan_verifies_findings(tasks, bindings))
+    findings.extend(_orphan_verifies_findings(tasks, bindings, lang))
     return findings
 
 

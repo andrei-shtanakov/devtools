@@ -16,6 +16,7 @@ from typing import Any
 
 from lite.edge_journal import Decision, Finding
 from lite.edge_memory import recall
+from lite.i18n import t
 from lite.structure import Agent, FormError, first_json_object
 
 CACHE_DIR = "edge-triage"
@@ -116,16 +117,16 @@ def _parse(
     всегда `fix` (код, а не промпт, гарантирует «не спрашивать дважды»)."""
     entries = raw.get("items")
     if not isinstance(entries, list):
-        raise FormError('нет списка "items"')
+        raise FormError(t('нет списка "items"'))
     by_no: dict[int, Item] = {}
     for entry in entries:
         no, item = _parse_item(findings, entry)
         if no in by_no:
-            raise FormError(f"находка {no} разобрана дважды")
+            raise FormError(t("находка {no} разобрана дважды").format(no=no))
         by_no[no] = item
     missing = [n for n in range(1, len(findings) + 1) if n not in by_no]
     if missing:
-        raise FormError(f"не разобраны находки: {missing}")
+        raise FormError(t("не разобраны находки: {missing}").format(missing=missing))
     return [
         _forced_fix(by_no[n]) if by_no[n].finding.key in decided else by_no[n]
         for n in range(1, len(findings) + 1)
@@ -140,19 +141,21 @@ def _forced_fix(item: Item) -> Item:
 def _parse_item(findings: list[Finding], entry: Any) -> tuple[int, Item]:
     """Один элемент `items` → (номер находки, пункт)."""
     if not isinstance(entry, dict):
-        raise FormError("элемент items не объект")
+        raise FormError(t("элемент items не объект"))
     no = entry.get("finding")
     if isinstance(no, bool) or not isinstance(no, int) or not 1 <= no <= len(findings):
-        raise FormError(f"неизвестная находка: {no!r}")
+        raise FormError(t("неизвестная находка: {no!r}").format(no=no))
     kind = entry.get("kind")
     if kind not in KINDS:
-        raise FormError(f'находка {no}: kind должен быть "fix" или "decision"')
+        raise FormError(
+            t('находка {no}: kind должен быть "fix" или "decision"').format(no=no)
+        )
     finding = findings[no - 1]
     if kind == "fix":
         return no, Item(finding, "fix", "", [])
     question = entry.get("question")
     if not isinstance(question, str) or not question.strip():
-        raise FormError(f"находка {no}: у decision нет вопроса")
+        raise FormError(t("находка {no}: у decision нет вопроса").format(no=no))
     return no, Item(finding, "decision", question, _parse_options(no, entry))
 
 
@@ -160,20 +163,26 @@ def _parse_options(no: int, entry: dict[str, Any]) -> list[Option]:
     """Варианты decision: 2–3 штуки, ровно один рекомендован."""
     raw = entry.get("options")
     if not isinstance(raw, list) or not MIN_OPTIONS <= len(raw) <= MAX_OPTIONS:
-        raise FormError(f"находка {no}: нужно {MIN_OPTIONS}–{MAX_OPTIONS} варианта")
+        raise FormError(
+            t("находка {no}: нужно {low}–{high} варианта").format(
+                no=no, low=MIN_OPTIONS, high=MAX_OPTIONS
+            )
+        )
     options = [_parse_option(no, o) for o in raw]
     if sum(o.recommended for o in options) != 1:
-        raise FormError(f"находка {no}: рекомендован должен быть ровно один вариант")
+        raise FormError(
+            t("находка {no}: рекомендован должен быть ровно один вариант").format(no=no)
+        )
     return options
 
 
 def _parse_option(no: int, raw: Any) -> Option:
     """Один вариант; `removes`/`downgrades` — списки строк (по умолчанию [])."""
     if not isinstance(raw, dict):
-        raise FormError(f"находка {no}: вариант не объект")
+        raise FormError(t("находка {no}: вариант не объект").format(no=no))
     label = raw.get("label")
     if not isinstance(label, str) or not label.strip():
-        raise FormError(f"находка {no}: у варианта нет label")
+        raise FormError(t("находка {no}: у варианта нет label").format(no=no))
     return Option(
         label,
         raw.get("recommended") is True,
@@ -186,7 +195,11 @@ def _strings(no: int, raw: dict[str, Any], field: str) -> list[str]:
     """Поле-список строк варианта."""
     value = raw.get(field, [])
     if not isinstance(value, list) or not all(isinstance(s, str) for s in value):
-        raise FormError(f"находка {no}: {field} должен быть списком строк")
+        raise FormError(
+            t("находка {no}: {field} должен быть списком строк").format(
+                no=no, field=field
+            )
+        )
     return list(value)
 
 

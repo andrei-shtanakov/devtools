@@ -232,6 +232,12 @@ REFUSALS: tuple[type[Exception], ...] = (
 )
 
 
+def _lock_busy(exc: run_lock.LockBusy) -> str:
+    """Отказ «прогон занят» на языке вызова (#769)."""
+    busy = t(run_lock.BUSY).format(run_id=exc.run_id)
+    return t(LOCK_BUSY).format(exc=busy)
+
+
 def cli(argv: list[str] | None = None) -> int:
     """Точка входа обёртки `dfl`: вывод дублируется в запись сбоя.
 
@@ -829,7 +835,7 @@ def reply_cmd(cwd: Path, subject: str | None, qid: str, text: str) -> int:
         with run_lock.run_lock(run_dir.name):
             pending.record(run_dir, qid, text)
     except run_lock.LockBusy as exc:
-        raise DflError(t(LOCK_BUSY).format(exc=exc)) from exc
+        raise DflError(_lock_busy(exc)) from exc
     except pending.PendingError as exc:
         raise DflError(str(exc)) from exc
     say(t(pending.ANSWERED))
@@ -1504,7 +1510,7 @@ def _write_pause_op(state: rs.RunState, *, complete: bool) -> None:
             else:
                 rs.op_start(now, key, revised=True)
     except run_lock.LockBusy as exc:
-        raise DflError(t(LOCK_BUSY).format(exc=exc)) from exc
+        raise DflError(_lock_busy(exc)) from exc
 
 
 def _say_not_converged(
@@ -2054,7 +2060,7 @@ def _manual_save(state: rs.RunState) -> None:
             now.ops[MANUAL_OP] = state.ops[MANUAL_OP]
             rs.save(now)
     except run_lock.LockBusy as exc:
-        raise DflError(t(LOCK_BUSY).format(exc=exc)) from exc
+        raise DflError(_lock_busy(exc)) from exc
 
 
 def _select_customer(
@@ -2540,7 +2546,7 @@ def abandon(cwd: Path, subject: str | None) -> int:
             try:
                 stack.enter_context(run_lock.run_lock(run_id))
             except run_lock.LockBusy as exc:
-                raise DflError(t(LOCK_BUSY).format(exc=exc)) from exc
+                raise DflError(_lock_busy(exc)) from exc
         dest.mkdir(parents=True, exist_ok=False)
         for run_id in moved:
             shutil.move(str(rs.run_dir(run_id)), str(dest / run_id))

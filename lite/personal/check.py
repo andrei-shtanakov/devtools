@@ -126,7 +126,7 @@ def decomposition_problems(text: str, brief: Brief, *, lang: str = "ru") -> list
 
     `lang` — язык собственных текстов (уходят автору в промпт правки)."""
     checks, whole = split_decomposition(text)
-    problems = list(graph_findings(checks, whole))
+    problems = list(graph_findings(checks, whole, lang=lang))
     cited = _cited(checks)
     for fn in brief.functions:
         for k in range(1, len(fn.criteria) + 1):

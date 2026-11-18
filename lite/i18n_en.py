@@ -549,4 +549,143 @@ EN: dict[str, str] = {
         "unknown stage: {unknown}; allowed: personal path: "
         "{personal}; enterprise: {enterprise}"
     ),
+    # --- Task 7: edge-check, код, ручные проверки ---------------------------
+    "исправлю сам: {n}; вопросов к вам: до {m}": (
+        "I will fix myself: {n}; questions for you: up to {m}"
+    ),
+    "принять узел вопреки замечанию (запишется в журнал и в PR)": (
+        "accept the node despite the finding (recorded in the journal and the PR)"
+    ),
+    (
+        "принять узел вопреки всем {n} замечаниям правила {rule} "
+        "(перекрывает ответы по ним; запишется в журнал и в PR)"
+    ): (
+        "accept the node despite all {n} findings of rule {rule} (overrides the "
+        "answers on them; recorded in the journal and the PR)"
+    ),
+    "принятие вопреки не покрывает все замечания уровня — разбор остановлен": (
+        "accepting despite does not cover all findings of the level — resolution "
+        "stopped"
+    ),
+    "разбор остановлен — продолжить: dfl run": "resolution stopped — continue: dfl run",
+    "разбор замечаний невозможен: {exc}": "findings cannot be resolved: {exc}",
+    "разбор замечаний не состоялся: {exc}": "findings resolution failed: {exc}",
+    "замечания приняты вопреки — записано в журнал; проверяю снова": (
+        "findings accepted despite — recorded in the journal; checking again"
+    ),
+    "  то же правило, исправлю сам: {where}: {statement}": (
+        "  same rule, I will fix myself: {where}: {statement}"
+    ),
+    "замечание {where}: {statement}": "finding {where}: {statement}",
+    "удалит: {ids}": "removes: {ids}",
+    "понизит: {ids}": "downgrades: {ids}",
+    " (рекомендую)": " (recommended)",
+    "  исправлено: {where}: {statement}": "  fixed: {where}: {statement}",
+    "узел переписан ({names}): замечаний {n}; проверяю снова": (
+        "node rewritten ({names}): findings {n}; checking again"
+    ),
+    "файлы не возвращены: {names} — копии в {path}": (
+        "files not restored: {names} — copies in {path}"
+    ),
+    "переписывание {name} не состоялось: {why}": "rewriting {name} failed: {why}",
+    "переписанный файл не читается: {exc}": "the rewritten file cannot be read: {exc}",
+    (
+        "переписывание {name} отклонено — ослабляет узел без вашего решения: "
+        "{ids}; файл возвращён"
+    ): (
+        "rewriting {name} rejected — it weakens the node without your decision: "
+        "{ids}; file restored"
+    ),
+    "критерии в записи не названы": "the record names no criteria",
+    (
+        "edge-check {name}: вердикт {verdict} без блокирующих находок — "
+        "не пройдены критерии: {unmet}. Поправьте {name} по этим причинам и "
+        "повторите dfl run (повтор платный; {abandon})"
+    ): (
+        "edge-check {name}: verdict {verdict} without blocking findings — "
+        "criteria not met: {unmet}. Fix {name} for these reasons and repeat "
+        "dfl run (the repeat is paid; {abandon})"
+    ),
+    "без файла": "no file",
+    "если замечание на деле о {name} — поправьте его вручную": (
+        "if the finding is really about {name} — fix it by hand"
+    ),
+    (
+        "{path} можно поправить вручную (его собственное ребро не перепроверяется)"
+    ): "{path} can be fixed by hand (its own edge is not rechecked)",
+    "{brief} подтверждён в разговоре и меняется только новым интервью": (
+        "{brief} was confirmed in the conversation and changes only by a new interview"
+    ),
+    (
+        "edge-check {name}: замечания указывают не на {name}, а на "
+        "{paths} — {shown}. Разбор правит только {name}: "
+        "{advice}; затем повторите dfl run (повтор платный) — {abandon}"
+    ): (
+        "edge-check {name}: the findings point not at {name} but at {paths} — "
+        "{shown}. Resolution edits only {name}: {advice}; then repeat dfl run "
+        "(the repeat is paid) — {abandon}"
+    ),
+    (
+        "spec-loop (test): реализация задач запущена · подробнее (необязательно), "
+        "в каталоге проекта: spec-runner tui --spec-prefix={ws}-"
+    ): (
+        "spec-loop (test): task implementation started · details (optional), in "
+        "the project directory: spec-runner tui --spec-prefix={ws}-"
+    ),
+    "прогон {run_id} исполняется другим процессом": (
+        "run {run_id} is being executed by another process"
+    ),
+    "… думаю · {elapsed}": "… thinking · {elapsed}",
+    "нет ответа за {timeout} с": "no answer within {timeout} s",
+    "код {code}": "code {code}",
+    "что видно на деле (Enter — без комментария):": (
+        "what do you actually see (Enter — no comment):"
+    ),
+    "текст оговорки:": "caveat text:",
+    "проверяйте код из PR #{pr}: gh pr checkout {pr} (назад: git switch -)": (
+        "check the code from PR #{pr}: gh pr checkout {pr} (back: git switch -)"
+    ),
+    "PR #{pr} влит: проверяйте на обновлённой базе (git pull)": (
+        "PR #{pr} is merged: check on the updated base (git pull)"
+    ),
+    (
+        "⚠ в рабочем каталоге нет кода PR #{pr} — проверка пройдёт на старом коде; "
+        "сначала: gh pr checkout {pr}"
+    ): (
+        "⚠ the working directory lacks the code of PR #{pr} — the check would "
+        "run on old code; first: gh pr checkout {pr}"
+    ),
+    (
+        "⚠ в рабочем каталоге нет кода влитого PR #{pr} — проверка пройдёт на "
+        "старом коде; сначала: git pull"
+    ): (
+        "⚠ the working directory lacks the code of merged PR #{pr} — the check "
+        "would run on old code; first: git pull"
+    ),
+    "бандл прогона не прочитан: {exc} — повторите dfl run": (
+        "the run bundle was not read: {exc} — repeat dfl run"
+    ),
+    "публикация ответов не удалась: {exc} — повторите dfl run": (
+        "publishing the answers failed: {exc} — repeat dfl run"
+    ),
+    'нет списка "items"': 'no "items" list',
+    "находка {no} разобрана дважды": "finding {no} is sorted twice",
+    "не разобраны находки: {missing}": "findings not sorted: {missing}",
+    "элемент items не объект": "an items element is not an object",
+    "неизвестная находка: {no!r}": "unknown finding: {no!r}",
+    'находка {no}: kind должен быть "fix" или "decision"': (
+        'finding {no}: kind must be "fix" or "decision"'
+    ),
+    "находка {no}: у decision нет вопроса": "finding {no}: the decision has no question",
+    "находка {no}: нужно {low}–{high} варианта": (
+        "finding {no}: {low}–{high} options needed"
+    ),
+    "находка {no}: рекомендован должен быть ровно один вариант": (
+        "finding {no}: exactly one option must be recommended"
+    ),
+    "находка {no}: вариант не объект": "finding {no}: an option is not an object",
+    "находка {no}: у варианта нет label": "finding {no}: an option has no label",
+    "находка {no}: {field} должен быть списком строк": (
+        "finding {no}: {field} must be a list of strings"
+    ),
 }

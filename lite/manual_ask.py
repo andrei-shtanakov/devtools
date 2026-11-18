@@ -15,6 +15,7 @@ from pathlib import Path
 from governance import manual_checks as mc
 from governance.auto_tasks import notice
 from lite import pending
+from lite.i18n import t
 from lite.i18n_en import EN
 from lite.interview_chat import Read, read_answer
 
@@ -35,6 +36,8 @@ STALE_MERGED_WARNING = (
     "⚠ в рабочем каталоге нет кода влитого PR #{pr} — проверка пройдёт на "
     "старом коде; сначала: git pull"
 )
+BUNDLE_UNREAD = "бандл прогона не прочитан: {exc} — повторите dfl run"
+PUBLISH_FAILED = "публикация ответов не удалась: {exc} — повторите dfl run"
 
 #: формы стопа на обоих языках: английские — из каталога, чтобы не разойтись
 _PAUSED_FORMS = (PAUSED, EN[PAUSED])
@@ -63,11 +66,11 @@ def ask_one(check: mc.ManualCheck, read: Read, *, lang: str = "ru") -> dict | No
         if verdict == mc.DONE:
             return {"verdict": verdict, "note": ""}
         if verdict == mc.NOT_DONE:
-            notice(NOTE_PROMPT)
+            notice(t(NOTE_PROMPT))
             note = read_answer(read)
             return None if note is None else {"verdict": verdict, "note": note}
         while True:
-            notice(CAVEAT_PROMPT)
+            notice(t(CAVEAT_PROMPT))
             note = read_answer(read)
             if note is None:
                 return None
@@ -111,7 +114,7 @@ def _merged(facts: dict) -> bool:
 
 def code_hint(pr: int, facts: dict) -> str:
     """Где проверять: открытый (или неизвестный) PR — его ветка, влитый — база."""
-    return (MERGED_HINT if _merged(facts) else CHECKOUT_HINT).format(pr=pr)
+    return t(MERGED_HINT if _merged(facts) else CHECKOUT_HINT).format(pr=pr)
 
 
 def _code_commit(facts: dict) -> str | None:
@@ -137,7 +140,7 @@ def stale_warning(facts: dict, pr: int, workdir: Path | None) -> str | None:
     if _git_ok(workdir, "merge-base", "--is-ancestor", commit, "HEAD"):
         return None
     warning = STALE_MERGED_WARNING if _merged(facts) else STALE_WARNING
-    return warning.format(pr=pr)
+    return t(warning).format(pr=pr)
 
 
 def _parsed(text: str | None) -> dict | None:
@@ -214,7 +217,7 @@ def settle(
         try:
             checks = mc.collect(*load_texts())
         except (OSError, ValueError) as exc:
-            return f"бандл прогона не прочитан: {exc} — повторите dfl run"
+            return t(BUNDLE_UNREAD).format(exc=exc)
         record.update(
             status="started",
             checks=[mc.as_dict(c) for c in checks],
@@ -228,7 +231,7 @@ def settle(
         return None
     todo = mc.unanswered(record)
     if todo and not tty and run_dir is None:
-        return NO_TTY.format(n=len(todo))
+        return t(NO_TTY).format(n=len(todo))
     facts = pr_state(ops, repo_slug, pr) if todo else {}
     hint = code_hint(pr, facts)
     if todo and tty:
@@ -240,7 +243,7 @@ def settle(
         if isinstance(answer, str):
             return answer
         if answer is None:
-            return PAUSED
+            return t(PAUSED)
         answer.update(at=date.today().isoformat(), issue=None)
         record["answers"][check.beh_id] = answer
         save()
@@ -256,5 +259,5 @@ def settle(
             lang=lang,
         )
     except Exception as exc:  # noqa: BLE001 - любой сбой форджи — стоп с причиной
-        return f"публикация ответов не удалась: {exc} — повторите dfl run"
+        return t(PUBLISH_FAILED).format(exc=exc)
     return None

@@ -71,6 +71,24 @@ ANSWER_HELP = (
 REMOTE_HELP = "номер варианта · «своё: …» · «не согласен: <почему>»"
 REASK = "не понял ответ — номер варианта, «своё: …», «не согласен: …» или «пропустить»"
 NO_REASON = "напишите причину после «не согласен:»"
+#: строки экрана разбора (шаблоны; перевод — `i18n.t` в месте вывода)
+UNRESOLVABLE = "разбор замечаний невозможен: {exc}"
+TRIAGE_FAILED = "разбор замечаний не состоялся: {exc}"
+OVERRIDDEN_LINE = "замечания приняты вопреки — записано в журнал; проверяю снова"
+SAME_RULE_LINE = "  то же правило, исправлю сам: {where}: {statement}"
+FINDING_LINE = "замечание {where}: {statement}"
+REMOVES = "удалит: {ids}"
+DOWNGRADES = "понизит: {ids}"
+RECOMMENDED = " (рекомендую)"
+FIXED_LINE = "  исправлено: {where}: {statement}"
+REWRITTEN = "узел переписан ({names}): замечаний {n}; проверяю снова"
+NOT_RESTORED = "файлы не возвращены: {names} — копии в {path}"
+REVISE_FAILED = "переписывание {name} не состоялось: {why}"
+UNREADABLE_AFTER = "переписанный файл не читается: {exc}"
+WEAKENED = (
+    "переписывание {name} отклонено — ослабляет узел без вашего решения: "
+    "{ids}; файл возвращён"
+)
 KIND_LABELS = {
     "option": "",
     "own": OWN_PREFIX + " ",
@@ -289,7 +307,7 @@ def resolve_scope(
         nodes = _read_files(scope, dict.fromkeys(f.path for f in findings if f.path))
         bases = _bases(scope, findings)
     except _Unreadable as exc:
-        say(f"разбор замечаний невозможен: {exc}")
+        say(i18n.t(UNRESOLVABLE).format(exc=exc))
         return Outcome.NOT_APPLICABLE
     run_dir = scope.run_dir
     waiting = scope.waiting if scope.waiting is not None else Waiting()
@@ -313,7 +331,7 @@ def resolve_scope(
             lang=scope.lang,
         )
     except (FormError, AgentUnavailable) as exc:
-        say(f"разбор замечаний не состоялся: {exc}")
+        say(i18n.t(TRIAGE_FAILED).format(exc=exc))
         return Outcome.STOPPED
     notes: set[str] = set()
     visible = [_visible(i) for i in items]
@@ -324,9 +342,9 @@ def resolve_scope(
     overrides = ej.overridden(run_dir, scope.wave)
     if {f.digest for f in findings} <= overrides:
         if override.accepted(records, overrides) is not None:
-            say("замечания приняты вопреки — записано в журнал; проверяю снова")
+            say(i18n.t(OVERRIDDEN_LINE))
             return Outcome.OVERRIDDEN
-        _note(notes, refusal or NOT_COVERED)
+        _note(notes, refusal or i18n.t(NOT_COVERED))
         return Outcome.STOPPED
     return _rewrite(scope, findings, nodes, revise, round_no, calls, overrides)
 
@@ -335,7 +353,9 @@ def override_offer(n: int, rule: str) -> str:
     """Вариант «принять вопреки»: одна находка — прежняя строка; несколько
     находок одного правила на том же тексте (общий digest) — все сразу,
     перекрывая ответы по ним."""
-    return OVERRIDE_OFFER if n == 1 else OVERRIDE_GROUP.format(rule=rule, n=n)
+    if n == 1:
+        return i18n.t(OVERRIDE_OFFER)
+    return i18n.t(OVERRIDE_GROUP).format(rule=rule, n=n)
 
 
 def _note(notes: set[str], text: str) -> None:
@@ -516,7 +536,7 @@ def _ask_all(
         memory[q.item.finding.key].offer_override for q in questions
     ):
         _note(notes, refusal)
-    say(FIXING.format(n=len(items) - len(questions), m=len(questions)))
+    say(i18n.t(FIXING).format(n=len(items) - len(questions), m=len(questions)))
     accepted_groups: set[str] = set()
     chosen: list[ej.Decision] = []
     for q in questions:
@@ -527,7 +547,7 @@ def _ask_all(
         if decision is None:
             got = _ask(scope.run_dir, q, question, asked, round_no)
             if got is Outcome.STOPPED:
-                say(STOPPED_LINE)
+                say(i18n.t(STOPPED_LINE))
             if isinstance(got, Outcome):
                 return got
             decision = replace(got, batch=asked.waiting.batch)
@@ -591,11 +611,13 @@ def edge_question(q: _Question, question: str) -> pending.Question:
 def _head_lines(q: _Question, question: str) -> list[str]:
     """Замечание, пункты группы, которые исправлю сам, и вопрос."""
     f = q.item.finding
+    same = i18n.t(SAME_RULE_LINE)
     listed = [
-        f"  то же правило, исправлю сам: {_where(one.finding)}: {one.finding.statement}"
+        same.format(where=_where(one.finding), statement=one.finding.statement)
         for one in q.listed
     ]
-    return [f"замечание {_where(f)}: {f.statement}", *listed, question]
+    head = i18n.t(FINDING_LINE).format(where=_where(f), statement=f.statement)
+    return [head, *listed, question]
 
 
 def _ask(
@@ -669,11 +691,13 @@ def _quick(line: str) -> bool:
 
 def _option_line(o: Option) -> str:
     """Вариант с эффектами: что удалит и что понизит — видно до выбора."""
-    effects = ([f"удалит: {', '.join(o.removes)}"] if o.removes else []) + (
-        [f"понизит: {', '.join(o.downgrades)}"] if o.downgrades else []
+    effects = (
+        [i18n.t(REMOVES).format(ids=", ".join(o.removes))] if o.removes else []
+    ) + (
+        [i18n.t(DOWNGRADES).format(ids=", ".join(o.downgrades))] if o.downgrades else []
     )
     tail = f", {'; '.join(effects)}" if effects else ""
-    return f"{o.label}{tail}{' (рекомендую)' if o.recommended else ''}"
+    return f"{o.label}{tail}{i18n.t(RECOMMENDED) if o.recommended else ''}"
 
 
 def _parse(
@@ -761,8 +785,8 @@ def _rewrite(
         _restore(scope, nodes, done)
         raise
     for f in todo:
-        say(f"  исправлено: {_where(f)}: {f.statement}", 1)
-    say(f"узел переписан ({', '.join(done)}): замечаний {len(todo)}; проверяю снова")
+        say(i18n.t(FIXED_LINE).format(where=_where(f), statement=f.statement), 1)
+    say(i18n.t(REWRITTEN).format(names=", ".join(done), n=len(todo)))
     return Outcome.REVISED
 
 
@@ -796,8 +820,9 @@ def _restore(scope: Scope, nodes: dict[str, str], names: list[str]) -> None:
             failed.append(name)
     if failed:
         say(
-            f"файлы не возвращены: {', '.join(failed)} — копии в "
-            f"{scope.run_dir / REVISE_DIR}"
+            i18n.t(NOT_RESTORED).format(
+                names=", ".join(failed), path=scope.run_dir / REVISE_DIR
+            )
         )
 
 
@@ -830,7 +855,8 @@ def _revise_file(
         decisions or _NO_DECISIONS[scope.lang],
     )
     if outcome.code != 0:
-        return f"переписывание {name} не состоялось: {outcome.reason or outcome.code}"
+        why = outcome.reason or outcome.code
+        return i18n.t(REVISE_FAILED).format(name=name, why=why)
     return None
 
 
@@ -846,11 +872,8 @@ def _weakened(
     try:
         after = _read_node(scope, name)
     except _Unreadable as exc:
-        return f"переписанный файл не читается: {exc}"
+        return i18n.t(UNREADABLE_AFTER).format(exc=exc)
     bad = node_guard.weakened(before, after, *allows)
     if not bad:
         return None
-    return (
-        f"переписывание {name} отклонено — ослабляет узел без вашего решения: "
-        f"{', '.join(bad)}; файл возвращён"
-    )
+    return i18n.t(WEAKENED).format(name=name, ids=", ".join(bad))

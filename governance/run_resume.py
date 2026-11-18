@@ -22,6 +22,53 @@ RUN_BRANCH_PREFIX = "spec-runner/run-"
 #: без упавших задач возвращает 0, и PR без этой сверки приняли бы за готовый
 INCOMPLETE_EXIT = -1
 
+#: тексты экрана по языку (личный путь — язык прогона, #769; enterprise — ru)
+_TEXTS: dict[str, dict[str, str]] = {
+    "ru": {
+        "unread": (
+            "счётчик задач ветки {branch} не прочитан — integration-PR #{pr} "
+            "не принят как готовый; повторите dfl run (сбой сети пройдёт), "
+            "а если tasks.md на ветке нет — разберите PR вручную"
+        ),
+        "unread_tail": "счётчик задач не прочитан",
+        "done_tail": "сделано {done} из {total} задач",
+        "banner": "▶ продолжаю проект «{subject}» · {repo}\n  ветка {branch} · {tail}",
+        "resume": (
+            "продолжить ветку {branch} пока нельзя: spec-runner не умеет "
+            "продолжать начатую ветку (spec-runner#678), а новую dfl не создаёт, "
+            "чтобы не потерять сделанное. Продолжить — влейте PR #{pr} в main и "
+            "повторите dfl run; начать заново — закройте PR #{pr} и повторите "
+            "dfl run"
+        ),
+        "several": (
+            "открыто несколько частичных integration-PR прогона: {listed} — "
+            "закройте лишние и повторите dfl run"
+        ),
+    },
+    "en": {
+        "unread": (
+            "the task counter of branch {branch} was not read — integration PR "
+            "#{pr} is not accepted as ready; repeat dfl run (a network failure "
+            "will pass), and if the branch has no tasks.md — sort the PR out by "
+            "hand"
+        ),
+        "unread_tail": "task counter not read",
+        "done_tail": "{done} of {total} tasks done",
+        "banner": "▶ continuing project “{subject}” · {repo}\n  branch {branch} · {tail}",
+        "resume": (
+            "branch {branch} cannot be continued yet: spec-runner cannot continue "
+            "a started branch (spec-runner#678), and dfl does not create a new "
+            "one so as not to lose the work done. To continue — merge PR #{pr} "
+            "into main and repeat dfl run; to start over — close PR #{pr} and "
+            "repeat dfl run"
+        ),
+        "several": (
+            "several partial integration PRs of the run are open: {listed} — "
+            "close the extra ones and repeat dfl run"
+        ),
+    },
+}
+
 
 class _BranchReader(Protocol):
     def fetch_branch(self, target_dir: str, branch: str) -> bool: ...
@@ -74,17 +121,14 @@ def incomplete(progress: tuple[int, int] | None) -> bool:
     return progress is not None and progress[0] < progress[1]
 
 
-def unread_stop(branch: str, pr: int) -> str:
+def unread_stop(branch: str, pr: int, *, lang: str = "ru") -> str:
     """Причина остановки: готовность PR прогона не установлена.
 
     Счётчик здесь — вход решения «PR готов», не украшение плашки:
     неизвестность — стоп, а не «всё сделано» (fail-closed, ревью #805).
+    `lang` — язык экрана (личный путь — язык прогона, #769).
     """
-    return (
-        f"счётчик задач ветки {branch} не прочитан — integration-PR #{pr} "
-        "не принят как готовый; повторите dfl run (сбой сети пройдёт), "
-        "а если tasks.md на ветке нет — разберите PR вручную"
-    )
+    return _TEXTS[lang]["unread"].format(branch=branch, pr=pr)
 
 
 def pr_branch(prs: list[dict], pr: int) -> str | None:
@@ -111,32 +155,31 @@ def read_progress(
 
 
 def banner(
-    subject: str, repo_slug: str, branch: str, progress: tuple[int, int] | None
+    subject: str,
+    repo_slug: str,
+    branch: str,
+    progress: tuple[int, int] | None,
+    *,
+    lang: str = "ru",
 ) -> str:
     """Плашка проекта, который продолжается (форма — решение владельца)."""
+    texts = _TEXTS[lang]
     tail = (
-        "счётчик задач не прочитан"
+        texts["unread_tail"]
         if progress is None
-        else f"сделано {progress[0]} из {progress[1]} задач"
+        else texts["done_tail"].format(done=progress[0], total=progress[1])
     )
-    return f"▶ продолжаю проект «{subject}» · {repo_slug}\n  ветка {branch} · {tail}"
+    return texts["banner"].format(
+        subject=subject, repo=repo_slug, branch=branch, tail=tail
+    )
 
 
-def resume_stop(branch: str, pr: int) -> str:
+def resume_stop(branch: str, pr: int, *, lang: str = "ru") -> str:
     """Причина остановки: продолжить ветку нельзя, новую dfl не создаёт."""
-    return (
-        f"продолжить ветку {branch} пока нельзя: spec-runner не умеет "
-        "продолжать начатую ветку (spec-runner#678), а новую dfl не создаёт, "
-        f"чтобы не потерять сделанное. Продолжить — влейте PR #{pr} в main и "
-        f"повторите dfl run; начать заново — закройте PR #{pr} и повторите "
-        "dfl run"
-    )
+    return _TEXTS[lang]["resume"].format(branch=branch, pr=pr)
 
 
-def several_stop(prs: list[int]) -> str:
+def several_stop(prs: list[int], *, lang: str = "ru") -> str:
     """Причина остановки: частичных PR больше одного — выбирает человек."""
     listed = ", ".join(f"#{n}" for n in prs)
-    return (
-        f"открыто несколько частичных integration-PR прогона: {listed} — "
-        "закройте лишние и повторите dfl run"
-    )
+    return _TEXTS[lang]["several"].format(listed=listed)

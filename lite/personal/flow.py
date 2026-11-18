@@ -493,11 +493,14 @@ def _node_rounds(ctx: _Ctx, kind: str, saved: dict | None) -> bool | None:
 
 def _no_findings_reason(name: str, result: NodeCheck) -> str:
     """Стоп по вердикту без блокирующих находок: что не прошло и что делать."""
-    unmet = "; ".join(result.unmet) or "критерии в записи не названы"
-    return (
-        f"edge-check {name}: вердикт {result.verdict} без блокирующих находок — "
-        f"не пройдены критерии: {unmet}. Поправьте {name} по этим причинам и "
-        f"повторите dfl run (повтор платный; {ABANDON})"
+    unmet = "; ".join(result.unmet) or t("критерии в записи не названы")
+    return _msg(
+        "edge-check {name}: вердикт {verdict} без блокирующих находок — "
+        "не пройдены критерии: {unmet}. Поправьте {name} по этим причинам и "
+        "повторите dfl run (повтор платный; {abandon})",
+        name=name,
+        verdict=result.verdict,
+        unmet=unmet,
     )
 
 
@@ -505,27 +508,39 @@ def _foreign_findings_reason(name: str, foreign: list[ej.Finding]) -> str:
     """Стоп по находкам не на узле (на основании, обычно `00-brief.md`):
     разбор переписывает только `name`, поэтому называем файл, замечание и
     честный выход."""
+    no_file = t("без файла")
     shown = "; ".join(
-        f"{f.rule_id} {f.cls} ({f.path or 'без файла'}:{f.lines}): {f.statement}"
+        f"{f.rule_id} {f.cls} ({f.path or no_file}:{f.lines}): {f.statement}"
         for f in foreign
     )
-    paths = sorted({f.path or "без файла" for f in foreign})
+    paths = sorted({f.path or no_file for f in foreign})
     brief = FILENAMES["brief"]
     nodes = [p for p in paths if p != brief and p in FILENAMES.values()]
-    advice = [f"если замечание на деле о {name} — поправьте его вручную"]
+    advice = [
+        _msg("если замечание на деле о {name} — поправьте его вручную", name=name)
+    ]
     advice += [
-        f"{p} можно поправить вручную (его собственное ребро не перепроверяется)"
+        _msg(
+            "{path} можно поправить вручную (его собственное ребро не перепроверяется)",
+            path=p,
+        )
         for p in nodes
     ]
     if brief in paths:
         advice.append(
-            f"{brief} подтверждён в разговоре и меняется только новым интервью"
+            _msg(
+                "{brief} подтверждён в разговоре и меняется только новым интервью",
+                brief=brief,
+            )
         )
-    return (
-        f"edge-check {name}: замечания указывают не на {name}, а на "
-        f"{', '.join(paths)} — {shown}. Разбор правит только {name}: "
-        f"{'; '.join(advice)}; затем повторите dfl run (повтор платный) — "
-        f"{ABANDON}"
+    return _msg(
+        "edge-check {name}: замечания указывают не на {name}, а на "
+        "{paths} — {shown}. Разбор правит только {name}: "
+        "{advice}; затем повторите dfl run (повтор платный) — {abandon}",
+        name=name,
+        paths=", ".join(paths),
+        shown=shown,
+        advice="; ".join(advice),
     )
 
 
@@ -1185,7 +1200,7 @@ def _partial_stop(ctx: _Ctx, prs: list[dict], before: list[int]) -> bool:
     run = ctx.run
     found = run_resume.resume_candidates(prs, before)
     if len(found) > 1:
-        ctx.stop(run_resume.several_stop([n for n, _head in found]))
+        ctx.stop(run_resume.several_stop([n for n, _head in found], lang=run.language))
         return True
     if not found:
         return False
@@ -1193,9 +1208,18 @@ def _partial_stop(ctx: _Ctx, prs: list[dict], before: list[int]) -> bool:
     progress = run_resume.read_progress(
         ctx.ops, run.target_dir, branch, TASKS_PATH.format(ws_id=run.ws_id)
     )
-    say(run_resume.banner(run.subject, run.repo_slug, branch, progress))
-    ctx.stop(run_resume.resume_stop(branch, pr))
+    _resume_banner(ctx, branch, pr, progress)
     return True
+
+
+def _resume_banner(
+    ctx: _Ctx, branch: str, pr: int, progress: tuple[int, int] | None
+) -> None:
+    """Плашка продолжения и стоп «ветку продолжить нельзя» (язык прогона)."""
+    run = ctx.run
+    lang = run.language
+    say(run_resume.banner(run.subject, run.repo_slug, branch, progress, lang=lang))
+    ctx.stop(run_resume.resume_stop(branch, pr, lang=lang))
 
 
 def _step_code_run(ctx: _Ctx) -> bool:
@@ -1225,13 +1249,14 @@ def _step_code_run(ctx: _Ctx) -> bool:
         before = sorted(set(run.before_prs) | set(current))
     run.before_prs, run.run_exit = before, None
     save(run)  # write-ahead: PR, открытые до запуска, не примутся
-    notice(TUI_HINT.format(ws=run.ws_id))
+    notice(t(TUI_HINT).format(ws=run.ws_id))
     rc = run_progress.watched(
         lambda: ctx.ops.spec_runner(run.target_dir, _run_args(run)),
         target_dir=run.target_dir,
         prefix=f"{run.ws_id}-",
         tasks_rel=TASKS_PATH.format(ws_id=run.ws_id),
         emit=notice,
+        lang=run.language,
     )  # события задач и живой отсчёт на экране (#765)
     run.run_exit = rc
     save(run)
@@ -1279,7 +1304,7 @@ def _incomplete_stop(ctx: _Ctx, pr: int) -> bool:
         ctx.ops, run.target_dir, branch, TASKS_PATH.format(ws_id=run.ws_id)
     )
     if progress is None:  # готовность не установлена — запись не трогаем
-        ctx.stop(run_resume.unread_stop(branch, pr))
+        ctx.stop(run_resume.unread_stop(branch, pr, lang=run.language))
         return True
     if not run_resume.incomplete(progress):
         return False
@@ -1289,8 +1314,7 @@ def _incomplete_stop(ctx: _Ctx, pr: int) -> bool:
     # «не выполнено» не задвоится: `mc.publish` ищет его по маркеру прогона
     run.manual = {}
     save(run)
-    say(run_resume.banner(run.subject, run.repo_slug, branch, progress))
-    ctx.stop(run_resume.resume_stop(branch, pr))
+    _resume_banner(ctx, branch, pr, progress)
     return True
 
 
