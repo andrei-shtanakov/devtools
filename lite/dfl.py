@@ -556,7 +556,11 @@ def _parser() -> argparse.ArgumentParser:
     p_pen = add("pending", help="вопрос, на котором прогон ждёт ответа")
     p_pen.add_argument("--json", action="store_true", help="запись как JSON")
     p_pen.add_argument("--subject", help="тема конвейера, если их несколько")
-    p_rpl = add("reply", help="ответ на ждущий вопрос (затем dfl run)")
+    p_rpl = add(
+        "reply",
+        help="ответ на ждущий вопрос: review, remarks-confirm, edge, manual "
+        "(затем dfl run)",
+    )
     p_rpl.add_argument("--id", required=True, help="id вопроса из dfl pending")
     src = p_rpl.add_mutually_exclusive_group(required=True)
     src.add_argument("--text", help="текст ответа")
