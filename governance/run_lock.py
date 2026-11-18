@@ -31,8 +31,16 @@ class RunLock:
     fd: int
 
 
+#: текст `LockBusy` (шаблон: `lite.dfl` переводит его на язык вызова, #769)
+BUSY = "прогон {run_id} исполняется другим процессом"
+
+
 class LockBusy(RuntimeError):
-    """Прогон исполняется другим процессом."""
+    """Прогон исполняется другим процессом; `run_id` — какой."""
+
+    def __init__(self, run_id: str) -> None:
+        super().__init__(BUSY.format(run_id=run_id))
+        self.run_id = run_id
 
 
 def lock_path(run_id: str) -> Path:
@@ -52,7 +60,7 @@ def run_lock(run_id: str) -> Iterator[RunLock]:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise LockBusy(f"прогон {run_id} исполняется другим процессом") from exc
+            raise LockBusy(run_id) from exc
         yield RunLock(run_id, fd)
     finally:
         os.close(fd)

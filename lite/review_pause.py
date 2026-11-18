@@ -27,16 +27,24 @@ from governance.review_remarks import (  # noqa: F401 — публичные и�
     pr_section,
     record,
 )
+from lite import i18n
 from lite import pending as pending_mod
 from lite.interview_chat import STOP_WORD, Read, read_answer
 
 PERSONAL_STAGES = ("brief", "design", "decomposition")
 DONE_WORDS = pending_mod.REVIEW_DONE_WORDS
-_YES_WORDS = frozenset({"1", "да"})
+_YES_WORDS = frozenset({"1", "да", "yes"})
 _NO_WORDS = pending_mod.CONFIRM_KEEP_WORDS
 #: что принимает `dfl reply` на паузе этапа, кроме брифа (#766 срез 2)
 REMOTE_ACCEPTS = "«дальше» или замечания своими словами"
 UNCLEAR_ANSWER = "не понял ответ — номер или слово варианта"
+STAGE_READY = "этап «{label}» готов и прошёл проверку — посмотрите"
+STAGE_READY_SCREEN = "этап «{label}» готов и прошёл проверку — посмотрите:"
+PAUSE_HINT = (
+    "замечания своими словами (пустая строка — отправить); "
+    "«дальше» — без замечаний; {stop} — прервать"
+)
+UNKNOWN_STAGE = "неизвестный этап: {unknown}; допустимы: {stages}"
 #: вид правки → (вопрос, слово согласия): слово чужого вопроса — не согласие
 REMOVE, DOWNGRADE, CHANGE = "remove", "downgrade", "change"
 _QUESTIONS = {
@@ -61,7 +69,9 @@ def parse_flag(value: str, stages: tuple[str, ...]) -> tuple[str, ...]:
     unknown = [n for n in names if n not in stages]
     if unknown:
         raise ReviewError(
-            f"неизвестный этап: {', '.join(unknown)}; допустимы: {', '.join(stages)}"
+            i18n.t(UNKNOWN_STAGE).format(
+                unknown=", ".join(unknown), stages=", ".join(stages)
+            )
         )
     return names
 
@@ -73,13 +83,10 @@ def from_config(names: tuple[str, ...], stages: tuple[str, ...]) -> tuple[str, .
 
 def ask(stage_label: str, paths: list[Path], *, read: Read) -> str | None:
     """Экран паузы. `""` — «дальше»; текст — замечания; `None` — `/стоп`/EOF."""
-    notice(f"этап «{stage_label}» готов и прошёл проверку — посмотрите:")
+    notice(i18n.t(STAGE_READY_SCREEN).format(label=stage_label))
     for path in paths:
         notice(f"  file://{path.resolve()}")
-    notice(
-        "замечания своими словами (пустая строка — отправить); "
-        f"«дальше» — без замечаний; {STOP_WORD} — прервать"
-    )
+    notice(i18n.t(PAUSE_HINT).format(stop=i18n.t(STOP_WORD)))
     answer = read_answer(read, quick=lambda s: s.strip().casefold() in DONE_WORDS)
     if answer is None:
         return None
@@ -91,9 +98,9 @@ def question(stage: str, stage_label: str, paths: list[Path]) -> pending_mod.Que
     return pending_mod.Question(
         pending_mod.REVIEW,
         stage,
-        f"этап «{stage_label}» готов и прошёл проверку — посмотрите",
+        i18n.t(STAGE_READY).format(label=stage_label),
         links=tuple(f"file://{p.resolve()}" for p in paths),
-        accepts="«дальше»" if stage == "brief" else REMOTE_ACCEPTS,
+        accepts=i18n.t("«дальше»" if stage == "brief" else REMOTE_ACCEPTS),
     )
 
 
@@ -129,12 +136,12 @@ def confirm_removals(
     for item in ids:
         question, word = _QUESTIONS[(kinds or {}).get(item, REMOVE)]
         title = (titles or {}).get(item, "")
-        notice(question.format(named=_named(item, title)))
-        yes = _YES_WORDS | {word}
+        notice(i18n.t(question).format(named=_named(item, title)))
+        yes = _YES_WORDS | _agree_words(word)
         answer = _choice(read, yes)
         while answer == "":
-            notice(UNCLEAR_ANSWER)
-            notice(question.format(named=_named(item, title)))
+            notice(i18n.t(UNCLEAR_ANSWER))
+            notice(i18n.t(question).format(named=_named(item, title)))
             answer = _choice(read, yes)
         if answer is None:
             return None
@@ -153,8 +160,15 @@ def _choice(read: Read, yes: frozenset[str]) -> str | None:
     return word if word in yes | _NO_WORDS else ""
 
 
+def _agree_words(word: str) -> frozenset[str]:
+    """Слово согласия вида правки на двух языках (`удалить` и `remove`)."""
+    return frozenset({word, pending_mod.AGREE_EN[word]})
+
+
 def _named(item: str, title: str) -> str:
-    return f"{item} — «{title}»" if title else item
+    if not title:
+        return item
+    return f"{item} — “{title}”" if i18n.current() == "en" else f"{item} — «{title}»"
 
 
 def confirm_question(
@@ -163,11 +177,14 @@ def confirm_question(
     """Вопрос «Удалить …?» (вид — `kind`) для `dfl pending`; тот же текст,
     что в терминале."""
     question, word = _QUESTIONS[kind]
+    options = (word, "оставить")
+    if i18n.current() == "en":
+        options = (pending_mod.AGREE_EN[word], "keep")
     return pending_mod.Question(
         pending_mod.REMARKS_CONFIRM,
         f"{stage}:{item}",
-        question.format(named=_named(item, title)),
-        options=(word, "оставить"),
+        i18n.t(question).format(named=_named(item, title)),
+        options=options,
     )
 
 
@@ -175,7 +192,7 @@ def confirm_answer(text: str, kind: str) -> bool | None:
     """Ответ на вопрос вида `kind`: `True` — согласие, `False` — оставить,
     `None` — не разобран (слово чужого вопроса — не согласие)."""
     word = text.strip().casefold()
-    if word in _YES_WORDS | {_QUESTIONS[kind][1]}:
+    if word in _YES_WORDS | _agree_words(_QUESTIONS[kind][1]):
         return True
     if word in _NO_WORDS:
         return False

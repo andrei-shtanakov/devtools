@@ -16,7 +16,6 @@ from collections.abc import Callable
 from pathlib import Path
 
 from governance.author_launch import AuthorCall, LaunchOutcome, launch_author
-from governance.edge_check.author_rules import DEFAULT_CONTRACTS
 from governance.edge_check.rules import load_rules
 from lite.personal.state import PersonalRun, run_dir
 
@@ -47,11 +46,75 @@ _PROMPT_FILES = {
 
 Launch = Callable[..., LaunchOutcome]
 
+#: Тексты промптов автора, которые добавляет код, по языку прогона.
+_TEXTS = {
+    "ru": {
+        "subject": "## Тема проекта (слова человека)\n\n{subject}",
+        "bases": (
+            "## Основания (читать из репозитория, пути от рабочего каталога)\n\n{paths}"
+        ),
+        "where": (
+            "## Куда писать\n\n"
+            "Запиши РОВНО один файл: {output} (этот абсолютный путь; "
+            "он станет {target}). В репозиторий "
+            "писать нельзя, больше ничего нигде не пиши."
+        ),
+        "revise": (
+            "## Режим правки\n\n"
+            "Перепиши файл, исправив ТОЛЬКО замечания ниже. Решения человека "
+            "применяй дословно. Где человек не согласен с замечанием, оставь текст "
+            "и запиши рядом строку «Решение заказчика: … Причина: …». Не удаляй и "
+            "не ослабляй проверки, задачи и решения сверх того, что прямо "
+            "разрешают решения человека.\n"
+            "\n--- ТЕКУЩИЙ УЗЕЛ ---\n{current}\n"
+            "\n--- ЗАМЕЧАНИЯ ---\n{findings}\n"
+            "\n--- РЕШЕНИЯ ЧЕЛОВЕКА ---\n{decisions}\n"
+        ),
+        "rules": (
+            "## Правила проверки (ребро {edge})\n\nУзел проверят по ним:\n{items}"
+        ),
+    },
+    "en": {
+        "subject": "## Project topic (the person's words)\n\n{subject}",
+        "bases": (
+            "## Bases (read from the repository, paths from the working directory)"
+            "\n\n{paths}"
+        ),
+        "where": (
+            "## Where to write\n\n"
+            "Write EXACTLY one file: {output} (this absolute path; "
+            "it will become {target}). Do not write into the repository, "
+            "do not write anything else anywhere."
+        ),
+        "revise": (
+            "## Revision mode\n\n"
+            "Rewrite the file, fixing ONLY the findings below. Apply the person's "
+            "decisions verbatim. Where the person disagrees with a finding, keep "
+            "the text and write next to it a line \"Owner's decision: … Reason: "
+            '…". Do not remove or weaken checks, tasks and decisions beyond '
+            "what the person's decisions explicitly allow.\n"
+            "\n--- CURRENT NODE ---\n{current}\n"
+            "\n--- FINDINGS ---\n{findings}\n"
+            "\n--- PERSON'S DECISIONS ---\n{decisions}\n"
+        ),
+        "rules": (
+            "## Check rules (edge {edge})\n\n"
+            "The node will be checked against them:\n{items}"
+        ),
+    },
+}
+
+
+def _prompts_dir(lang: str) -> Path:
+    """Каталог инструкций авторов: русские — `prompts/`, английские — `en/`."""
+    return PROMPTS / "en" if lang == "en" else PROMPTS
+
 
 def author_node(
-    run: PersonalRun, kind: str, *, launch: Launch = launch_author
+    run: PersonalRun, kind: str, *, launch: Launch = launch_author, lang: str = "ru"
 ) -> LaunchOutcome:
-    """Написать узел `kind` личного прогона через границу автора."""
+    """Написать узел `kind` личного прогона через границу автора (промпт на
+    языке `lang`)."""
     call = AuthorCall(
         run_id=run.run_id,
         run_dir=os.path.realpath(run_dir(run.run_id)),
@@ -60,7 +123,8 @@ def author_node(
         filename=_filename(kind),
     )
     return launch(
-        call, lambda out: build_prompt(kind, run.subject, run.bundle_dir, out)
+        call,
+        lambda out: build_prompt(kind, run.subject, run.bundle_dir, out, lang=lang),
     )
 
 
@@ -73,36 +137,37 @@ def revise_node(
     decisions: str,
     *,
     launch: Launch = launch_author,
+    lang: str = "ru",
 ) -> LaunchOutcome:
-    """Переписать узел по замечаниям edge-check (сигнатура `edge_resolve.Revise`)."""
+    """Переписать узел по замечаниям edge-check (сигнатура `edge_resolve.Revise`;
+    `lang` — язык промпта)."""
     _filename(kind)
     return launch(
         call,
         lambda out: revise_prompt(
-            kind, subject, call.bundle_dir, out, current, findings, decisions
+            kind, subject, call.bundle_dir, out, current, findings, decisions, lang=lang
         ),
     )
 
 
-def build_prompt(kind: str, subject: str, bundle_dir: str, output_path: str) -> str:
-    """Промпт автора узла: инструкция вида, основания, правила ребра, куда писать."""
+def build_prompt(
+    kind: str, subject: str, bundle_dir: str, output_path: str, *, lang: str = "ru"
+) -> str:
+    """Промпт автора узла: инструкция вида, основания, правила ребра, куда писать.
+
+    `lang` — язык прогона: инструкция, заголовки и каталог правил."""
     edge_id, bases = EDGES[kind]
+    texts = _TEXTS[lang]
     paths = "\n".join(f"- {role}: {bundle_dir}/{name}" for role, name in bases)
+    instruction = _prompts_dir(lang) / _PROMPT_FILES[kind]
+    target = f"{bundle_dir}/{FILENAMES[kind]}"
     return "\n\n".join(
         [
-            (PROMPTS / _PROMPT_FILES[kind]).read_text(encoding="utf-8"),
-            f"## Тема проекта (слова человека)\n\n{subject}",
-            (
-                "## Основания (читать из репозитория, пути от рабочего каталога)"
-                f"\n\n{paths}"
-            ),
-            _rules_block(edge_id),
-            (
-                "## Куда писать\n\n"
-                f"Запиши РОВНО один файл: {output_path} (этот абсолютный путь; "
-                f"он станет {bundle_dir}/{FILENAMES[kind]}). В репозиторий "
-                "писать нельзя, больше ничего нигде не пиши."
-            ),
+            instruction.read_text(encoding="utf-8"),
+            texts["subject"].format(subject=subject),
+            texts["bases"].format(paths=paths),
+            _rules_block(edge_id, lang),
+            texts["where"].format(output=output_path, target=target),
         ]
     )
 
@@ -115,21 +180,15 @@ def revise_prompt(
     current: str,
     findings: str,
     decisions: str,
+    *,
+    lang: str = "ru",
 ) -> str:
     """Промпт переписывания узла по замечаниям и решениям человека."""
-    base = build_prompt(kind, subject, bundle_dir, output_path)
-    return (
-        f"{base}\n\n"
-        "## Режим правки\n\n"
-        "Перепиши файл, исправив ТОЛЬКО замечания ниже. Решения человека "
-        "применяй дословно. Где человек не согласен с замечанием, оставь текст "
-        "и запиши рядом строку «Решение заказчика: … Причина: …». Не удаляй и "
-        "не ослабляй проверки, задачи и решения сверх того, что прямо "
-        "разрешают решения человека.\n"
-        f"\n--- ТЕКУЩИЙ УЗЕЛ ---\n{current}\n"
-        f"\n--- ЗАМЕЧАНИЯ ---\n{findings}\n"
-        f"\n--- РЕШЕНИЯ ЧЕЛОВЕКА ---\n{decisions}\n"
+    base = build_prompt(kind, subject, bundle_dir, output_path, lang=lang)
+    revise = _TEXTS[lang]["revise"].format(
+        current=current, findings=findings, decisions=decisions
     )
+    return f"{base}\n\n{revise}"
 
 
 def _filename(kind: str) -> str:
@@ -139,8 +198,10 @@ def _filename(kind: str) -> str:
     return FILENAMES[kind]
 
 
-def _rules_block(edge_id: str) -> str:
+def _rules_block(edge_id: str, lang: str = "ru") -> str:
     """Пункты правил ребра — те же, по которым узел потом проверит edge-check."""
-    rules = load_rules(edge_id, DEFAULT_CONTRACTS)
+    from lite.personal.check import contracts_dir  # check импортирует nodes
+
+    rules = load_rules(edge_id, contracts_dir(lang))
     items = "\n".join(f"- {it.id}: {it.text}" for it in rules.items)
-    return f"## Правила проверки (ребро {edge_id})\n\nУзел проверят по ним:\n{items}"
+    return _TEXTS[lang]["rules"].format(edge=edge_id, items=items)

@@ -26,6 +26,7 @@ from typing import Any
 import yaml
 
 from governance import run_progress
+from lite import i18n
 from lite.interview_state import SessionView
 
 Agent = Callable[[str], str]
@@ -674,15 +675,20 @@ def claude_agent(model: str) -> Agent:
                     text=True,
                     timeout=AGENT_TIMEOUT,
                     check=False,
-                )
+                ),
+                line=i18n.t(run_progress.THINKING),
             )
         except subprocess.TimeoutExpired as exc:
-            raise AgentUnavailable(f"нет ответа за {AGENT_TIMEOUT} с") from exc
+            raise AgentUnavailable(
+                i18n.t("нет ответа за {timeout} с").format(timeout=AGENT_TIMEOUT)
+            ) from exc
         except OSError as exc:
             raise AgentUnavailable(_first_line(str(exc)) or repr(exc)) from exc
         if done.returncode != 0:
             reason = _first_line(done.stderr or "")
-            raise AgentUnavailable(reason or f"код {done.returncode}")
+            raise AgentUnavailable(
+                reason or i18n.t("код {code}").format(code=done.returncode)
+            )
         return done.stdout
 
     return agent

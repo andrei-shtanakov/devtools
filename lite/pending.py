@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 from governance import manual_checks as mc
+from lite import i18n
 
 REVIEW = "review"
 MANUAL = "manual"
@@ -33,19 +34,32 @@ VERDICT_WORDS = {
     "3": mc.CAVEAT,
     "с оговоркой": mc.CAVEAT,
     "принять с оговоркой": mc.CAVEAT,
+    "passed": mc.DONE,
+    "failed": mc.NOT_DONE,
+    "passed with caveat": mc.CAVEAT,
 }
 #: слова «этап готов, дальше» для паузы ревью
-REVIEW_DONE_WORDS = frozenset({"дальше", "да", "ок", "1"})
+REVIEW_DONE_WORDS = frozenset({"дальше", "да", "ок", "1", "next", "yes", "ok", "done"})
 
 #: префиксы свободного ответа по узлу (как в `edge_resolve`)
 EDGE_OWN_PREFIX = "своё:"
 EDGE_DISAGREE_PREFIX = "не согласен:"
+#: те же префиксы на двух языках (русский — первым)
+EDGE_OWN_PREFIXES = (EDGE_OWN_PREFIX, "own:")
+EDGE_DISAGREE_PREFIXES = (EDGE_DISAGREE_PREFIX, "disagree:")
 #: слова «оставить как было» для подтверждения замечаний
-CONFIRM_KEEP_WORDS = frozenset({"2", "нет", "оставить", "оставить как было"})
+CONFIRM_KEEP_WORDS = frozenset({"2", "нет", "оставить", "оставить как было", "keep"})
+#: русское слово согласия вида правки → английское (`удалить` → `remove`)
+AGREE_EN = {"удалить": "remove", "снять": "drop", "принять": "accept"}
 
 NO_PENDING = "нет вопроса, ждущего ответа — dfl pending"
 STALE = "вопрос уже другой — dfl pending"
 ANSWERED = "ответ записан — продолжить: dfl run"
+#: строка «ждёт ответа» (начало — `manual_ask.WAIT_PREFIX` на обоих языках)
+WAIT_LINE = (
+    "ждёт ответа: {first} — вопрос: dfl pending{pick}; "
+    "ответ: dfl reply{pick} --id {qid} --text '…'"
+)
 REVIEW_REFUSAL = (
     "замечания к этапу пока принимаются только в терминале: dfl run; "
     "без замечаний — «дальше»"
@@ -172,10 +186,7 @@ def asker(run_dir: Path) -> Ask:
 def _line(qid: str, text: str, subject: str | None = None) -> str:
     first = text.splitlines()[0] if text.strip() else ""
     pick = f" --subject '{subject}'" if subject else ""
-    return (
-        f"ждёт ответа: {first} — вопрос: dfl pending{pick}; "
-        f"ответ: dfl reply{pick} --id {qid} --text '…'"
-    )
+    return i18n.t(WAIT_LINE).format(first=first, pick=pick, qid=qid)
 
 
 def wait_line(q: Question) -> str:
@@ -191,7 +202,7 @@ def wait_text(run_dir: Path, subject: str | None = None) -> str:
     if rec is None:
         return ""
     if answered(run_dir):
-        return ANSWERED
+        return i18n.t(ANSWERED)
     return _line(str(rec.get("id", "")), str(rec.get("text", "")), subject)
 
 
@@ -205,9 +216,9 @@ def parse_manual(text: str) -> dict:
 def _check_manual(text: str) -> str | None:
     parsed = parse_manual(text)
     if parsed["verdict"] is None:
-        return MANUAL_REFUSAL
+        return i18n.t(MANUAL_REFUSAL)
     if parsed["verdict"] == mc.CAVEAT and not parsed["note"]:
-        return MANUAL_REFUSAL
+        return i18n.t(MANUAL_REFUSAL)
     return None
 
 
@@ -220,8 +231,8 @@ def _check_review(text: str, rec: Mapping | None) -> str | None:
     if is_done(text):
         return None
     if rec is not None and rec.get("key") == "brief":
-        return REVIEW_REFUSAL
-    return None if text.strip() else REVIEW_EMPTY_REFUSAL
+        return i18n.t(REVIEW_REFUSAL)
+    return None if text.strip() else i18n.t(REVIEW_EMPTY_REFUSAL)
 
 
 def _options(rec: Mapping | None) -> list[str]:
@@ -232,10 +243,15 @@ def _check_confirm(text: str, rec: Mapping | None) -> str | None:
     options = _options(rec)
     yes = options[0] if options else "да"
     word = text.strip().casefold()
-    accepted = {"1", "да", yes.casefold()} | CONFIRM_KEEP_WORDS
+    en = AGREE_EN.get(yes.casefold(), "yes")
+    ru = {v: k for k, v in AGREE_EN.items()}.get(yes.casefold(), "да")
+    accepted = {"1", "да", "yes", yes.casefold(), en, ru} | CONFIRM_KEEP_WORDS
     if word in accepted:
         return None
-    return CONFIRM_REFUSAL.format(yes=yes)
+    if yes.casefold() in AGREE_EN.values():  # вопрос английского прогона
+        en = yes.casefold()
+    shown = en if i18n.current() == "en" else yes
+    return i18n.t(CONFIRM_REFUSAL).format(yes=shown)
 
 
 def _fold(text: str) -> str:
@@ -248,10 +264,10 @@ def _check_edge(text: str, rec: Mapping | None) -> str | None:
     if body.isascii() and body.isdigit() and 1 <= int(body) <= n:
         return None
     folded = _fold(body)
-    for prefix in (EDGE_OWN_PREFIX, EDGE_DISAGREE_PREFIX):
+    for prefix in (*EDGE_OWN_PREFIXES, *EDGE_DISAGREE_PREFIXES):
         if folded.startswith(_fold(prefix)) and body[len(prefix) :].strip():
             return None
-    return EDGE_REFUSAL.format(n=n)
+    return i18n.t(EDGE_REFUSAL).format(n=n)
 
 
 def check(kind: str, text: str, rec: Mapping | None = None) -> str | None:
@@ -275,9 +291,9 @@ def record(run_dir: Path, qid: str, text: str) -> None:
     """Записать ответ на ожидающий вопрос `qid` или отказать `PendingError`."""
     current = load(run_dir)
     if current is None:
-        raise PendingError(NO_PENDING)
+        raise PendingError(i18n.t(NO_PENDING))
     if current.get("id") != qid:
-        raise PendingError(STALE)
+        raise PendingError(i18n.t(STALE))
     reason = check(str(current.get("kind", "")), text, current)
     if reason is not None:
         raise PendingError(reason)

@@ -26,6 +26,75 @@ DONE, NOT_DONE, CAVEAT = "done", "not_done", "caveat"
 VERDICT_WORDS = {DONE: "выполнено", NOT_DONE: "не выполнено", CAVEAT: "с оговоркой"}
 OPTIONS = "1. выполнено · 2. не выполнено · 3. принять с оговоркой"
 
+#: Тексты вопроса, issue, комментария и итога по языку прогона (#769):
+#: шаблон выбирается ДО `.format()`. Маркеры (`issue_marker`,
+#: `comment_marker`) и `_WAIVED` — машинные, одни на оба языка.
+#: Английские слова вердикта — те, что принимает разбор ответа.
+_TEXTS: dict[str, dict] = {
+    "ru": {
+        "verdicts": VERDICT_WORDS,
+        "options": OPTIONS,
+        "question": "Ручная проверка {beh} ({task}): «{title}»",
+        "steps": "шаги: {steps}",
+        "issue_title": "Ручная проверка не выполнена: {beh} — {title}",
+        "issue_body": (
+            "Требование: **{beh}** — {title}",
+            "Задача: {task}",
+            "Шаги проверки: {steps}",
+            "Ответ владельца при приёмке ({at}): не выполнено",
+            "Комментарий: {note}",
+            "PR с кодом: {pr_url}",
+            "Прогон dfl: {run_id}",
+            "",
+            "Закрытие этого issue `dfl status` читает как «выполнено позже».",
+        ),
+        "comment_head": (
+            "### Ручные проверки",
+            "",
+            "| BEH | задача | ответ | оговорка / комментарий | issue |",
+        ),
+        "later": "{beh}, issue #{issue} закрыт",
+        "not_done": "не выполнено: {n} ({items})",
+        "done_later": "выполнено позже: {n} ({items})",
+        "caveats": "с оговоркой: {n}",
+        "summary": "ручные проверки — {parts}",
+    },
+    "en": {
+        "verdicts": {DONE: "passed", NOT_DONE: "failed", CAVEAT: "passed with caveat"},
+        "options": "1. passed · 2. failed · 3. passed with caveat",
+        "question": 'Manual check {beh} ({task}): "{title}"',
+        "steps": "steps: {steps}",
+        "issue_title": "Manual check failed: {beh} — {title}",
+        "issue_body": (
+            "Requirement: **{beh}** — {title}",
+            "Task: {task}",
+            "Check steps: {steps}",
+            "Owner's answer at acceptance ({at}): failed",
+            "Comment: {note}",
+            "Code PR: {pr_url}",
+            "dfl run: {run_id}",
+            "",
+            '`dfl status` reads closing this issue as "done later".',
+        ),
+        "comment_head": (
+            "### Manual checks",
+            "",
+            "| BEH | task | answer | caveat / comment | issue |",
+        ),
+        "later": "{beh}, issue #{issue} closed",
+        "not_done": "failed: {n} ({items})",
+        "done_later": "done later: {n} ({items})",
+        "caveats": "with caveat: {n}",
+        "summary": "manual checks — {parts}",
+    },
+}
+
+
+def verdict_words(lang: str = "ru") -> dict[str, str]:
+    """Слова вердиктов для показа на языке `lang`."""
+    return _TEXTS[lang]["verdicts"]
+
+
 #: снятый сценарий — `status: waived` в строке checked_by (как criteria_graph)
 _WAIVED = re.compile(r"\*\*checked_by\*\*.*`status:\s*waived`")
 
@@ -89,12 +158,17 @@ def collect(behaviour_text: str, decomposition_text: str) -> list[ManualCheck]:
     return out
 
 
-def question(check: ManualCheck) -> str:
-    """Вопрос по одной проверке (форма дизайна §3.3)."""
-    lines = [f"Ручная проверка {check.beh_id} ({check.task_id}): «{check.title}»"]
+def question(check: ManualCheck, *, lang: str = "ru") -> str:
+    """Вопрос по одной проверке (форма дизайна §3.3) на языке `lang`."""
+    texts = _TEXTS[lang]
+    lines = [
+        texts["question"].format(
+            beh=check.beh_id, task=check.task_id, title=check.title
+        )
+    ]
     if check.steps:
-        lines.append(f"шаги: {check.steps}")
-    lines.append(OPTIONS)
+        lines.append(texts["steps"].format(steps=check.steps))
+    lines.append(texts["options"])
     return "\n".join(lines)
 
 
@@ -103,28 +177,33 @@ def issue_marker(run_id: str, beh_id: str) -> str:
     return f"<!-- dfl-manual-check run={run_id} beh={beh_id} -->"
 
 
-def issue_title(check: ManualCheck) -> str:
-    """Заголовок issue «не выполнено»."""
-    return f"Ручная проверка не выполнена: {check.beh_id} — {check.title}"
+def issue_title(check: ManualCheck, *, lang: str = "ru") -> str:
+    """Заголовок issue «не выполнено» на языке `lang`."""
+    return _TEXTS[lang]["issue_title"].format(beh=check.beh_id, title=check.title)
 
 
-def issue_body(check: ManualCheck, answer: Mapping, *, run_id: str, pr_url: str) -> str:
-    """Тело issue «не выполнено»; первая строка — маркер."""
+def issue_body(
+    check: ManualCheck,
+    answer: Mapping,
+    *,
+    run_id: str,
+    pr_url: str,
+    lang: str = "ru",
+) -> str:
+    """Тело issue «не выполнено» на языке `lang`; первая строка — маркер."""
     note = str(answer.get("note") or "").strip() or "—"
-    return "\n".join(
-        [
-            issue_marker(run_id, check.beh_id),
-            f"Требование: **{check.beh_id}** — {check.title}",
-            f"Задача: {check.task_id}",
-            f"Шаги проверки: {check.steps or '—'}",
-            f"Ответ владельца при приёмке ({answer.get('at', '')}): не выполнено",
-            f"Комментарий: {note}",
-            f"PR с кодом: {pr_url}",
-            f"Прогон dfl: {run_id}",
-            "",
-            "Закрытие этого issue `dfl status` читает как «выполнено позже».",
-        ]
-    )
+    values = {
+        "beh": check.beh_id,
+        "title": check.title,
+        "task": check.task_id,
+        "steps": check.steps or "—",
+        "at": answer.get("at", ""),
+        "note": note,
+        "pr_url": pr_url,
+        "run_id": run_id,
+    }
+    body = [line.format(**values) for line in _TEXTS[lang]["issue_body"]]
+    return "\n".join([issue_marker(run_id, check.beh_id), *body])
 
 
 def _cell(text: str) -> str:
@@ -138,19 +217,19 @@ def comment_marker(run_id: str) -> str:
 
 
 def pr_comment(
-    checks: list[ManualCheck], answers: Mapping[str, Mapping], *, run_id: str
+    checks: list[ManualCheck],
+    answers: Mapping[str, Mapping],
+    *,
+    run_id: str,
+    lang: str = "ru",
 ) -> str:
-    """Один комментарий в PR с кодом со всеми ответами (снимок приёмки)."""
-    rows = [
-        comment_marker(run_id),
-        "### Ручные проверки",
-        "",
-        "| BEH | задача | ответ | оговорка / комментарий | issue |",
-        "|---|---|---|---|---|",
-    ]
+    """Один комментарий в PR с кодом со всеми ответами (снимок приёмки) на
+    языке `lang`."""
+    texts = _TEXTS[lang]
+    rows = [comment_marker(run_id), *texts["comment_head"], "|---|---|---|---|---|"]
     for c in checks:
         a = answers.get(c.beh_id) or {}
-        word = VERDICT_WORDS.get(str(a.get("verdict")), "—")
+        word = texts["verdicts"].get(str(a.get("verdict")), "—")
         note = _cell(str(a.get("note") or "").strip()) or "—"
         issue = f"#{a['issue']}" if a.get("issue") else "—"
         rows.append(f"| {c.beh_id} | {c.task_id} | {word} | {note} | {issue} |")
@@ -161,8 +240,12 @@ def summary(
     checks: list[ManualCheck],
     answers: Mapping[str, Mapping],
     closed: frozenset[int] = frozenset(),
+    *,
+    lang: str = "ru",
 ) -> str:
-    """Хвост финальной строки; `""` — всё выполнено (строка прежняя)."""
+    """Хвост финальной строки на языке `lang`; `""` — всё выполнено (строка
+    прежняя)."""
+    texts = _TEXTS[lang]
     not_done: list[str] = []
     later: list[str] = []
     caveats = 0
@@ -172,18 +255,20 @@ def summary(
         if verdict == CAVEAT:
             caveats += 1
         elif verdict == NOT_DONE and issue in closed:
-            later.append(f"{c.beh_id}, issue #{issue} закрыт")
+            later.append(texts["later"].format(beh=c.beh_id, issue=issue))
         elif verdict == NOT_DONE:
             ref = f" → issue #{issue}" if issue else ""
             not_done.append(f"{c.beh_id}{ref}")
     parts = []
     if not_done:
-        parts.append(f"не выполнено: {len(not_done)} ({', '.join(not_done)})")
+        items = ", ".join(not_done)
+        parts.append(texts["not_done"].format(n=len(not_done), items=items))
     if later:
-        parts.append(f"выполнено позже: {len(later)} ({'; '.join(later)})")
+        items = "; ".join(later)
+        parts.append(texts["done_later"].format(n=len(later), items=items))
     if caveats:
-        parts.append(f"с оговоркой: {caveats}")
-    return f"ручные проверки — {'; '.join(parts)}" if parts else ""
+        parts.append(texts["caveats"].format(n=caveats))
+    return texts["summary"].format(parts="; ".join(parts)) if parts else ""
 
 
 def pending(enabled: bool, record: Mapping | None) -> bool:
@@ -222,8 +307,10 @@ def publish(
     pr_url: str,
     run_id: str,
     save: Callable[[], None],
+    lang: str = "ru",
 ) -> None:
     """Issue на «не выполнено», затем один комментарий в PR; идемпотентно.
+    Тексты issue и комментария — на языке `lang`, маркеры одни.
 
     Номер issue сохраняется сразу после создания; гибель до сохранения
     лечит поиск по маркеру (issue без меток, любого состояния). Комментарий
@@ -239,13 +326,15 @@ def publish(
         marker = issue_marker(run_id, check.beh_id)
         number = ops.find_issue(repo_slug, marker, labels=(), state="all", author="@me")
         if number is None:
-            body = issue_body(check, answer, run_id=run_id, pr_url=pr_url)
-            number = ops.create_issue(repo_slug, issue_title(check), body, labels=())
+            body = issue_body(check, answer, run_id=run_id, pr_url=pr_url, lang=lang)
+            title = issue_title(check, lang=lang)
+            number = ops.create_issue(repo_slug, title, body, labels=())
         answer["issue"] = number
         save()
     if not record.get("commented"):
         if not _comment_exists(ops, repo_slug, pr, run_id):
-            ops.comment(repo_slug, pr, pr_comment(checks, answers, run_id=run_id))
+            comment = pr_comment(checks, answers, run_id=run_id, lang=lang)
+            ops.comment(repo_slug, pr, comment)
         record["commented"] = True
         save()
     record["status"] = "completed"

@@ -6,6 +6,8 @@ import sys
 from collections.abc import Mapping
 from typing import TextIO
 
+from lite.i18n import t
+
 MAX_VERBOSITY = 3
 VERBOSITY_ENV = "DFL_VERBOSITY"
 
@@ -77,9 +79,10 @@ def refusal(command: str, message: str, code: int = 2) -> str:
     сообщении продолжается с отступом, чтобы блок не рассыпался.
     """
     cause, sep, action = split_refusal(message)
-    lines = ["", f"{command}: отказ (код {code})", _field("причина:", cause)]
+    head = t("{command}: отказ (код {code})").format(command=command, code=code)
+    lines = ["", head, _field(t("причина:"), cause)]
     if sep:
-        lines.append(_field("что сделать:", action))
+        lines.append(_field(t("что сделать:"), action))
     return "\n".join(lines)
 
 

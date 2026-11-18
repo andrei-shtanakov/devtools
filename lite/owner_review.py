@@ -24,6 +24,24 @@ KEEP_NOTE = {
     rp.DOWNGRADE: "- {item}: сохранить Priority Must",
     rp.CHANGE: "- {item}: не менять, оставить как было",
 }
+KEEP_NOTE_EN = {
+    rp.REMOVE: "- do not remove {item}",
+    rp.DOWNGRADE: "- {item}: keep Priority Must",
+    rp.CHANGE: "- {item}: do not change, keep as it was",
+}
+#: указания автору по языку прогона (уходят в промпт правки)
+_KEEP_NOTES = {"ru": KEEP_NOTE, "en": KEEP_NOTE_EN}
+_REMARK = {"ru": "- замечание владельца: {text}", "en": "- owner's remark: {text}"}
+_BROKEN = {
+    "ru": (
+        "- не ломать пункты {ids}: без дублей id и в "
+        "формате узла (прошлая правка их сломала)"
+    ),
+    "en": (
+        "- do not break items {ids}: no duplicate ids and in "
+        "the node format (the previous revision broke them)"
+    ),
+}
 #: исходы круга правки (`revise_by_owner`)
 ACCEPTED, PAUSED, UNCLEAR, FAILED = "accepted", "paused", "unclear", "failed"
 #: исход без терминала: вопрос об удалении записан (`dfl pending`), прогон ждёт
@@ -45,9 +63,10 @@ NO_TTY = (
 Revise = Callable[[str, str], str | None]
 
 
-def decisions(batch: Iterable[rp.Remark]) -> str:
-    """Замечания владельца как решения для промпта переписывания."""
-    return "\n".join(f"- замечание владельца: {r.text}" for r in batch)
+def decisions(batch: Iterable[rp.Remark], *, lang: str = "ru") -> str:
+    """Замечания владельца как решения для промпта переписывания (`lang` —
+    язык прогона)."""
+    return "\n".join(_REMARK[lang].format(text=r.text) for r in batch)
 
 
 def links(paths: Iterable[Path]) -> str:
@@ -64,6 +83,7 @@ class _Ctx:
     store: Path | None
     stage: str
     candidate: dict | None = None
+    lang: str = "ru"
 
 
 @dataclass(frozen=True)
@@ -85,6 +105,7 @@ def revise_by_owner(
     ask: pending.Ask | None = None,
     store: Path | None = None,
     stage: str = "",
+    lang: str = "ru",
 ) -> tuple[str, str]:
     """Правка файла `path` по решениям `text`; не принята — файл возвращён.
 
@@ -97,11 +118,11 @@ def revise_by_owner(
     кандидат первой правки (`CANDIDATE_FILE`) и `pending.json`; `stage` —
     этап в ключе вопроса. Без `ask` и `store` — прежнее поведение.
     `ask` без `store` — `ValueError`: без кандидата платная правка
-    повторялась бы молча."""
+    повторялась бы молча. `lang` — язык указаний автору в повторе."""
     if ask is not None and store is None:
         raise ValueError(NO_STORE)
     before = path.read_text(encoding="utf-8")
-    ctx = _Ctx(read, ask, store, stage)
+    ctx = _Ctx(read, ask, store, stage, lang=lang)
     try:
         outcome, detail = _round(path, before, text, revise, ctx)
     except BaseException:
@@ -134,12 +155,7 @@ def _round(
     broken = node_guard.weakened(before, after, olds, olds)
     allowed: set[str] = set()
     if broken:
-        extra = [
-            (
-                f"- не ломать пункты {', '.join(broken)}: без дублей id и в "
-                "формате узла (прошлая правка их сломала)"
-            )
-        ]
+        extra = [_BROKEN[ctx.lang].format(ids=", ".join(broken))]
     else:
         kinds = node_guard.change_kinds(before, after, bad)
         draft = _Draft(path.name, before, text, after)
@@ -148,7 +164,7 @@ def _round(
             return answer
         allowed = answer
         extra = [
-            KEEP_NOTE[kinds[item]].format(item=item)
+            _KEEP_NOTES[ctx.lang][kinds[item]].format(item=item)
             for item in bad
             if item not in allowed
         ]

@@ -1,0 +1,21 @@
+edge: personal-design-vs-brief
+subject_role: personal-design
+basis_roles: [brief]
+items:
+  - id: R1
+    text: >-
+      Every function of the brief (FR-NN) gets a named mechanism in the design
+      (module, file, command, call); dropping a function of the brief is not
+      allowed.
+  - id: R2
+    text: >-
+      The design decisions take into account all five context lines of the
+      brief (users, authorization, network, local system, platform).
+  - id: R3
+    text: >-
+      The design does not contradict the brief and does not narrow its
+      functions and acceptance criteria.
+severity:
+  blocking: [blocker, major]
+  advisory: [minor]
+applicability: []

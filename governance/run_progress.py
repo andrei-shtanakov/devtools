@@ -26,6 +26,29 @@ import yaml
 from governance.task_bridge import _TASK_HEAD_RE
 
 UNAVAILABLE = "прогресс недоступен: нет {path}"
+#: строки экрана по языку (личный путь — язык прогона, #769; enterprise — ru)
+_TEXTS: dict[str, dict[str, str]] = {
+    "ru": {
+        "unavailable": UNAVAILABLE,
+        "started": "▶ {task} «{title}» — начата",
+        "done": "✓ {task} готова · {elapsed}",
+        "retry": "↻ {task} «{title}» — попытка {attempt}",
+        "no_reason": "причина не записана",
+        "failed": "✗ {task} не прошла: {reason}",
+        "count": " · {ordinal} из {total}",
+        "summary": "реализация: сделано {done} из {total} · {elapsed}",
+    },
+    "en": {
+        "unavailable": "progress unavailable: no {path}",
+        "started": "▶ {task} “{title}” — started",
+        "done": "✓ {task} done · {elapsed}",
+        "retry": "↻ {task} “{title}” — attempt {attempt}",
+        "no_reason": "reason not recorded",
+        "failed": "✗ {task} failed: {reason}",
+        "count": " · {ordinal} of {total}",
+        "summary": "implementation: {done} of {total} done · {elapsed}",
+    },
+}
 
 _CONFIG = "spec-runner.config.yaml"
 _LEGACY_CONFIG = "spec/executor.config.yaml"
@@ -139,30 +162,36 @@ def event_line(
     seconds: float | None = None,
     attempt: int | None = None,
     error: str | None = None,
+    lang: str = "ru",
 ) -> str:
     """Строка события задачи (форма дизайна §3.1); текст из БД очищен от
-    управляющих символов терминала."""
+    управляющих символов терминала. `lang` — язык экрана."""
+    texts = _TEXTS[lang]
     task_id, title = _clean(task_id), _clean(title)
     if kind == "started":
-        return f"▶ {task_id} «{title}» — начата"
+        return texts["started"].format(task=task_id, title=title)
     if kind == "done":
-        return f"✓ {task_id} готова · {fmt_duration(seconds or 0)}"
+        return texts["done"].format(task=task_id, elapsed=fmt_duration(seconds or 0))
     if kind == "retry":
-        return f"↻ {task_id} «{title}» — попытка {attempt}"
+        return texts["retry"].format(task=task_id, title=title, attempt=attempt)
     first = (error or "").strip().splitlines()
-    reason = _clean(first[0]) if first else "причина не записана"
-    return f"✗ {task_id} не прошла: {reason}"
+    reason = _clean(first[0]) if first else texts["no_reason"]
+    return texts["failed"].format(task=task_id, reason=reason)
 
 
-def live_line(task_id: str, ordinal: int, total: int, seconds: float) -> str:
+def live_line(
+    task_id: str, ordinal: int, total: int, seconds: float, *, lang: str = "ru"
+) -> str:
     """Живая строка: задача, «N из M» (если M известно), отсчёт."""
-    count = f" · {ordinal} из {total}" if total else ""
+    count = _TEXTS[lang]["count"].format(ordinal=ordinal, total=total) if total else ""
     return f"  {_clean(task_id)}{count} · {fmt_duration(seconds)}"
 
 
-def summary_line(done: int, total: int, seconds: float) -> str:
+def summary_line(done: int, total: int, seconds: float, *, lang: str = "ru") -> str:
     """Итог фазы реализации (без стоимости — решение владельца)."""
-    return f"реализация: сделано {done} из {total} · {fmt_duration(seconds)}"
+    return _TEXTS[lang]["summary"].format(
+        done=done, total=total, elapsed=fmt_duration(seconds)
+    )
 
 
 #: статусы, которые считаются «сделано» (раннер их больше не делает)
@@ -186,7 +215,7 @@ class Watcher:
 
     `tick(t)` детерминирован (время — аргумент): поток лишь зовёт его раз в
     секунду. События до `begin` не печатаются; любое исключение внутри
-    `tick` проглатывается — прогресс не валит прогон.
+    `tick` проглатывается — прогресс не валит прогон. `lang` — язык строк.
     """
 
     def __init__(
@@ -196,8 +225,10 @@ class Watcher:
         *,
         emit: Callable[[str], None],
         live: Callable[[str], None] | None,
+        lang: str = "ru",
     ) -> None:
         self.db, self.emit, self.live = db, emit, live
+        self.lang = lang
         self.titles = dict(tasks)
         self.total = len(tasks)
         self.prev: dict[str, TaskRow] = {}
@@ -236,7 +267,7 @@ class Watcher:
                 and t - self.began >= (UNAVAILABLE_AFTER)
             ):
                 self.warned = True
-                self.emit(UNAVAILABLE.format(path=self.db))
+                self.emit(_TEXTS[self.lang]["unavailable"].format(path=self.db))
             return
         self.seen_db = True
         for task_id, row in snap.items():
@@ -258,15 +289,22 @@ class Watcher:
             if start is not None:
                 self.first_start.setdefault(task_id, start)
             if was != "running":
-                self.emit(event_line("started", task_id, title))
+                self.emit(event_line("started", task_id, title, lang=self.lang))
             elif prev is not None and row.started_at != prev.started_at:
-                self.emit(event_line("retry", task_id, title, attempt=row.attempts + 1))
+                attempt = row.attempts + 1
+                self.emit(
+                    event_line("retry", task_id, title, attempt=attempt, lang=self.lang)
+                )
         elif row.status == "success" and was != "success":
             end = _epoch(row.completed_at) or t
             start = self.first_start.get(task_id) or _epoch(row.started_at) or end
-            self.emit(event_line("done", task_id, title, seconds=end - start))
+            seconds = end - start
+            self.emit(
+                event_line("done", task_id, title, seconds=seconds, lang=self.lang)
+            )
         elif row.status == "failed" and was != "failed":
-            self.emit(event_line("failed", task_id, title, error=row.last_error))
+            error = row.last_error
+            self.emit(event_line("failed", task_id, title, error=error, lang=self.lang))
 
     def _live(self, snap: dict[str, TaskRow], t: float) -> None:
         if self.live is None:
@@ -284,13 +322,13 @@ class Watcher:
             return
         start, task_id = max(running)
         done = sum(1 for r in snap.values() if r.status in _DONE)
-        self.live(live_line(task_id, done + 1, self.total, t - start))
+        self.live(live_line(task_id, done + 1, self.total, t - start, lang=self.lang))
 
     def summary(self, t: float) -> str:
         """Итог: сделано (включая до старта) из всех задач, время запуска."""
         done = sum(1 for r in self.prev.values() if r.status in _DONE)
         total = self.total or len(self.prev)  # tasks.md не прочитался — из БД
-        return summary_line(done, total, t - self.began)
+        return summary_line(done, total, t - self.began, lang=self.lang)
 
 
 #: экранный fd под перехватом вывода `dfl` (то же имя, что
@@ -354,11 +392,13 @@ def watched(
     tasks_rel: str,
     emit: Callable[[str], None],
     period: float = 1.0,
+    lang: str = "ru",
 ) -> int:
     """Вызвать раннер (`call`) под наблюдателем прогресса.
 
     Код возврата и исключение `call` — как есть; поток наблюдателя
     останавливается в любом исходе, живая строка стирается, затем итог.
+    `lang` — язык строк прогресса (личный путь — язык прогона, #769).
     """
     try:
         text = (Path(target_dir) / tasks_rel).read_text(encoding="utf-8")
@@ -376,6 +416,7 @@ def watched(
             read_tasks(text),
             emit=emit_line,
             live=live,
+            lang=lang,
         )
         watcher.begin(time.time())
     except Exception:  # noqa: BLE001 - прогресс не мешает прогону: без него
@@ -403,17 +444,20 @@ THINKING = "… думаю · {elapsed}"
 THINKING_THREAD = "dfl-thinking"
 
 
-def thinking[R](call: Callable[[], R], *, period: float = 1.0) -> R:
+def thinking[R](
+    call: Callable[[], R], *, period: float = 1.0, line: str = THINKING
+) -> R:
     """Вызвать агента (`call`) под живой строкой `… думаю · ММ:СС`.
 
     Строка — только в терминал (экранный fd перехвата или stdout), без
     терминала её нет; стирается в любом исходе, результат и исключение
-    `call` — как есть (devtools#799)."""
+    `call` — как есть (devtools#799). `line` — шаблон строки с `{elapsed}`
+    (вызывающий из `lite` передаёт его на языке вызова)."""
     live = _LiveScreen(uncaptured=True)
     began = time.monotonic()
 
     def draw() -> None:
-        live(THINKING.format(elapsed=fmt_duration(time.monotonic() - began)))
+        live(line.format(elapsed=fmt_duration(time.monotonic() - began)))
 
     draw()
     stop = threading.Event()

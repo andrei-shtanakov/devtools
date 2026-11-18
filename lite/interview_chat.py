@@ -21,6 +21,7 @@ from collections.abc import Callable
 from governance import interview as iv
 from governance import run_state as rs
 from lite import gate_repair as gr
+from lite.i18n import t
 from lite.interview_state import SessionView
 from lite.output import say
 from lite.structure import (
@@ -47,7 +48,8 @@ PROMPT = "> "
 MORE_PROMPT = "· "
 SEND_HINT = "(пустая строка — отправить)"
 STOP_WORD = "/стоп"
-SKIP_WORDS = frozenset({"пропустить", "не знаю"})
+STOP_WORDS = frozenset({STOP_WORD, "/stop"})
+SKIP_WORDS = frozenset({"пропустить", "не знаю", "don't know", "don’t know", "skip"})
 REFUSED_TEXT = "ответ не принят — ответьте на вопрос ещё раз"
 TOP_UP_HINT = "расскажите об этом своими словами («пропустить» — оставить так)"
 INCOMPLETE_CODES = (10, 11)
@@ -166,7 +168,7 @@ def _top_up_topic(
         return
     label = TOPIC_LABELS.get(key, key)
     q = Question(qid, key, f"Расскажите про тему «{label}».")
-    text = _ask_human(f"Не хватает: {label} — {TOP_UP_HINT}", read)
+    text = _ask_human(f"Не хватает: {label} — {t(TOP_UP_HINT)}", read)
     if is_skip(text):
         return
     held = view.held_answer(qid)
@@ -218,7 +220,7 @@ def _settle(
         if reply.code not in (1, 2):
             return
         if refusal:
-            say(REFUSED_TEXT)
+            say(t(REFUSED_TEXT))
             return
         refusal = reply.envelope.get("operation", {}).get("reason", "") or "отказ"
 
@@ -287,7 +289,7 @@ def read_answer(
     lines: list[str] = []
     while True:
         line = read(MORE_PROMPT if lines else PROMPT)
-        if line is None or line.strip() == STOP_WORD:
+        if line is None or line.strip() in STOP_WORDS:
             return None
         if not line.strip():
             if quick is not None and not lines:
@@ -305,7 +307,7 @@ def _hint_once() -> None:
     """Подсказка об отправке — под первым вопросом процесса, дальше не мешает."""
     if not _hinted:
         _hinted.append(True)
-        say(SEND_HINT)
+        say(t(SEND_HINT))
 
 
 def is_skip(text: str) -> bool:
@@ -335,8 +337,8 @@ def stdin_read(prompt: str) -> str | None:
         if line is not None and not _has_broken_bytes(line):
             return line
         if attempt < MAX_BROKEN_READS:
-            say(BROKEN_INPUT)
-    say(BROKEN_INPUT_STOP)
+            say(t(BROKEN_INPUT))
+    say(t(BROKEN_INPUT_STOP))
     return None
 
 

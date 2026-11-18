@@ -29,6 +29,7 @@ from governance.edge_check import override
 from governance.edge_check.check import run_check
 from governance.facts import Outcome as FactOutcome
 from governance.ops import Ops
+from governance.review_remarks import stage_labels
 from lite import edge_journal as ej
 from lite import edge_resolve as er
 from lite import manual_ask as ma
@@ -36,6 +37,7 @@ from lite import node_guard, pending
 from lite import owner_review as orv
 from lite import review_pause as rp
 from lite.edge_resolve import MAX_ROUNDS, Outcome, PaidCalls, Scope, resolve_scope
+from lite.i18n import t
 from lite.interview_chat import Read
 from lite.output import say
 from lite.personal.brief import Brief, brief_from_json, render_brief
@@ -50,10 +52,16 @@ BRIEF_JSON = "brief.json"
 APPROVALS = "approvals.jsonl"
 BRIEF_APPROVAL = {"node": "brief", "how": "подтверждено в разговоре"}
 RETRY = "продолжить: dfl run"
-INTERVIEW_PAUSED = f"интервью прервано — {RETRY}"
+INTERVIEW_PAUSED = "интервью прервано — продолжить: dfl run"
 #: хвост стопов, после которых прогон может быть проще начать заново
 ABANDON = "бросить прогон и начать заново — dfl abandon"
 _RECHECK = (Outcome.REVISED, Outcome.OVERRIDDEN)
+#: строки промпта правки автора по языку прогона (`run.language`)
+_INVARIANT = {
+    "ru": "- инвариант декомпозиции: {p}",
+    "en": "- decomposition invariant: {p}",
+}
+_NONE = {"ru": "нет", "en": "none"}
 _GIT_ERRORS = (RuntimeError, subprocess.CalledProcessError, OSError)
 #: шаги до spec-PR: впереди платные интервью и авторинг — дерево и ветка
 #: проверяются до них (`_guard` без git-эффектов)
@@ -65,13 +73,23 @@ _STAGE_KINDS = {"design": "personal-design", "decomposition": "personal-decompos
 #: хэши узлов, прошедших проверку перед паузой: повтор `dfl run` на паузе не
 #: платит за проверку заново, если файл не меняли
 REVIEW_PASSED = "review-passed.json"
-REVIEW_PAUSED = "просмотр этапа «{label}» прерван — " + RETRY
+REVIEW_PAUSED = "просмотр этапа «{label}» прерван — продолжить: dfl run"
 UNCLEAR_REMARK = orv.UNCLEAR_REMARK
 NO_TTY = orv.NO_TTY
 BRIEF_EDIT_RESTORED = (
     "бриф правится словами: опишите правку как замечание — файл возвращён "
     "к согласованной версии"
 )
+
+
+def _msg(template: str, **values: object) -> str:
+    """Шаблон экрана на языке вызова (`t` до `.format`); `{retry}` и
+    `{abandon}` — общие хвосты `RETRY` и `ABANDON`."""
+    return t(template).format(retry=t(RETRY), abandon=t(ABANDON), **values)
+
+
+#: общий шаблон сбоя правки автором (инварианты и замечания владельца)
+REVISE_FAILED = "правка {name} не состоялась: {why}"
 
 
 def _stdin_is_tty() -> bool:
@@ -154,8 +172,13 @@ def _base(run: PersonalRun, ops: Ops) -> str:
     fact = ops.default_branch_fact(run.repo_slug)
     if not fact.established or fact.value is None:
         say(
-            f"ветка по умолчанию {run.repo_slug} не установлена ({fact.detail}) — "
-            f"база {FALLBACK_BASE} (не закрепляется)"
+            _msg(
+                "ветка по умолчанию {slug} не установлена ({detail}) — "
+                "база {base} (не закрепляется)",
+                slug=run.repo_slug,
+                detail=fact.detail,
+                base=FALLBACK_BASE,
+            )
         )
         return FALLBACK_BASE
     run.base_ref = fact.value.name
@@ -183,13 +206,16 @@ def _step_interview(ctx: _Ctx) -> bool:
 
 def _interview(ctx: _Ctx, rd: Path) -> bool:
     """Интервью до подтверждённого брифа и его запись; `False` — пауза/стоп."""
-    brief = interview(rd, ctx.run.subject, read=ctx.read, agent=ctx.agent)
+    # `lang` — только не по умолчанию: русский вызов прежний (подмены
+    # `interview` в тестах держат прежнюю сигнатуру)
+    lang = {"lang": ctx.run.language} if ctx.run.language != "ru" else {}
+    brief = interview(rd, ctx.run.subject, read=ctx.read, agent=ctx.agent, **lang)
     if brief is Halt.PAUSED:  # человек прервал — пауза, не сбой (код 0)
-        ctx.run.stop_reason = INTERVIEW_PAUSED
-        say(INTERVIEW_PAUSED)
+        ctx.run.stop_reason = t(INTERVIEW_PAUSED)
+        say(ctx.run.stop_reason)
         return False
     if isinstance(brief, Halt):
-        return ctx.stop(f"интервью не завершено — {RETRY}")
+        return ctx.stop(_msg("интервью не завершено — {retry}"))
     _write_brief(ctx, rd, brief)
     return True
 
@@ -200,7 +226,8 @@ def _write_brief(ctx: _Ctx, rd: Path, brief: Brief) -> None:
         encoding="utf-8",
     )
     ctx.bundle.mkdir(parents=True, exist_ok=True)
-    (ctx.bundle / FILENAMES["brief"]).write_text(render_brief(brief), encoding="utf-8")
+    text = render_brief(brief, lang=ctx.run.language)
+    (ctx.bundle / FILENAMES["brief"]).write_text(text, encoding="utf-8")
     _approve_brief(rd / APPROVALS)
 
 
@@ -263,20 +290,29 @@ def _decomposition_ready(ctx: _Ctx) -> bool:
     path = ctx.bundle / FILENAMES[kind]
     for round_no in range(1, MAX_ROUNDS + 2):
         text = path.read_text(encoding="utf-8")
-        problems = decomposition_problems(text, brief)
+        problems = decomposition_problems(text, brief, lang=ctx.run.language)
         if not problems:
             return True
         if round_no > MAX_ROUNDS:
             break
-        say(f"декомпозиция нарушает инварианты — правка автором, круг {round_no}")
+        say(
+            _msg(
+                "декомпозиция нарушает инварианты — правка автором, круг {n}",
+                n=round_no,
+            )
+        )
         if not _fix_invariants(ctx, kind, text, problems):
             return False
         if not _node(ctx, kind):
             return False
     return ctx.stop(
-        f"декомпозиция нарушает инварианты после {MAX_ROUNDS} кругов правки: "
-        + "; ".join(problems)
-        + f" — поправьте {FILENAMES[kind]} вручную и повторите dfl run ({ABANDON})"
+        _msg(
+            "декомпозиция нарушает инварианты после {rounds} кругов правки: "
+            "{problems} — поправьте {name} вручную и повторите dfl run ({abandon})",
+            rounds=MAX_ROUNDS,
+            problems="; ".join(problems),
+            name=FILENAMES[kind],
+        )
     )
 
 
@@ -292,20 +328,22 @@ def _fix_invariants(ctx: _Ctx, kind: str, before: str, problems: list[str]) -> b
             kind,
             run.subject,
             before,
-            "\n".join(f"- инвариант декомпозиции: {p}" for p in problems),
-            "нет",
+            "\n".join(_INVARIANT[run.language].format(p=p) for p in problems),
+            _NONE[run.language],
             launch=ctx.launch,
+            lang=run.language,
         )
         reason = None
         if outcome.code != 0:
-            reason = f"правка {name} не состоялась: {outcome.reason or outcome.code}"
+            reason = _msg(REVISE_FAILED, name=name, why=outcome.reason or outcome.code)
         else:
             after = path.read_text(encoding="utf-8")
             bad = node_guard.weakened(before, after, set(), set())
             if bad:
-                reason = (
-                    f"правка {name} отклонена — ослабляет узел: {', '.join(bad)}; "
-                    "файл возвращён"
+                reason = _msg(
+                    "правка {name} отклонена — ослабляет узел: {ids}; файл возвращён",
+                    name=name,
+                    ids=", ".join(bad),
                 )
     except BaseException:
         path.write_text(before, encoding="utf-8")
@@ -313,7 +351,7 @@ def _fix_invariants(ctx: _Ctx, kind: str, before: str, problems: list[str]) -> b
     if reason is None:
         return True
     path.write_text(before, encoding="utf-8")
-    return ctx.stop(f"{reason} — {RETRY} ({ABANDON})")
+    return ctx.stop(_msg("{reason} — {retry} ({abandon})", reason=reason))
 
 
 def _author_call(run: PersonalRun, name: str) -> AuthorCall:
@@ -329,9 +367,10 @@ def _author_call(run: PersonalRun, name: str) -> AuthorCall:
 def _load_brief(ctx: _Ctx) -> Brief | None:
     path = run_dir(ctx.run.run_id) / BRIEF_JSON
     try:
-        return brief_from_json(json.loads(path.read_text(encoding="utf-8")))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return brief_from_json(data, lang=ctx.run.language)
     except (OSError, ValueError, FormError) as exc:
-        ctx.stop(f"бриф прогона не прочитан ({path}): {exc}")
+        ctx.stop(_msg("бриф прогона не прочитан ({path}): {exc}", path=path, exc=exc))
         return None
 
 
@@ -344,11 +383,14 @@ def _node(ctx: _Ctx, kind: str) -> bool:
     name = FILENAMES[kind]
     if not (ctx.bundle / name).exists():
         ctx.calls.author += 1
-        outcome = author_node(ctx.run, kind, launch=ctx.launch)
+        outcome = author_node(ctx.run, kind, launch=ctx.launch, lang=ctx.run.language)
         if outcome.code != 0:
             return ctx.stop(
-                f"автор {name} не написал узел: {outcome.reason or outcome.code}"
-                f" — {RETRY}"
+                _msg(
+                    "автор {name} не написал узел: {why} — {retry}",
+                    name=name,
+                    why=outcome.reason or outcome.code,
+                )
             )
     rd = run_dir(ctx.run.run_id)
     saved = _saved_round(ctx, kind)
@@ -400,7 +442,9 @@ def _node_rounds(ctx: _Ctx, kind: str, saved: dict | None) -> bool | None:
     batch = str((saved or {}).get("batch") or "")
     while True:
         if result.failure:  # RF-5: без разбора и без переписывания
-            return ctx.stop(f"проверка ребра не состоялась: {result.failure}")
+            return ctx.stop(
+                _msg("проверка ребра не состоялась: {why}", why=result.failure)
+            )
         if _passed(ctx.run, kind, result):
             return True
         if not result.findings:  # разбирать нечего: resolve_scope — NOT_APPLICABLE
@@ -410,8 +454,12 @@ def _node_rounds(ctx: _Ctx, kind: str, saved: dict | None) -> bool | None:
             return ctx.stop(_foreign_findings_reason(name, foreign))
         if round_no == MAX_ROUNDS:
             return ctx.stop(
-                f"замечания edge-check к {name} не сошлись за {MAX_ROUNDS} "
-                f"круга — поправьте узел и повторите dfl run ({ABANDON})"
+                _msg(
+                    "замечания edge-check к {name} не сошлись за {rounds} "
+                    "круга — поправьте узел и повторите dfl run ({abandon})",
+                    name=name,
+                    rounds=MAX_ROUNDS,
+                )
             )
         round_no += 1
         waiting = er.Waiting(batch=batch)
@@ -421,7 +469,9 @@ def _node_rounds(ctx: _Ctx, kind: str, saved: dict | None) -> bool | None:
             result.findings,
             read=ctx.read,
             agent=ctx.agent,
-            revise=functools.partial(revise_node, launch=ctx.launch),
+            revise=functools.partial(
+                revise_node, launch=ctx.launch, lang=ctx.run.language
+            ),
             round_no=round_no,
             calls=ctx.calls,
         )
@@ -431,7 +481,11 @@ def _node_rounds(ctx: _Ctx, kind: str, saved: dict | None) -> bool | None:
             return None
         if outcome not in _RECHECK:
             return ctx.stop(
-                f"разбор замечаний к {name} не завершён ({outcome.value}) — {RETRY}"
+                _msg(
+                    "разбор замечаний к {name} не завершён ({outcome}) — {retry}",
+                    name=name,
+                    outcome=outcome.value,
+                )
             )
         ctx.calls.check += 1
         result = check_node(ctx.run, kind, check=ctx.check)
@@ -439,11 +493,14 @@ def _node_rounds(ctx: _Ctx, kind: str, saved: dict | None) -> bool | None:
 
 def _no_findings_reason(name: str, result: NodeCheck) -> str:
     """Стоп по вердикту без блокирующих находок: что не прошло и что делать."""
-    unmet = "; ".join(result.unmet) or "критерии в записи не названы"
-    return (
-        f"edge-check {name}: вердикт {result.verdict} без блокирующих находок — "
-        f"не пройдены критерии: {unmet}. Поправьте {name} по этим причинам и "
-        f"повторите dfl run (повтор платный; {ABANDON})"
+    unmet = "; ".join(result.unmet) or t("критерии в записи не названы")
+    return _msg(
+        "edge-check {name}: вердикт {verdict} без блокирующих находок — "
+        "не пройдены критерии: {unmet}. Поправьте {name} по этим причинам и "
+        "повторите dfl run (повтор платный; {abandon})",
+        name=name,
+        verdict=result.verdict,
+        unmet=unmet,
     )
 
 
@@ -451,27 +508,39 @@ def _foreign_findings_reason(name: str, foreign: list[ej.Finding]) -> str:
     """Стоп по находкам не на узле (на основании, обычно `00-brief.md`):
     разбор переписывает только `name`, поэтому называем файл, замечание и
     честный выход."""
+    no_file = t("без файла")
     shown = "; ".join(
-        f"{f.rule_id} {f.cls} ({f.path or 'без файла'}:{f.lines}): {f.statement}"
+        f"{f.rule_id} {f.cls} ({f.path or no_file}:{f.lines}): {f.statement}"
         for f in foreign
     )
-    paths = sorted({f.path or "без файла" for f in foreign})
+    paths = sorted({f.path or no_file for f in foreign})
     brief = FILENAMES["brief"]
     nodes = [p for p in paths if p != brief and p in FILENAMES.values()]
-    advice = [f"если замечание на деле о {name} — поправьте его вручную"]
+    advice = [
+        _msg("если замечание на деле о {name} — поправьте его вручную", name=name)
+    ]
     advice += [
-        f"{p} можно поправить вручную (его собственное ребро не перепроверяется)"
+        _msg(
+            "{path} можно поправить вручную (его собственное ребро не перепроверяется)",
+            path=p,
+        )
         for p in nodes
     ]
     if brief in paths:
         advice.append(
-            f"{brief} подтверждён в разговоре и меняется только новым интервью"
+            _msg(
+                "{brief} подтверждён в разговоре и меняется только новым интервью",
+                brief=brief,
+            )
         )
-    return (
-        f"edge-check {name}: замечания указывают не на {name}, а на "
-        f"{', '.join(paths)} — {shown}. Разбор правит только {name}: "
-        f"{'; '.join(advice)}; затем повторите dfl run (повтор платный) — "
-        f"{ABANDON}"
+    return _msg(
+        "edge-check {name}: замечания указывают не на {name}, а на "
+        "{paths} — {shown}. Разбор правит только {name}: "
+        "{advice}; затем повторите dfl run (повтор платный) — {abandon}",
+        name=name,
+        paths=", ".join(paths),
+        shown=shown,
+        advice="; ".join(advice),
     )
 
 
@@ -490,6 +559,7 @@ def _scope(ctx: _Ctx, kind: str, waiting: er.Waiting) -> Scope:
         subject=run.subject,
         ask=None if ctx.tty() else pending.asker(rd),
         waiting=waiting,
+        lang=run.language,
     )
 
 
@@ -543,7 +613,7 @@ def _review(ctx: _Ctx, stage: str, files: list[str]) -> bool:
     """
     rd = run_dir(ctx.run.run_id)
     paths = [ctx.bundle / name for name in files]
-    label = STAGE_LABELS[stage]
+    label = stage_labels(ctx.run.language)[stage]
     awaiting = _awaiting_reply(rd, stage)
     if awaiting and stage in _STAGE_KINDS and _edited_on_pause(ctx, stage):
         # правка руками, пока пауза ждала `dfl reply`: шаг этапа уже
@@ -558,10 +628,18 @@ def _review(ctx: _Ctx, stage: str, files: list[str]) -> bool:
         if batch and stage == "brief" and not ctx.tty():
             # бриф правится интервьюером — только в терминале (`dfl reply`
             # замечания к брифу не принимает)
-            return _stop_wait(ctx, NO_TTY.format(label=label, links=orv.links(paths)))
+            return _stop_wait(
+                ctx, t(NO_TTY).format(label=label, links=orv.links(paths))
+            )
         if batch:
             round_no += 1
-            say(f"замечания к этапу «{label}» — правка, круг {round_no}")
+            say(
+                _msg(
+                    "замечания к этапу «{label}» — правка, круг {n}",
+                    label=label,
+                    n=round_no,
+                )
+            )
             if not _apply_remarks(ctx, stage, batch):
                 return False
             rp.mark_applied(rd, stage, len(batch))
@@ -570,7 +648,7 @@ def _review(ctx: _Ctx, stage: str, files: list[str]) -> bool:
             if answer is None and not ctx.tty():
                 return False  # вопрос записан, `stop_reason` — «ждёт ответа»
             if answer is None:
-                ctx.run.stop_reason = REVIEW_PAUSED.format(label=label)
+                ctx.run.stop_reason = t(REVIEW_PAUSED).format(label=label)
                 say(ctx.run.stop_reason)
                 return False
             if answer:
@@ -582,7 +660,7 @@ def _review(ctx: _Ctx, stage: str, files: list[str]) -> bool:
                     return False
                 if not _restore_brief(ctx, agreed):
                     return True
-                say(BRIEF_EDIT_RESTORED)
+                say(t(BRIEF_EDIT_RESTORED))
                 _remember_checked(ctx, stage)
                 continue
             if not _edited_on_pause(ctx, stage):
@@ -658,7 +736,7 @@ def _brief_by_owner(ctx: _Ctx, batch: list[rp.Remark]) -> bool:
     """Замечание к брифу — правка интервьюеру («поправить: …» в журнал
     интервью), бриф пересобирается и снова подтверждается «Верно?»."""
     rd = run_dir(ctx.run.run_id)
-    append_correction(rd, "\n".join(r.text for r in batch))
+    append_correction(rd, "\n".join(r.text for r in batch), lang=ctx.run.language)
     return _interview(ctx, rd)
 
 
@@ -674,25 +752,27 @@ def _revise_by_owner(ctx: _Ctx, stage: str, batch: list[rp.Remark]) -> bool:
     rd = run_dir(ctx.run.run_id)
     outcome, detail = orv.revise_by_owner(
         ctx.bundle / FILENAMES[kind],
-        orv.decisions(batch),
+        orv.decisions(batch, lang=ctx.run.language),
         revise=functools.partial(_owner_revise, ctx, kind),
         read=ctx.read,
         ask=None if ctx.tty() else pending.asker(rd),
         store=rd,
         stage=stage,
+        lang=ctx.run.language,
     )
     if outcome == orv.ACCEPTED:
         return True
     if outcome == orv.WAITING:
         return _stop_wait(ctx, detail)
     if outcome == orv.PAUSED:
-        ctx.run.stop_reason = REVIEW_PAUSED.format(label=STAGE_LABELS[stage])
+        label = stage_labels(ctx.run.language)[stage]
+        ctx.run.stop_reason = t(REVIEW_PAUSED).format(label=label)
         say(ctx.run.stop_reason)
         return False
     if outcome == orv.UNCLEAR:
         rp.mark_dropped(rd, stage, len(batch))
-        return ctx.stop(UNCLEAR_REMARK.format(ids=detail))
-    return ctx.stop(f"{detail} — {RETRY}")
+        return ctx.stop(t(UNCLEAR_REMARK).format(ids=detail))
+    return ctx.stop(_msg("{detail} — {retry}", detail=detail))
 
 
 def _owner_revise(ctx: _Ctx, kind: str, before: str, decisions: str) -> str | None:
@@ -704,12 +784,13 @@ def _owner_revise(ctx: _Ctx, kind: str, before: str, decisions: str) -> str | No
         kind,
         ctx.run.subject,
         before,
-        "нет",
+        _NONE[ctx.run.language],
         decisions,
         launch=ctx.launch,
+        lang=ctx.run.language,
     )
     if outcome.code != 0:
-        return f"правка {name} не состоялась: {outcome.reason or outcome.code}"
+        return _msg(REVISE_FAILED, name=name, why=outcome.reason or outcome.code)
     return None
 
 
@@ -744,7 +825,7 @@ def _restore_brief(ctx: _Ctx, agreed: Brief) -> bool:
     """`00-brief.md` разошёлся с рендером согласованного `brief.json` —
     переписать рендером; `True` — файл отличался и возвращён."""
     path = ctx.bundle / FILENAMES["brief"]
-    text = render_brief(agreed)
+    text = render_brief(agreed, lang=ctx.run.language)
     try:
         if path.read_text(encoding="utf-8") == text:
             return False
@@ -807,16 +888,25 @@ def _guard(ctx: _Ctx) -> str | None:
     foreign = _foreign(run, ops.dirty_paths(run.target_dir))
     if foreign:
         ctx.stop(
-            f"в {run.target_dir} незакоммиченные чужие изменения: {foreign} — "
-            f"уберите их и повторите dfl run"
+            _msg(
+                "в {target} незакоммиченные чужие изменения: {foreign} — "
+                "уберите их и повторите dfl run",
+                target=run.target_dir,
+                foreign=foreign,
+            )
         )
         return None
     branch = ops.current_branch(run.target_dir)
     if branch not in (ctx.base, _spec_branch(run)):
         ctx.stop(
-            f"{run.target_dir} на ветке {branch or '(detached)'}, ожидалась "
-            f"{ctx.base} (или ветка прогона {_spec_branch(run)}) — "
-            "переключитесь и повторите dfl run"
+            _msg(
+                "{target} на ветке {branch}, ожидалась {base} (или ветка прогона "
+                "{run_branch}) — переключитесь и повторите dfl run",
+                target=run.target_dir,
+                branch=branch or "(detached)",
+                base=ctx.base,
+                run_branch=_spec_branch(run),
+            )
         )
         return None
     return branch
@@ -842,7 +932,7 @@ def _open_spec_pr(ctx: _Ctx) -> bool:
             datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
     except (OSError, RuntimeError, ValueError) as exc:
-        return ctx.stop(f"tasks.md не построен: {exc}")
+        return ctx.stop(_msg("tasks.md не построен: {exc}", exc=exc))
     target, base = run.target_dir, ctx.base
     branch = _spec_branch(run)
     tasks = _tasks_rel(run)
@@ -857,17 +947,24 @@ def _open_spec_pr(ctx: _Ctx) -> bool:
         save(run)  # write-ahead: ветка может нести коммит прогона
         # пустой индекс (уже закоммичено до падения) — commit_paths не коммитит
         ops.commit_paths(
-            target, [run.bundle_dir, tasks], f"spec({run.ws_id}): личный путь"
+            target,
+            [run.bundle_dir, tasks],
+            _PR_TEXTS[run.language]["commit"].format(ws_id=run.ws_id),
         )
         # ветка прогона могла получить чужой коммит (возобновление): push
         # и автомерж увезли бы его в базу под видом спеки (ревью #774)
         foreign = _foreign(run, ops.changed_paths(target, base)[1])
         if foreign:
             return ctx.stop(
-                f"ветка прогона {branch} несёт чужие изменения относительно "
-                f"origin/{base}: {foreign} — это коммит в ветке прогона или "
-                f"незапушенный коммит локальной {base}; уберите его из ветки "
-                f"прогона (или запушьте {base}) и повторите dfl run ({ABANDON})"
+                _msg(
+                    "ветка прогона {branch} несёт чужие изменения относительно "
+                    "origin/{base}: {foreign} — это коммит в ветке прогона или "
+                    "незапушенный коммит локальной {base}; уберите его из ветки "
+                    "прогона (или запушьте {base}) и повторите dfl run ({abandon})",
+                    branch=branch,
+                    base=base,
+                    foreign=foreign,
+                )
             )
         ops.push_branch(target, branch)
         run.spec_head = ops.head_sha(target, branch)
@@ -882,7 +979,7 @@ def _open_spec_pr(ctx: _Ctx) -> bool:
             base=base,
         )
     except _GIT_ERRORS as exc:
-        return ctx.stop(f"spec-PR не создан: {exc} — {RETRY}")
+        return ctx.stop(_msg("spec-PR не создан: {exc} — {retry}", exc=exc))
     run.spec_pr = pr
     save(run)  # write-ahead: повтор не создаёт второй PR
     return True
@@ -903,42 +1000,73 @@ def _enter_run_branch(ctx: _Ctx, branch: str) -> bool:
     if fact.outcome is FactOutcome.ABSENT:
         if run.spec_committed:
             return ctx.stop(
-                f"ветка прогона {branch} с коммитом бандла пропала — верните её "
-                f"(git reflog) и повторите dfl run ({ABANDON})"
+                _msg(
+                    "ветка прогона {branch} с коммитом бандла пропала — верните её "
+                    "(git reflog) и повторите dfl run ({abandon})",
+                    branch=branch,
+                )
             )
         ops.checkout_and_pull(target, base)
         ops.switch_to(target, branch, base)
         return True
     if fact.outcome is not FactOutcome.FOUND or not fact.value:
-        return ctx.stop(f"ветка прогона {branch} не прочитана: {fact.detail} — {RETRY}")
+        return ctx.stop(
+            _msg(
+                "ветка прогона {branch} не прочитана: {detail} — {retry}",
+                branch=branch,
+                detail=fact.detail,
+            )
+        )
     if not run.spec_committed and ops.is_ancestor(target, fact.value, base) is not True:
         return ctx.stop(
-            f"ветка прогона {branch} уже есть и несёт коммиты, которых прогон не "
-            f"делал (или это не установлено), — разберите её вручную (удалите или "
-            f"переименуйте) и повторите dfl run ({ABANDON})"
+            _msg(
+                "ветка прогона {branch} уже есть и несёт коммиты, которых прогон не "
+                "делал (или это не установлено), — разберите её вручную (удалите или "
+                "переименуйте) и повторите dfl run ({abandon})",
+                branch=branch,
+            )
         )
     ops.ensure_branch(target, branch)
     return True
 
 
-def _pr_body(run: PersonalRun) -> str:
-    lines = [
-        (f"Личный путь `dfl`: бриф, дизайн, декомпозиция и задачи — «{run.subject}»."),
-        "",
-        (
+#: тексты spec-PR и коммита спеки по языку прогона (#769)
+_PR_TEXTS = {
+    "ru": {
+        "intro": "Личный путь `dfl`: бриф, дизайн, декомпозиция и задачи — «{subject}».",
+        "passed": (
             "Бриф одобрен владельцем в разговоре; дизайн и декомпозиция прошли "
             "edge-check своих рёбер."
         ),
-    ]
+        "accepted": "Принято вопреки замечаниям edge-check (журнал прогона):",
+        "commit": "spec({ws_id}): личный путь",
+    },
+    "en": {
+        "intro": (
+            'Personal `dfl` path: brief, design, decomposition and tasks — "{subject}".'
+        ),
+        "passed": (
+            "The brief was approved by the owner in conversation; design and "
+            "decomposition passed the edge-check of their edges."
+        ),
+        "accepted": "Accepted despite edge-check findings (run journal):",
+        "commit": "spec({ws_id}): personal path",
+    },
+}
+
+
+def _pr_body(run: PersonalRun) -> str:
+    texts = _PR_TEXTS[run.language]
+    lines = [texts["intro"].format(subject=run.subject), "", texts["passed"]]
     accepted = sorted(
         f"{node}/{edge} {rule}"
         for wave in WAVES.values()
         for node, edge, rule in (_accepted(run, wave) or set())
     )
     if accepted:
-        lines += ["", "Принято вопреки замечаниям edge-check (журнал прогона):"]
+        lines += ["", texts["accepted"]]
         lines += [f"- {key}" for key in accepted]
-    remarks = rp.pr_section(run_dir(run.run_id))
+    remarks = rp.pr_section(run_dir(run.run_id), lang=run.language)
     if remarks:
         lines += ["", remarks.rstrip("\n")]
     return "\n".join(lines) + "\n"
@@ -954,22 +1082,36 @@ def _merge_spec_pr(ctx: _Ctx) -> bool:
         return False
     pr_state = facts.get("state")
     if pr_state == "CLOSED":
-        return ctx.stop(f"spec-PR #{pr} закрыт без мержа — решите вручную ({ABANDON})")
+        return ctx.stop(
+            _msg("spec-PR #{pr} закрыт без мержа — решите вручную ({abandon})", pr=pr)
+        )
     if pr_state != "MERGED":
         refusal = _merge_refusal(run, str(facts.get("headRefOid") or ""))
         if refusal is not None:
-            return ctx.stop(f"spec-PR #{pr} не вмержен — {refusal}")
+            return ctx.stop(
+                _msg("spec-PR #{pr} не вмержен — {why}", pr=pr, why=refusal)
+            )
         rc = ops.human_merge(run.repo, pr, run.spec_head, target_dir=run.target_dir)
         if rc != 0:
             return ctx.stop(
-                f"spec-PR #{pr} не вмержен — human-merge.sh вернул {rc}: "
-                "проверки PR ещё идут или не прошли — повторите dfl run позже"
+                _msg(
+                    "spec-PR #{pr} не вмержен — human-merge.sh вернул {rc}: "
+                    "проверки PR ещё идут или не прошли — повторите dfl run позже",
+                    pr=pr,
+                    rc=rc,
+                )
             )
-        say(f"spec-PR #{pr} вмержен")
+        say(_msg("spec-PR #{pr} вмержен", pr=pr))
     try:
         ops.checkout_and_pull(run.target_dir, ctx.base)
     except _GIT_ERRORS as exc:
-        return ctx.stop(f"checkout/pull {ctx.base} не удался: {exc} — {RETRY}")
+        return ctx.stop(
+            _msg(
+                "checkout/pull {base} не удался: {exc} — {retry}",
+                base=ctx.base,
+                exc=exc,
+            )
+        )
     run.step = "code-run"
     return True
 
@@ -983,15 +1125,20 @@ def _merge_refusal(run: PersonalRun, head: str) -> str | None:
     try:
         mode = config_mode()
     except df_config.ConfigError as exc:
-        return f"конфиг DarkFactory не прочитан: {exc}"
+        return _msg("конфиг DarkFactory не прочитан: {exc}", exc=exc)
     if mode != "test":
-        return f"мерж агентом только в режиме test, конфиг: {mode} — смержите сами"
+        return _msg(
+            "мерж агентом только в режиме test, конфиг: {mode} — смержите сами",
+            mode=mode,
+        )
     if not run.spec_head:
-        return f"запушенная голова не записана — {RETRY}"
+        return _msg("запушенная голова не записана — {retry}")
     if head != run.spec_head:
-        return (
-            f"голова PR {head[:8] or '(нет)'} ≠ запушенной прогоном "
-            f"{run.spec_head[:8]} — ветку меняли снаружи; разберите вручную"
+        return _msg(
+            "голова PR {head} ≠ запушенной прогоном {pushed} — ветку меняли "
+            "снаружи; разберите вручную",
+            head=head[:8] or t("(нет)"),
+            pushed=run.spec_head[:8],
         )
     return None
 
@@ -1000,10 +1147,10 @@ def _facts(ctx: _Ctx, pr: int) -> dict | None:
     try:
         facts = ctx.ops.pr_facts(ctx.run.repo_slug, pr)
     except Exception as exc:  # noqa: BLE001 - любая ошибка форджи = стоп
-        ctx.stop(f"факты PR #{pr} не прочитаны: {exc} — {RETRY}")
+        ctx.stop(_msg("факты PR #{pr} не прочитаны: {exc} — {retry}", pr=pr, exc=exc))
         return None
     if not isinstance(facts, dict):
-        ctx.stop(f"факты PR #{pr} не прочитаны: ответ форджи не объект")
+        ctx.stop(_msg("факты PR #{pr} не прочитаны: ответ форджи не объект", pr=pr))
         return None
     return facts
 
@@ -1025,7 +1172,13 @@ def _run_prs(ctx: _Ctx) -> list[dict] | None:
     try:
         return ctx.ops.prs_by_head_prefix(ctx.run.repo_slug, RUN_BRANCH_PREFIX)
     except RuntimeError as exc:
-        ctx.stop(f"список PR {RUN_BRANCH_PREFIX}* не прочитан: {exc} — {RETRY}")
+        ctx.stop(
+            _msg(
+                "список PR {prefix}* не прочитан: {exc} — {retry}",
+                prefix=RUN_BRANCH_PREFIX,
+                exc=exc,
+            )
+        )
         return None
 
 
@@ -1047,7 +1200,7 @@ def _partial_stop(ctx: _Ctx, prs: list[dict], before: list[int]) -> bool:
     run = ctx.run
     found = run_resume.resume_candidates(prs, before)
     if len(found) > 1:
-        ctx.stop(run_resume.several_stop([n for n, _head in found]))
+        ctx.stop(run_resume.several_stop([n for n, _head in found], lang=run.language))
         return True
     if not found:
         return False
@@ -1055,9 +1208,18 @@ def _partial_stop(ctx: _Ctx, prs: list[dict], before: list[int]) -> bool:
     progress = run_resume.read_progress(
         ctx.ops, run.target_dir, branch, TASKS_PATH.format(ws_id=run.ws_id)
     )
-    say(run_resume.banner(run.subject, run.repo_slug, branch, progress))
-    ctx.stop(run_resume.resume_stop(branch, pr))
+    _resume_banner(ctx, branch, pr, progress)
     return True
+
+
+def _resume_banner(
+    ctx: _Ctx, branch: str, pr: int, progress: tuple[int, int] | None
+) -> None:
+    """Плашка продолжения и стоп «ветку продолжить нельзя» (язык прогона)."""
+    run = ctx.run
+    lang = run.language
+    say(run_resume.banner(run.subject, run.repo_slug, branch, progress, lang=lang))
+    ctx.stop(run_resume.resume_stop(branch, pr, lang=lang))
 
 
 def _step_code_run(ctx: _Ctx) -> bool:
@@ -1075,22 +1237,26 @@ def _step_code_run(ctx: _Ctx) -> bool:
         if pending and run.run_exit is None:
             partial = ", ".join(f"#{n}" for n in pending)
             return ctx.stop(
-                f"исход spec-runner run не наблюдён, открыт integration-PR "
-                f"{partial} — он может быть частичным; закройте его и "
-                f"повторите dfl run (повтор перезапустит раннер; {ABANDON})"
+                _msg(
+                    "исход spec-runner run не наблюдён, открыт integration-PR "
+                    "{partial} — он может быть частичным; закройте его и "
+                    "повторите dfl run (повтор перезапустит раннер; {abandon})",
+                    partial=partial,
+                )
             )
         if run.run_exit not in (None, 0) and _partial_stop(ctx, prs, run.before_prs):
             return False
         before = sorted(set(run.before_prs) | set(current))
     run.before_prs, run.run_exit = before, None
     save(run)  # write-ahead: PR, открытые до запуска, не примутся
-    notice(TUI_HINT.format(ws=run.ws_id))
+    notice(t(TUI_HINT).format(ws=run.ws_id))
     rc = run_progress.watched(
         lambda: ctx.ops.spec_runner(run.target_dir, _run_args(run)),
         target_dir=run.target_dir,
         prefix=f"{run.ws_id}-",
         tasks_rel=TASKS_PATH.format(ws_id=run.ws_id),
         emit=notice,
+        lang=run.language,
     )  # события задач и живой отсчёт на экране (#765)
     run.run_exit = rc
     save(run)
@@ -1098,13 +1264,18 @@ def _step_code_run(ctx: _Ctx) -> bool:
     if rc != 0:
         # причина — код раннера, даже если список PR не прочитан
         partial = [n for n in after or [] if n not in before]
-        promise = (
+        promise = t(
             "повтор покажет, что сделано, и не создаст новую ветку"
             if partial
             else "повтор перезапустит раннер"
         )
         return ctx.stop(
-            f"spec-runner run вернул {rc} — разберите и повторите dfl run ({promise})"
+            _msg(
+                "spec-runner run вернул {rc} — разберите и повторите dfl run "
+                "({promise})",
+                rc=rc,
+                promise=promise,
+            )
         )
     if after is None:
         return False
@@ -1133,7 +1304,7 @@ def _incomplete_stop(ctx: _Ctx, pr: int) -> bool:
         ctx.ops, run.target_dir, branch, TASKS_PATH.format(ws_id=run.ws_id)
     )
     if progress is None:  # готовность не установлена — запись не трогаем
-        ctx.stop(run_resume.unread_stop(branch, pr))
+        ctx.stop(run_resume.unread_stop(branch, pr, lang=run.language))
         return True
     if not run_resume.incomplete(progress):
         return False
@@ -1143,20 +1314,25 @@ def _incomplete_stop(ctx: _Ctx, pr: int) -> bool:
     # «не выполнено» не задвоится: `mc.publish` ищет его по маркеру прогона
     run.manual = {}
     save(run)
-    say(run_resume.banner(run.subject, run.repo_slug, branch, progress))
-    ctx.stop(run_resume.resume_stop(branch, pr))
+    _resume_banner(ctx, branch, pr, progress)
     return True
 
 
 def _take_new_pr(ctx: _Ctx, new: list[int]) -> bool:
     if len(new) != 1:
-        found = f"найдено {len(new)}: {new}" if new else "не найден"
+        found = (
+            _msg("найдено {n}: {new}", n=len(new), new=new) if new else t("не найден")
+        )
         return ctx.stop(
-            f"spec-runner run: ожидался один новый integration-PR, {found} — {RETRY}"
+            _msg(
+                "spec-runner run: ожидался один новый integration-PR, {found} — "
+                "{retry}",
+                found=found,
+            )
         )
     ctx.run.code_pr = new[0]
     ctx.run.step = "code-pr"
-    say(f"integration-PR #{new[0]} открыт")
+    say(_msg("integration-PR #{pr} открыт", pr=new[0]))
     return True
 
 
@@ -1189,6 +1365,7 @@ def _manual(ctx: _Ctx, pr: int) -> bool:
         save=lambda: save(run),
         run_dir=run_dir(run.run_id),
         workdir=Path(run.target_dir),
+        lang=run.language,
     )
     if reason is None:
         return True
@@ -1205,7 +1382,7 @@ def _step_code_pr(ctx: _Ctx) -> bool:
     run = ctx.run
     pr = run.code_pr
     if pr is None:
-        return ctx.stop("integration-PR прогона не известен — повторите dfl run")
+        return ctx.stop(t("integration-PR прогона не известен — повторите dfl run"))
     if _incomplete_stop(ctx, pr):  # первая сверка нового PR (и старых записей)
         return False
     if not _manual(ctx, pr):
@@ -1215,12 +1392,22 @@ def _step_code_pr(ctx: _Ctx) -> bool:
         return False
     if facts.get("state") == "MERGED":
         run.step = "done"
-        done = f"integration-PR #{pr} вмержен — конвейер закончен"
-        tail = mc.summary(mc.checks_of(run.manual), run.manual.get("answers") or {})
+        done = _msg("integration-PR #{pr} вмержен — конвейер закончен", pr=pr)
+        tail = mc.summary(
+            mc.checks_of(run.manual),
+            run.manual.get("answers") or {},
+            lang=run.language,
+        )
         say(f"{done}; {tail}" if tail else done)
         return True
     # `pr_facts` не отдаёт url — ссылка строится из слага и номера
-    say(f"смержите https://github.com/{run.repo_slug}/pull/{pr} — затем dfl run")
+    say(
+        _msg(
+            "смержите https://github.com/{slug}/pull/{pr} — затем dfl run",
+            slug=run.repo_slug,
+            pr=pr,
+        )
+    )
     return False
 
 
