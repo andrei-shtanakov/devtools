@@ -1536,7 +1536,42 @@ def _step(
     новый customer-прогон и переходит в engineer-прогон (`_brief_step`).
     `resolving` — за шагом без разговора идёт разбор замечаний edge-check
     (`_resolve_rounds`): разбираемый стоп (`_resolvable`) — без подсказки
-    «что править»."""
+    «что править».
+
+    Шаг сбросил стоп проверки (resume снял и заново провёл edge-check) —
+    ждущий круг волны устарел: слот снят, новые находки — с круга 1."""
+    before = _current_run(target.repo, subject)
+    mark = _stop_mark(before)
+    code = _step_once(
+        target, subject, role, chatting=chatting, review=review, resolving=resolving
+    )
+    if before is not None and _stop_mark(before) != mark:
+        er.wait_clear(rs.run_dir(before.run_id), _wave_slot(before))
+    return code
+
+
+def _stop_mark(state: rs.RunState | None) -> tuple[int, int] | None:
+    """След файла стопа проверки (`edge-findings.txt`): resume его снимает,
+    новая проверка пишет заново — след меняется."""
+    if state is None:
+        return None
+    try:
+        st_ = (rs.run_dir(state.run_id) / sf.FILE_OF_STATUS[sf.EDGE]).stat()
+    except OSError:
+        return None
+    return (st_.st_ino, st_.st_mtime_ns)
+
+
+def _step_once(
+    target: user_targets.UserTarget,
+    subject: str | None,
+    role: str,
+    *,
+    chatting: bool,
+    review: str | None,
+    resolving: bool,
+) -> int:
+    """Тело `_step`: один шаг конвейера."""
     repo = target.repo
     loop = functools.partial(
         _loop, cwd=target.path, chatting=chatting, resolving=resolving

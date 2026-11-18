@@ -65,6 +65,8 @@ ANSWER_HELP = (
     "номер варианта — отправится сразу · «своё: …» · «не согласен: <почему>» "
     "(пустая строка — отправить) · «пропустить» — остановиться"
 )
+#: подсказка записанного вопроса: только ответы, которые принимает `dfl reply`
+REMOTE_HELP = "номер варианта · «своё: …» · «не согласен: <почему>»"
 REASK = "не понял ответ — номер варианта, «своё: …», «не согласен: …» или «пропустить»"
 NO_REASON = "напишите причину после «не согласен:»"
 KIND_LABELS = {
@@ -565,7 +567,7 @@ def edge_question(q: _Question, question: str) -> pending.Question:
         key="/".join(item.finding.key),
         text="\n".join(_head_lines(q, question)),
         options=options + ((q.offer,) if q.offer is not None else ()),
-        accepts=ANSWER_HELP,
+        accepts=REMOTE_HELP,
     )
 
 

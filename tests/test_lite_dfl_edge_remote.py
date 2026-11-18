@@ -351,3 +351,23 @@ def test_edge_remote_paid_calls_equal_terminal(
     assert (paid, len(remote.prompts), remote.revisions, len(env.spec_calls)) == (
         terminal
     )
+
+
+def test_new_edge_check_resets_saved_round(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """Слот волны остался от круга 2, но шаг заново провёл проверку (ждущего
+    вопроса нет — `dfl answer`, `chat=False`, правка): новые находки — с
+    круга 1, без «принять вопреки»."""
+    _remote(monkeypatch)
+    f = _fakes(env, monkeypatch, ["R1"])
+    _stop(env, "R1")
+    er.wait_save(rs.run_dir(RUN_ID), "wave-2", {"round": 2, "node": None,
+                                                "findings": [], "batch": "old"})  # fmt: skip
+    assert env.run("run", "--subject", "t") == 0
+    assert len(env.spec_calls) == 1 and f.rounds == [1]
+    rec = pending.load(rs.run_dir(RUN_ID))
+    assert rec is not None and er.OVERRIDE_OFFER not in rec["options"]
+    assert _slot() is not None and _slot()["round"] == 1  # type: ignore[index]

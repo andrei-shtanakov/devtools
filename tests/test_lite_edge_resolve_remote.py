@@ -80,7 +80,7 @@ def test_edge_question_written_without_tty(world: World) -> None:  # noqa: F811
     assert rec["key"] == "requirements/requirements-vs-charter/R1"
     assert rec["options"] == ["покрыть требованием (рекомендую)", "убрать FR-02"]
     assert "Цель G-03 — покрыть или отклонить?" in rec["text"]
-    assert rec["accepts"] == er.ANSWER_HELP
+    assert rec["accepts"] == er.REMOTE_HELP
     assert waiting.question is not None and waiting.question.id == rec["id"]
     assert waiting.batch
     assert (calls.triage, calls.revise) == (1, 0)
@@ -372,3 +372,10 @@ def test_personal_edge_remote_paid_calls_equal_terminal(
     term.calls = list(personal.calls)
     assert (term.total(), len(term.prompts), term.revisions()) == remote
     assert remote == ((2, 1, 1, 3), 1, 1)
+
+
+def test_remote_help_offers_only_reply_answers() -> None:
+    """Подсказка записанного вопроса — только то, что принимает `dfl reply`;
+    терминальная — прежняя."""
+    assert "пропустить" not in er.REMOTE_HELP and "пустая" not in er.REMOTE_HELP
+    assert "«пропустить»" in er.ANSWER_HELP
