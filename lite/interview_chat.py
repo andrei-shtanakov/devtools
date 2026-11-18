@@ -47,7 +47,8 @@ PROMPT = "> "
 MORE_PROMPT = "· "
 SEND_HINT = "(пустая строка — отправить)"
 STOP_WORD = "/стоп"
-SKIP_WORDS = frozenset({"пропустить", "не знаю"})
+STOP_WORDS = frozenset({STOP_WORD, "/stop"})
+SKIP_WORDS = frozenset({"пропустить", "не знаю", "don't know", "don’t know", "skip"})
 REFUSED_TEXT = "ответ не принят — ответьте на вопрос ещё раз"
 TOP_UP_HINT = "расскажите об этом своими словами («пропустить» — оставить так)"
 INCOMPLETE_CODES = (10, 11)
@@ -287,7 +288,7 @@ def read_answer(
     lines: list[str] = []
     while True:
         line = read(MORE_PROMPT if lines else PROMPT)
-        if line is None or line.strip() == STOP_WORD:
+        if line is None or line.strip() in STOP_WORDS:
             return None
         if not line.strip():
             if quick is not None and not lines:

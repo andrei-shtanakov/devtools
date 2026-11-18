@@ -28,6 +28,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from lite import i18n
 from lite.interview_chat import Read, read_answer
 from lite.output import say
 from lite.personal.brief import (
@@ -46,10 +47,12 @@ TRANSCRIPT = "interview.jsonl"
 PROMPT_PATH = Path(__file__).parent / "prompts" / "interviewer.md"
 CAP_NOTE = "СЕЙЧАС: лимит вопросов исчерпан"
 CONFIRM = "Верно? 1. да · 2. поправить: <что>"
+#: префикс правки в журнале интервью по языку прогона
+FIX_PREFIXES = {"ru": "поправить: ", "en": "fix: "}
 WHAT_TO_FIX = "Что поправить?"
 #: на «Верно?» словом «да» тоже подтверждают; «не знаю» — поправка, не стоп
-YES_WORDS = frozenset({"да", "верно", "ок"})
-SKIP_WORD = "пропустить"
+YES_WORDS = frozenset({"да", "верно", "ок", "yes", "ok"})
+SKIP_WORDS = frozenset({"пропустить", "skip"})
 FORM_STOP = (
     "агент не ответил по форме дважды подряд — интервью остановлено; "
     "продолжить: dfl run"
@@ -64,7 +67,7 @@ NOTHING_TO_BUILD = (
 )
 CORRUPT_LINE = "строка журнала интервью не прочитана — пропущена"
 _FIX_PREFIX = re.compile(
-    r"^\s*(?:2\s*[.):](?!\d)\s*)?(?:поправить\s*:?\s*)?", re.IGNORECASE
+    r"^\s*(?:2\s*[.):](?!\d)\s*)?(?:(?:поправить|fix)\s*:?\s*)?", re.IGNORECASE
 )
 _SPEAKERS = {"human": "Человек", "check": "Проверка брифа (человек её не видел)"}
 _AGENT_SPEAKERS = {
@@ -173,13 +176,13 @@ def interview(run_dir: Path, subject: str, *, read: Read, agent: Agent) -> Brief
         say(PAID_CALLS.format(n=calls))
 
 
-def append_correction(run_dir: Path, text: str) -> None:
+def append_correction(run_dir: Path, text: str, *, lang: str = "ru") -> None:
     """Правка владельца к подтверждённому брифу — реплика человека
     «поправить: <text>» в журнал интервью (следующий `interview` пересоберёт
     бриф). Та же правка уже есть после последней сводки — не дублируется:
     продолжение прерванного переинтервью идёт с открытого вопроса."""
     log = _Log(run_dir / TRANSCRIPT)
-    fix = f"поправить: {text}"
+    fix = f"{FIX_PREFIXES[lang]}{text}"
     summaries = [i for i, e in enumerate(log.entries) if e.get("kind") == "summary"]
     tail = log.entries[summaries[-1] + 1 :] if summaries else log.entries
     if any(e.get("role") == "human" and e.get("text") == fix for e in tail):
@@ -372,16 +375,16 @@ def _confirmed(brief: Brief, log: _Log, read: Read) -> bool:
     EOF — стоп; иное (и «не знаю») — поправка записывается, `False`."""
     say(render_brief(brief))
     while True:
-        say(CONFIRM)
+        say(i18n.t(CONFIRM))
         text = read_answer(read, quick=str.isdigit)
         word = (text or "").strip().casefold()
-        if text is None or word == SKIP_WORD:
+        if text is None or word in SKIP_WORDS:
             raise _Stop
         if text == "1" or word in YES_WORDS:
             return True
         fix = _correction(text, read)
         if fix:
-            log.append({"role": "human", "text": f"поправить: {fix}"})
+            log.append({"role": "human", "text": FIX_PREFIXES[i18n.current()] + fix})
             return False
 
 

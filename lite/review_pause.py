@@ -27,12 +27,13 @@ from governance.review_remarks import (  # noqa: F401 — публичные и�
     pr_section,
     record,
 )
+from lite import i18n
 from lite import pending as pending_mod
 from lite.interview_chat import STOP_WORD, Read, read_answer
 
 PERSONAL_STAGES = ("brief", "design", "decomposition")
 DONE_WORDS = pending_mod.REVIEW_DONE_WORDS
-_YES_WORDS = frozenset({"1", "да"})
+_YES_WORDS = frozenset({"1", "да", "yes"})
 _NO_WORDS = pending_mod.CONFIRM_KEEP_WORDS
 #: что принимает `dfl reply` на паузе этапа, кроме брифа (#766 срез 2)
 REMOTE_ACCEPTS = "«дальше» или замечания своими словами"
@@ -93,7 +94,7 @@ def question(stage: str, stage_label: str, paths: list[Path]) -> pending_mod.Que
         stage,
         f"этап «{stage_label}» готов и прошёл проверку — посмотрите",
         links=tuple(f"file://{p.resolve()}" for p in paths),
-        accepts="«дальше»" if stage == "brief" else REMOTE_ACCEPTS,
+        accepts=i18n.t("«дальше»" if stage == "brief" else REMOTE_ACCEPTS),
     )
 
 
@@ -130,7 +131,7 @@ def confirm_removals(
         question, word = _QUESTIONS[(kinds or {}).get(item, REMOVE)]
         title = (titles or {}).get(item, "")
         notice(question.format(named=_named(item, title)))
-        yes = _YES_WORDS | {word}
+        yes = _YES_WORDS | _agree_words(word)
         answer = _choice(read, yes)
         while answer == "":
             notice(UNCLEAR_ANSWER)
@@ -151,6 +152,11 @@ def _choice(read: Read, yes: frozenset[str]) -> str | None:
         return None
     word = answer.strip().casefold()
     return word if word in yes | _NO_WORDS else ""
+
+
+def _agree_words(word: str) -> frozenset[str]:
+    """Слово согласия вида правки на двух языках (`удалить` и `remove`)."""
+    return frozenset({word, pending_mod.AGREE_EN[word]})
 
 
 def _named(item: str, title: str) -> str:
@@ -175,7 +181,7 @@ def confirm_answer(text: str, kind: str) -> bool | None:
     """Ответ на вопрос вида `kind`: `True` — согласие, `False` — оставить,
     `None` — не разобран (слово чужого вопроса — не согласие)."""
     word = text.strip().casefold()
-    if word in _YES_WORDS | {_QUESTIONS[kind][1]}:
+    if word in _YES_WORDS | _agree_words(_QUESTIONS[kind][1]):
         return True
     if word in _NO_WORDS:
         return False

@@ -39,7 +39,7 @@ from governance.edge_check.rules import EdgeCheckError, load_rules
 from governance.ops import _AUTHOR_FILENAMES
 from lite import edge_journal as ej
 from lite import edge_memory as em
-from lite import node_guard, pending
+from lite import i18n, node_guard, pending
 from lite import stop_findings as sf
 from lite.edge_triage import Item, Option, triage
 from lite.interview_chat import Read, is_skip, read_answer
@@ -61,6 +61,8 @@ WAIT_FILE = "edge-wait.json"
 STOPPED_LINE = "разбор остановлен — продолжить: dfl run"
 OWN_PREFIX = "своё:"
 DISAGREE_PREFIX = "не согласен:"
+OWN_PREFIXES = pending.EDGE_OWN_PREFIXES
+DISAGREE_PREFIXES = pending.EDGE_DISAGREE_PREFIXES
 ANSWER_HELP = (
     "номер варианта — отправится сразу · «своё: …» · «не согласен: <почему>» "
     "(пустая строка — отправить) · «пропустить» — остановиться"
@@ -567,7 +569,7 @@ def edge_question(q: _Question, question: str) -> pending.Question:
         key="/".join(item.finding.key),
         text="\n".join(_head_lines(q, question)),
         options=options + ((q.offer,) if q.offer is not None else ()),
-        accepts=REMOTE_HELP,
+        accepts=i18n.t(REMOTE_HELP),
     )
 
 
@@ -600,7 +602,7 @@ def _ask(
         say(f"  {no}. {_option_line(option)}")
     if offer is not None:
         say(f"  {len(item.options) + 1}. {offer}")
-    say(ANSWER_HELP)
+    say(i18n.t(ANSWER_HELP))
     recorded = pending.take(run_dir, remote)
     if recorded is not None:
         decision = _parse(item, question, recorded, offer, round_no)
@@ -616,7 +618,11 @@ def _ask(
         if decision is not None:
             return decision
         if attempt == 0:
-            say(NO_REASON if _starts(text, DISAGREE_PREFIX) else REASK)
+            say(
+                i18n.t(NO_REASON)
+                if _starts_any(text, DISAGREE_PREFIXES)
+                else i18n.t(REASK)
+            )
     return Outcome.STOPPED
 
 
@@ -682,10 +688,11 @@ def _parse(
         if offer is not None and no == len(item.options) + 1:
             return made(offer, "override", {})
         return None
-    for prefix, kind in ((OWN_PREFIX, "own"), (DISAGREE_PREFIX, "disagree")):
-        if _starts(text, prefix):
-            rest = text[len(prefix) :].strip()
-            return made(rest, kind, {}) if rest else None
+    for prefixes, kind in ((OWN_PREFIXES, "own"), (DISAGREE_PREFIXES, "disagree")):
+        for prefix in prefixes:
+            if _starts(text, prefix):
+                rest = text[len(prefix) :].strip()
+                return made(rest, kind, {}) if rest else None
     return None
 
 
@@ -696,6 +703,10 @@ def _fold(text: str) -> str:
 
 def _starts(text: str, prefix: str) -> bool:
     return _fold(text.strip()).startswith(_fold(prefix))
+
+
+def _starts_any(text: str, prefixes: tuple[str, ...]) -> bool:
+    return any(_starts(text, prefix) for prefix in prefixes)
 
 
 def _where(f: ej.Finding) -> str:

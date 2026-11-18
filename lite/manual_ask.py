@@ -15,6 +15,7 @@ from pathlib import Path
 from governance import manual_checks as mc
 from governance.auto_tasks import notice
 from lite import pending
+from lite.i18n_en import EN
 from lite.interview_chat import Read, read_answer
 
 NO_TTY = "ждут ответа {n} ручных проверок — запустите dfl run в терминале"
@@ -35,14 +36,17 @@ STALE_MERGED_WARNING = (
     "старом коде; сначала: git pull"
 )
 
+#: формы стопа на обоих языках: английские — из каталога, чтобы не разойтись
+_PAUSED_FORMS = (PAUSED, EN[PAUSED])
+_WAIT_HEADS = tuple(form.split("{", 1)[0] for form in (NO_TTY, EN[NO_TTY])) + (
+    WAIT_PREFIX,
+    EN[WAIT_PREFIX],
+)
+
 
 def is_wait(reason: str) -> bool:
-    """Стоп «ждём человека» (код 0), а не сбой (код 1)."""
-    return (
-        reason == PAUSED
-        or reason.startswith(NO_TTY.split("{", 1)[0])
-        or reason.startswith(WAIT_PREFIX)
-    )
+    """Стоп «ждём человека» (код 0), а не сбой (код 1); оба языка."""
+    return reason in _PAUSED_FORMS or reason.startswith(_WAIT_HEADS)
 
 
 def ask_one(check: mc.ManualCheck, read: Read) -> dict | None:

@@ -658,7 +658,7 @@ def _brief_by_owner(ctx: _Ctx, batch: list[rp.Remark]) -> bool:
     """Замечание к брифу — правка интервьюеру («поправить: …» в журнал
     интервью), бриф пересобирается и снова подтверждается «Верно?»."""
     rd = run_dir(ctx.run.run_id)
-    append_correction(rd, "\n".join(r.text for r in batch))
+    append_correction(rd, "\n".join(r.text for r in batch), lang=ctx.run.language)
     return _interview(ctx, rd)
 
 

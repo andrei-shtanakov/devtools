@@ -140,4 +140,46 @@ EN: dict[str, str] = {
         "the repo's enterprise pipelines were not checked — a run journal is "
         "unreadable (dfl status names it)"
     ),
+    # слова и подсказки ответа (Task 3)
+    "ждёт ответа: ": "awaiting an answer: ",
+    "ответы на ручные проверки — потом: dfl run": (
+        "answers to the manual checks — then: dfl run"
+    ),
+    "ждут ответа {n} ручных проверок — запустите dfl run в терминале": (
+        "manual checks await an answer: {n} — run dfl run in a terminal"
+    ),
+    (
+        "замечания к этапу пока принимаются только в терминале: dfl run; "
+        "без замечаний — «дальше»"
+    ): (
+        "remarks on the stage are accepted only in the terminal for now: dfl run; "
+        "with no remarks — “next”"
+    ),
+    "ответ: «дальше» или замечания словами": (
+        "answer: “next” or your remarks in words"
+    ),
+    "ответ: 1/выполнено, 2/не выполнено[: заметка], 3/с оговоркой: <текст>": (
+        "answer: 1/passed, 2/failed[: note], 3/passed with caveat: <text>"
+    ),
+    "ответ: 1/{yes} или 2/оставить": "answer: 1/{yes} or 2/keep",
+    "ответ: номер варианта 1–{n}, «своё: …» или «не согласен: <почему>»": (
+        "answer: option number 1–{n}, “own: …” or “disagree: <why>”"
+    ),
+    (
+        "номер варианта — отправится сразу · «своё: …» · «не согласен: <почему>» "
+        "(пустая строка — отправить) · «пропустить» — остановиться"
+    ): (
+        "option number — sent at once · “own: …” · “disagree: <why>” "
+        "(empty line — send) · “skip” — stop"
+    ),
+    "номер варианта · «своё: …» · «не согласен: <почему>»": (
+        "option number · “own: …” · “disagree: <why>”"
+    ),
+    (
+        "не понял ответ — номер варианта, «своё: …», «не согласен: …» или «пропустить»"
+    ): "did not get that — an option number, “own: …”, “disagree: …” or “skip”",
+    "напишите причину после «не согласен:»": "write the reason after “disagree:”",
+    "«дальше»": "“next”",
+    "«дальше» или замечания своими словами": "“next” or your remarks in your own words",
+    "Верно? 1. да · 2. поправить: <что>": "Correct? 1. yes · 2. fix: <what>",
 }
