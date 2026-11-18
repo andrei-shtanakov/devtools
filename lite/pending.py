@@ -246,10 +246,10 @@ def _fold(text: str) -> str:
 def _check_edge(text: str, rec: Mapping | None) -> str | None:
     n = len(_options(rec))
     body = text.strip()
-    if body.isdigit() and 1 <= int(body) <= n:
+    if body.isascii() and body.isdigit() and 1 <= int(body) <= n:
         return None
+    folded = _fold(body)
     for prefix in (EDGE_OWN_PREFIX, EDGE_DISAGREE_PREFIX):
-        folded = _fold(body)
         if folded.startswith(_fold(prefix)) and body[len(prefix) :].strip():
             return None
     return EDGE_REFUSAL.format(n=n)

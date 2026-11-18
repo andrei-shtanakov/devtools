@@ -179,3 +179,9 @@ def test_record_checks_against_recorded_question(tmp_path):
     with pytest.raises(pending.PendingError):
         pending.record(tmp_path, q.id, "2")
     pending.record(tmp_path, q.id, "1")
+
+
+def test_edge_reply_non_ascii_digits_refused():
+    rec = _rec(pending.EDGE, "a/b/R1", ("А", "Б"))
+    for bad in ("²", "①", "٢"):
+        assert pending.check(pending.EDGE, bad, rec) == pending.EDGE_REFUSAL.format(n=2)
