@@ -119,12 +119,12 @@ def confirm_removals(
     for item in ids:
         question, word = _QUESTIONS[(kinds or {}).get(item, REMOVE)]
         title = (titles or {}).get(item, "")
-        notice(question.format(named=f"{item} — «{title}»" if title else item))
+        notice(question.format(named=_named(item, title)))
         yes = _YES_WORDS | {word}
         answer = _choice(read, yes)
         while answer == "":
             notice(UNCLEAR_ANSWER)
-            notice(question.format(named=f"{item} — «{title}»" if title else item))
+            notice(question.format(named=_named(item, title)))
             answer = _choice(read, yes)
         if answer is None:
             return None

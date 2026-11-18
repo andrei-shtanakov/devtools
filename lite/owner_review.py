@@ -31,6 +31,7 @@ WAITING = "waiting"
 #: первая правка, ждущая ответов (`store / CANDIDATE_FILE`): платный вызов
 #: автора не повторяется, пока файл этапа и замечания те же
 CANDIDATE_FILE = "owner-revise.json"
+NO_STORE = "ask без store: кандидата правки негде сохранить"
 _FINAL = frozenset({ACCEPTED, UNCLEAR, FAILED})
 UNCLEAR_REMARK = (
     "замечание не применено: правка удаляла или ослабляла {ids} — "
@@ -94,7 +95,11 @@ def revise_by_owner(
 
     `ask` — спрашивалка без терминала; `store` — каталог прогона, где живёт
     кандидат первой правки (`CANDIDATE_FILE`) и `pending.json`; `stage` —
-    этап в ключе вопроса. Без `ask` и `store` — прежнее поведение."""
+    этап в ключе вопроса. Без `ask` и `store` — прежнее поведение.
+    `ask` без `store` — `ValueError`: без кандидата платная правка
+    повторялась бы молча."""
+    if ask is not None and store is None:
+        raise ValueError(NO_STORE)
     before = path.read_text(encoding="utf-8")
     ctx = _Ctx(read, ask, store, stage)
     try:
