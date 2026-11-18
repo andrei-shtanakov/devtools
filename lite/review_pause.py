@@ -33,7 +33,9 @@ from lite.interview_chat import STOP_WORD, Read, read_answer
 PERSONAL_STAGES = ("brief", "design", "decomposition")
 DONE_WORDS = pending_mod.REVIEW_DONE_WORDS
 _YES_WORDS = frozenset({"1", "да"})
-_NO_WORDS = frozenset({"2", "нет", "оставить", "оставить как было"})
+_NO_WORDS = pending_mod.CONFIRM_KEEP_WORDS
+#: что принимает `dfl reply` на паузе этапа, кроме брифа (#766 срез 2)
+REMOTE_ACCEPTS = "«дальше» или замечания своими словами"
 UNCLEAR_ANSWER = "не понял ответ — номер или слово варианта"
 #: вид правки → (вопрос, слово согласия): слово чужого вопроса — не согласие
 REMOVE, DOWNGRADE, CHANGE = "remove", "downgrade", "change"
@@ -91,17 +93,25 @@ def question(stage: str, stage_label: str, paths: list[Path]) -> pending_mod.Que
         stage,
         f"этап «{stage_label}» готов и прошёл проверку — посмотрите",
         links=tuple(f"file://{p.resolve()}" for p in paths),
-        accepts="«дальше»",
+        accepts="«дальше»" if stage == "brief" else REMOTE_ACCEPTS,
     )
 
 
 def ask_remote(
     stage: str, stage_label: str, paths: list[Path], *, ask: pending_mod.Ask
 ) -> str | None:
-    """Пауза без терминала: `""` — «дальше»; `None` — ответа ещё нет
-    (вопрос записан, прогон ждёт)."""
+    """Пауза без терминала: `""` — «дальше»; текст — замечания (`dfl reply`);
+    `None` — ответа ещё нет (вопрос записан, прогон ждёт)."""
     answer = ask(question(stage, stage_label, paths))
-    return None if answer is None else ""
+    if answer is None:
+        return None
+    return reply_text(answer)
+
+
+def reply_text(answer: str) -> str:
+    """Ответ `dfl reply` на паузу: `""` — «дальше», иначе текст замечаний.
+    Одно правило для пути без терминала и для записанного ответа в терминале."""
+    return "" if pending_mod.is_done(answer) else answer.strip()
 
 
 def confirm_removals(
@@ -119,12 +129,12 @@ def confirm_removals(
     for item in ids:
         question, word = _QUESTIONS[(kinds or {}).get(item, REMOVE)]
         title = (titles or {}).get(item, "")
-        notice(question.format(named=f"{item} — «{title}»" if title else item))
+        notice(question.format(named=_named(item, title)))
         yes = _YES_WORDS | {word}
         answer = _choice(read, yes)
         while answer == "":
             notice(UNCLEAR_ANSWER)
-            notice(question.format(named=f"{item} — «{title}»" if title else item))
+            notice(question.format(named=_named(item, title)))
             answer = _choice(read, yes)
         if answer is None:
             return None
@@ -141,3 +151,59 @@ def _choice(read: Read, yes: frozenset[str]) -> str | None:
         return None
     word = answer.strip().casefold()
     return word if word in yes | _NO_WORDS else ""
+
+
+def _named(item: str, title: str) -> str:
+    return f"{item} — «{title}»" if title else item
+
+
+def confirm_question(
+    stage: str, item: str, kind: str, title: str
+) -> pending_mod.Question:
+    """Вопрос «Удалить …?» (вид — `kind`) для `dfl pending`; тот же текст,
+    что в терминале."""
+    question, word = _QUESTIONS[kind]
+    return pending_mod.Question(
+        pending_mod.REMARKS_CONFIRM,
+        f"{stage}:{item}",
+        question.format(named=_named(item, title)),
+        options=(word, "оставить"),
+    )
+
+
+def confirm_answer(text: str, kind: str) -> bool | None:
+    """Ответ на вопрос вида `kind`: `True` — согласие, `False` — оставить,
+    `None` — не разобран (слово чужого вопроса — не согласие)."""
+    word = text.strip().casefold()
+    if word in _YES_WORDS | {_QUESTIONS[kind][1]}:
+        return True
+    if word in _NO_WORDS:
+        return False
+    return None
+
+
+def confirm_remote(
+    items: list[str],
+    *,
+    stage: str,
+    titles: Mapping[str, str],
+    kinds: Mapping[str, str],
+    ask: pending_mod.Ask,
+    answers: dict[str, bool],
+) -> set[str] | None:
+    """Подтверждение без терминала: по каждому id без ответа в `answers`
+    спросить через `ask`; ответ — в `answers` (сохраняет вызывающий).
+    `None` — вопрос записан, прогон ждёт; иначе разрешённые id."""
+    for item in items:
+        if item in answers:
+            continue
+        kind = kinds.get(item, REMOVE)
+        q = confirm_question(stage, item, kind, titles.get(item, ""))
+        reply = ask(q)
+        parsed = None if reply is None else confirm_answer(reply, kind)
+        if parsed is None:
+            if reply is not None:
+                ask(q)  # непонятный ответ — вопрос записывается снова
+            return None
+        answers[item] = parsed
+    return {item for item in items if answers[item]}

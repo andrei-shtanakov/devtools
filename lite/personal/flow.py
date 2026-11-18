@@ -30,6 +30,7 @@ from governance.edge_check.check import run_check
 from governance.facts import Outcome as FactOutcome
 from governance.ops import Ops
 from lite import edge_journal as ej
+from lite import edge_resolve as er
 from lite import manual_ask as ma
 from lite import node_guard, pending
 from lite import owner_review as orv
@@ -335,7 +336,11 @@ def _load_brief(ctx: _Ctx) -> Brief | None:
 
 
 def _node(ctx: _Ctx, kind: str) -> bool:
-    """Узел написан и прошёл своё ребро (с разбором замечаний); иначе стоп."""
+    """Узел написан и прошёл своё ребро (с разбором замечаний); иначе стоп.
+
+    Без терминала вопрос разбора ждёт `dfl reply` (код 0): круг, находки и
+    хэш узла — в слоте `er.WAIT_FILE`; следующий `dfl run` на неизменном
+    узле продолжает этот круг без повторной (платной) проверки ребра."""
     name = FILENAMES[kind]
     if not (ctx.bundle / name).exists():
         ctx.calls.author += 1
@@ -345,9 +350,54 @@ def _node(ctx: _Ctx, kind: str) -> bool:
                 f"автор {name} не написал узел: {outcome.reason or outcome.code}"
                 f" — {RETRY}"
             )
-    ctx.calls.check += 1  # каждая проверка ребра платная, и первая
-    result = check_node(ctx.run, kind, check=ctx.check)
-    round_no = 0
+    rd = run_dir(ctx.run.run_id)
+    saved = _saved_round(ctx, kind)
+    moved = _node_rounds(ctx, kind, saved)
+    if moved is None:
+        return False  # вопрос записан, слот — ждущий круг
+    er.wait_clear(rd, _slot(kind))
+    return moved
+
+
+def _slot(kind: str) -> str:
+    return f"node-{kind}"
+
+
+def _node_sha(ctx: _Ctx, kind: str) -> str:
+    return hashlib.sha256((ctx.bundle / FILENAMES[kind]).read_bytes()).hexdigest()
+
+
+def _saved_round(ctx: _Ctx, kind: str) -> dict | None:
+    """Ждущий круг узла, если файл узла тот же; узел правили (или запись
+    не читается) — запись и вопрос сняты, проверка заново."""
+    rd = run_dir(ctx.run.run_id)
+    saved = er.wait_load(rd, _slot(kind))
+    if saved is None:
+        return None
+    try:
+        if saved.get("node") == _node_sha(ctx, kind):
+            er.findings_from_json(saved["findings"])
+            if 1 <= int(saved["round"]) <= MAX_ROUNDS:
+                return saved
+    except (OSError, TypeError, KeyError, ValueError):
+        pass
+    er.wait_clear(rd, _slot(kind))
+    if (pending.load(rd) or {}).get("kind") == pending.EDGE:
+        pending.discard(rd)  # вопрос был о прежнем тексте узла
+    return None
+
+
+def _node_rounds(ctx: _Ctx, kind: str, saved: dict | None) -> bool | None:
+    """Проверка ребра и круги разбора; `None` — вопрос ждёт `dfl reply`."""
+    name = FILENAMES[kind]
+    if saved is None:
+        ctx.calls.check += 1  # каждая проверка ребра платная, и первая
+        result = check_node(ctx.run, kind, check=ctx.check)
+        round_no = 0
+    else:  # ждущий круг на том же узле: находки записаны, проверка не нужна
+        result = NodeCheck("FAIL", er.findings_from_json(saved["findings"]), "")
+        round_no = int(saved["round"]) - 1
+    batch = str((saved or {}).get("batch") or "")
     while True:
         if result.failure:  # RF-5: без разбора и без переписывания
             return ctx.stop(f"проверка ребра не состоялась: {result.failure}")
@@ -364,8 +414,10 @@ def _node(ctx: _Ctx, kind: str) -> bool:
                 f"круга — поправьте узел и повторите dfl run ({ABANDON})"
             )
         round_no += 1
+        waiting = er.Waiting(batch=batch)
+        batch = ""  # следующий круг — новая партия
         outcome = resolve_scope(
-            _scope(ctx.run, kind),
+            _scope(ctx, kind, waiting),
             result.findings,
             read=ctx.read,
             agent=ctx.agent,
@@ -373,6 +425,10 @@ def _node(ctx: _Ctx, kind: str) -> bool:
             round_no=round_no,
             calls=ctx.calls,
         )
+        if outcome is Outcome.WAITING and waiting.question is not None:
+            _save_round(ctx, kind, round_no, result.findings, waiting.batch)
+            _stop_wait(ctx, pending.wait_line(waiting.question))
+            return None
         if outcome not in _RECHECK:
             return ctx.stop(
                 f"разбор замечаний к {name} не завершён ({outcome.value}) — {RETRY}"
@@ -419,17 +475,35 @@ def _foreign_findings_reason(name: str, foreign: list[ej.Finding]) -> str:
     )
 
 
-def _scope(run: PersonalRun, kind: str) -> Scope:
-    """Scope разбора (R8-c): роли оснований — ключи `FILENAMES`."""
+def _scope(ctx: _Ctx, kind: str, waiting: er.Waiting) -> Scope:
+    """Scope разбора (R8-c): роли оснований — ключи `FILENAMES`; без
+    терминала вопросы — через `dfl reply` (`pending.asker`)."""
+    run = ctx.run
+    rd = run_dir(run.run_id)
     return Scope(
-        run_dir=run_dir(run.run_id),
+        run_dir=rd,
         target_dir=run.target_dir,
         bundle_dir=run.bundle_dir,
         wave=WAVES[kind],
         can_override=True,
         filenames=FILENAMES,
         subject=run.subject,
+        ask=None if ctx.tty() else pending.asker(rd),
+        waiting=waiting,
     )
+
+
+def _save_round(
+    ctx: _Ctx, kind: str, round_no: int, findings: list[ej.Finding], batch: str
+) -> None:
+    """Ждущий круг узла: номер, хэш файла узла, находки и партия ответов."""
+    data = {
+        "round": round_no,
+        "node": _node_sha(ctx, kind),
+        "findings": er.findings_json(findings),
+        "batch": batch,
+    }
+    er.wait_save(run_dir(ctx.run.run_id), _slot(kind), data)
 
 
 def _passed(run: PersonalRun, kind: str, result: NodeCheck) -> bool:
@@ -463,7 +537,9 @@ def _review(ctx: _Ctx, stage: str, files: list[str]) -> bool:
     только словами: файл, разошедшийся с `brief.json`, возвращается к его
     рендеру с подсказкой, и пауза снова (дальше читают `brief.json`).
     `/стоп`/EOF — пауза (код 0); без терминала — тоже пауза (код 0)
-    с подсказкой-ссылкой: ждёт человека, не сбой.
+    с подсказкой-ссылкой: ждёт человека, не сбой. Замечания к дизайну и
+    декомпозиции приходят и через `dfl reply` (#766 срез 2); к брифу — только
+    в терминале.
     """
     rd = run_dir(ctx.run.run_id)
     paths = [ctx.bundle / name for name in files]
@@ -479,7 +555,9 @@ def _review(ctx: _Ctx, stage: str, files: list[str]) -> bool:
     round_no = 0
     while True:
         batch = rp.pending(rd, stage)
-        if batch and not ctx.tty():
+        if batch and stage == "brief" and not ctx.tty():
+            # бриф правится интервьюером — только в терминале (`dfl reply`
+            # замечания к брифу не принимает)
             return _stop_wait(ctx, NO_TTY.format(label=label, links=orv.links(paths)))
         if batch:
             round_no += 1
@@ -535,7 +613,8 @@ def _stop_wait(ctx: _Ctx, reason: str) -> bool:
 
 
 def _pause_answer(ctx: _Ctx, stage: str, label: str, paths: list[Path]) -> str | None:
-    """Ответ на паузе: `""` — «дальше»; `None` — стоп или ввод прерван.
+    """Ответ на паузе: `""` — «дальше»; текст — замечания; `None` — стоп
+    или ввод прерван.
 
     Без терминала вопрос записывается для `dfl reply` (`stop_reason` — строка
     ожидания); в терминале — `_ask_pause`."""
@@ -553,8 +632,9 @@ def _ask_pause(ctx: _Ctx, stage: str, label: str, paths: list[Path]) -> str | No
     (терминал побеждает: после живого ответа вопрос снят)."""
     rd = run_dir(ctx.run.run_id)
     q = rp.question(stage, label, paths)
-    if pending.take(rd, q) is not None:
-        return ""
+    recorded = pending.take(rd, q)
+    if recorded is not None:
+        return rp.reply_text(recorded)
     answer = rp.ask(label, paths, read=ctx.read)
     if answer is not None:
         pending.discard(rd)
@@ -587,22 +667,30 @@ def _revise_by_owner(ctx: _Ctx, stage: str, batch: list[rp.Remark]) -> bool:
     принята — файл возвращён: сбой — стоп; `/стоп` на вопросе удаления —
     пауза (замечание остаётся недоигранным); правка всё равно ослабляет узел
     — замечание отклоняется (`mark_dropped`, повторно не переигрывается) и
-    стоп с просьбой сформулировать иначе."""
+    стоп с просьбой сформулировать иначе. Без терминала вопрос об удалении
+    ждёт `dfl reply` (`WAITING` — код 0); кандидат правки — в каталоге
+    прогона, следующий `dfl run` (и в терминале) автора не зовёт."""
     kind = _STAGE_KINDS[stage]
+    rd = run_dir(ctx.run.run_id)
     outcome, detail = orv.revise_by_owner(
         ctx.bundle / FILENAMES[kind],
         orv.decisions(batch),
         revise=functools.partial(_owner_revise, ctx, kind),
         read=ctx.read,
+        ask=None if ctx.tty() else pending.asker(rd),
+        store=rd,
+        stage=stage,
     )
     if outcome == orv.ACCEPTED:
         return True
+    if outcome == orv.WAITING:
+        return _stop_wait(ctx, detail)
     if outcome == orv.PAUSED:
         ctx.run.stop_reason = REVIEW_PAUSED.format(label=STAGE_LABELS[stage])
         say(ctx.run.stop_reason)
         return False
     if outcome == orv.UNCLEAR:
-        rp.mark_dropped(run_dir(ctx.run.run_id), stage, len(batch))
+        rp.mark_dropped(rd, stage, len(batch))
         return ctx.stop(UNCLEAR_REMARK.format(ids=detail))
     return ctx.stop(f"{detail} — {RETRY}")
 

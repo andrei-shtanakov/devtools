@@ -19,9 +19,11 @@ from tests.test_lite_dfl_owner_review import (
     _design,
     _steps,
 )
+from tests.test_lite_dfl_owner_review import _author as _enterprise_author
 from tests.test_lite_personal_flow import FakeOps, checker
 from tests.test_lite_personal_review import (
     _advance,
+    _author,
     _bundle,
     _lines,
     _no_read,
@@ -72,11 +74,18 @@ def test_personal_pause_terminal_live_answer_clears_pending(tmp_path) -> None:
     assert pending.load(state.run_dir(run.run_id)) is None
 
 
-def test_personal_remarks_without_tty_keep_old_hint(tmp_path) -> None:
+def test_personal_remarks_without_tty_are_revised(tmp_path) -> None:
+    """Срез 2 (#766): недоигранное замечание без терминала правится автором
+    (прежде — стоп «замечания — dfl run в терминале»)."""
     run = _run(tmp_path, ("design",))
-    rp.record(state.run_dir(run.run_id), "design", "добавь логи")
-    assert _advance(run, FakeOps(run), read=_no_read, tty=False) == 0
-    assert "замечания — dfl run в терминале" in run.stop_reason
+    rd = state.run_dir(run.run_id)
+    rp.record(rd, "design", "добавь логи")
+    author = _author(DESIGN + "\nЛоги пишутся в stderr.\n")
+    assert _advance(run, FakeOps(run), read=_no_read, launch=author, tty=False) == 0
+    assert "замечания — dfl run в терминале" not in run.stop_reason
+    assert len(author.prompts) == 1  # type: ignore[attr-defined]
+    assert [(r.text, r.applied) for r in rp.all_remarks(rd)] == [("добавь логи", True)]
+    _waiting_line(run)  # перепроверен, пауза снова
 
 
 def test_pause_manual_edit_then_done_rechecks(tmp_path) -> None:
@@ -166,20 +175,28 @@ def test_enterprise_terminal_uses_recorded_reply(
     assert pending.load(rd) is None
 
 
-def test_enterprise_remarks_without_tty_keep_old_hint(
+def test_enterprise_remarks_without_tty_are_revised(
     env: Env,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
     capfd: pytest.CaptureFixture[str],
 ) -> None:
+    """Срез 2 (#766): недоигранное замечание без терминала правится автором
+    (прежде — стоп «замечания — dfl run в терминале»)."""
     _bind_streams(monkeypatch)
     _tty(monkeypatch, False)
     _steps(env, monkeypatch)
+    calls = _enterprise_author(monkeypatch, DESIGN + "\nуточнено\n")
     assert env.run("run", "--subject", "t") == 0
     rp.record(rs.run_dir(RUN_ID), "design", "уточнить D-01")
     _read(capfd)
     assert env.run("run", "--subject", "t") == 0
     out, _ = _read(capfd)
-    assert "замечания — dfl run в терминале" in out
+    assert "замечания — dfl run в терминале" not in out
+    assert len(calls) == 1
+    assert rs.load(RUN_ID).ops["review-pause-4"] == {
+        "status": "started",
+        "revised": True,
+    }
 
 
 def test_ask_remote_unit(tmp_path) -> None:
@@ -188,7 +205,7 @@ def test_ask_remote_unit(tmp_path) -> None:
     ask = pending.asker(tmp_path)
     assert rp.ask_remote("design", "дизайн", [path], ask=ask) is None
     q = rp.question("design", "дизайн", [path])
-    assert q.accepts == "«дальше»" and q.links == (f"file://{path.resolve()}",)
+    assert q.accepts == rp.REMOTE_ACCEPTS and q.links == (f"file://{path.resolve()}",)
     pending.record(tmp_path, q.id, "ок")
     assert rp.ask_remote("design", "дизайн", [path], ask=ask) == ""
 
@@ -263,3 +280,38 @@ def test_enterprise_live_answer_drops_recorded_reply(
     assert env.run("run", "--subject", "t") == 0
     replies = rd / pending.REPLIES_FILE
     assert not replies.exists() or qid not in json.loads(replies.read_text("utf-8"))
+
+
+def test_personal_terminal_recorded_remark_is_revised(tmp_path) -> None:
+    """Ревью #808: замечание, записанное `dfl reply`, в терминале не теряется
+    и не становится «дальше» — его правит автор."""
+    run = _run(tmp_path, ("design",))
+    assert _advance(run, FakeOps(run), read=_no_read, tty=False) == 0
+    _reply(run, "добавь логи")
+    author = _author(DESIGN + "\nЛоги пишутся в stderr.\n")
+    _advance(run, FakeOps(run), read=lambda prompt: None, launch=author, tty=True)
+    assert run.step == "design"  # после правки — пауза снова
+    assert len(author.prompts) == 1  # type: ignore[attr-defined]
+    rd = state.run_dir(run.run_id)
+    assert [(r.text, r.applied) for r in rp.all_remarks(rd)] == [("добавь логи", True)]
+
+
+def test_enterprise_terminal_recorded_remark_is_revised(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ревью #808: enterprise-путь — записанное замечание идёт в правку."""
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch, False)
+    _steps(env, monkeypatch)
+    calls = _enterprise_author(monkeypatch, DESIGN + "\nуточнено\n")
+    assert env.run("run", "--subject", "t") == 0
+    rd = rs.run_dir(RUN_ID)
+    rec = pending.load(rd)
+    assert rec is not None
+    pending.record(rd, str(rec["id"]), "уточнить D-01")
+    _tty(monkeypatch)
+    monkeypatch.setattr(ic, "stdin_read", lambda prompt: "дальше")
+    env.run("run", "--subject", "t")
+    assert len(calls) == 1
+    assert [r.text for r in rp.all_remarks(rd)] == ["уточнить D-01"]

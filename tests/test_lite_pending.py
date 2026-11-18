@@ -42,16 +42,16 @@ def test_record_refuses_without_pending(tmp_path):
 
 
 def test_record_refuses_bad_answer(tmp_path):
-    q = pending.Question(pending.REVIEW, "a", "x")
+    q = pending.Question(pending.REVIEW, "brief", "x")
     pending.asker(tmp_path)(q)
     with pytest.raises(pending.PendingError, match="в терминале"):
         pending.record(tmp_path, q.id, "поправь требования")
     assert not (tmp_path / pending.REPLIES_FILE).exists()
 
 
-def test_check_review_accepts_only_done_words_in_slice1():
+def test_check_review_accepts_remarks_since_slice2():
     assert pending.check(pending.REVIEW, "дальше") is None
-    assert "в терминале" in pending.check(pending.REVIEW, "поправь требования")
+    assert pending.check(pending.REVIEW, "поправь требования") is None
 
 
 def test_check_manual():
@@ -131,3 +131,65 @@ def test_reply_to_same_question_survives_rewrite(tmp_path, monkeypatch):
     assert ask(q) is None
     monkeypatch.setattr(pending, "take", real_take)
     assert ask(q) == "1"
+
+
+def _rec(kind, key="design", options=()):
+    return {"kind": kind, "key": key, "options": list(options)}
+
+
+def test_review_reply_accepts_remarks_except_brief():
+    assert pending.check(pending.REVIEW, "убери D-02", _rec(pending.REVIEW)) is None
+    assert pending.check(pending.REVIEW, "дальше", _rec(pending.REVIEW)) is None
+    brief = _rec(pending.REVIEW, "brief")
+    assert pending.check(pending.REVIEW, "убери", brief) == pending.REVIEW_REFUSAL
+    assert pending.check(pending.REVIEW, "дальше", brief) is None
+    assert pending.check(pending.REVIEW, "правка") is None
+
+
+def test_empty_review_reply_refusal_by_stage():
+    """Пустой ответ: бриф — «только в терминале», прочие этапы и вопрос без
+    записи — «дальше» или замечания словами (замечания `dfl reply` берёт)."""
+    empty = pending.REVIEW_EMPTY_REFUSAL
+    assert empty == "ответ: «дальше» или замечания словами"
+    assert pending.check(pending.REVIEW, "  ", _rec(pending.REVIEW)) == empty
+    assert pending.check(pending.REVIEW, "") == empty
+    brief = _rec(pending.REVIEW, "brief")
+    assert pending.check(pending.REVIEW, " ", brief) == pending.REVIEW_REFUSAL
+
+
+def test_is_done():
+    assert pending.is_done(" Дальше ")
+    assert not pending.is_done("убери")
+
+
+def test_confirm_reply_words():
+    rec = _rec(pending.REMARKS_CONFIRM, "design:D-02", ("удалить", "оставить"))
+    for ok in ("1", "2", "Удалить", "да", "оставить как было", "НЕТ"):
+        assert pending.check(pending.REMARKS_CONFIRM, ok, rec) is None
+    assert pending.check(pending.REMARKS_CONFIRM, "снять", rec) is not None
+
+
+def test_edge_reply_range_and_prefixes():
+    rec = _rec(pending.EDGE, "a/b/R1", ("вариант А", "вариант Б"))
+    assert pending.check(pending.EDGE, "2", rec) is None
+    assert pending.check(pending.EDGE, "3", rec) is not None
+    assert pending.check(pending.EDGE, "0", rec) is not None
+    assert pending.check(pending.EDGE, "Своё: иначе", rec) is None
+    assert pending.check(pending.EDGE, "СВОЕ: иначе", rec) is None
+    assert pending.check(pending.EDGE, "не согласен:", rec) is not None
+    assert pending.check(pending.EDGE, "не согласен: нет", rec) is None
+    assert pending.check(pending.EDGE, "пропустить", rec) is not None
+
+
+def test_record_checks_against_recorded_question(tmp_path):
+    q = pending.Question(pending.EDGE, "a/b/R1", "замечание", options=("А",))
+    pending.asker(tmp_path)(q)
+    with pytest.raises(pending.PendingError):
+        pending.record(tmp_path, q.id, "2")
+    pending.record(tmp_path, q.id, "1")
+
+
+def test_edge_reply_non_ascii_digits_refused():
+    rec = _rec(pending.EDGE, "a/b/R1", ("А", "Б"))
+    for bad in ("²", "①", "٢"):
+        assert pending.check(pending.EDGE, bad, rec) == pending.EDGE_REFUSAL.format(n=2)

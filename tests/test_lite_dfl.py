@@ -1787,8 +1787,12 @@ def test_resolution_stopped_prints_old_hint(env: Env, monkeypatch, capfd) -> Non
 
 
 def test_no_tty_keeps_old_stop(env: Env, monkeypatch, capfd) -> None:
+    """Без терминала и с автором не claude разбора нет — прежний стоп.
+    С claude разбор идёт через `dfl reply` (#766 срез 2,
+    `tests/test_lite_dfl_edge_remote.py`)."""
     _bind_streams(monkeypatch)
     _tty(monkeypatch, False)
+    monkeypatch.setattr(dfl, "_author_is_claude", lambda: False)
 
     def spec_main(argv: list[str]) -> int:
         env.spec_calls.append(list(argv))
