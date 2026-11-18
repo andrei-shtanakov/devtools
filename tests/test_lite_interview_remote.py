@@ -192,7 +192,9 @@ def test_repair_order_criterion_traces_verdict() -> None:
     assert ir.HUMAN_PLACEHOLDER in data["prompt"]
     marks = {"skipped": ["criterion:NFR-01"], "done": []}
     q, data = ir.next_question(reply, view, marks, incomplete=True, upstream=UPSTREAM)
-    assert q.text == gr.TRACES_INTRO
+    bodies = "«CLI-команда», «ядро без сети»"  # GC-13 называет пункты, без id
+    assert q.text == ir.TRACES_TEXT.format(bodies=bodies)
+    assert "предлагаю" not in q.text and "IF-" not in q.text and "AP-" not in q.text
     assert [e["id"] for e in data["entries"]] == ["IF-01", "AP-01"]
     marks["done"].append(q.key)
     q, data = ir.next_question(reply, view, marks, incomplete=True, upstream=UPSTREAM)

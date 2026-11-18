@@ -118,6 +118,15 @@ ITEMS_REFUSAL = "раскладка не принята: {errors}"
 ITEMS_NOT_CONTENT = (
     "ждущий вопрос — не вопрос интервью с раскладкой: ответ через dfl reply"
 )
+ITEMS_STALE = (
+    "интервью прогона {run_id} уже не ждёт ответа (статус {status}) — "
+    "устаревший вопрос снят; dfl status покажет, что дальше"
+)
+CRITERION_WORDS = (
+    "ответ без слов (голое «нет», «не так») не записывается: "
+    "скажите своими словами, что имелось в виду, или пропустите — "
+    "dfl reply --id {qid} --text пропустить"
+)
 REPAIR_IDS = "нужны обновления пунктов из {ids}, без новых и чужих пунктов"
 TRACES_TARGETS = (
     "пункт {n}: связи {eid} — непустой список действующих пунктов {allowed} "
@@ -794,7 +803,7 @@ def run(
         )
         if remote:
             code = _resolve_rounds(target, subject, role, code, remote=True)
-    if not chatting:
+    if not _is_tty():  # `answer --file` в терминале — прежний терминальный путь
         code = _remote_interview(target, subject, role, code)
     if not _is_tty() and _owner_review_run(target.repo, subject) is not None:
         return _owner_review_rounds(target, subject, role, code, remote=True)
@@ -1704,12 +1713,16 @@ def _remote_interview(
     текущий вопрос; ответа нет — вопрос ставится в `pending.json` (вопрос
     discovery молча: его уже показал шаг; добор и починка — строкой «ждёт
     ответа», код 0). Вопросов нет, а ответ применён (прогон ждёт ответа) или
-    проход по неполному стопу исчерпан — отметки стираются, шаг ещё раз (один:
-    снова неполный — прежний вывод стопа); шаг оставил прогон ждать ответа —
-    его вопрос ставится молча. Прогона, ждущего интервью, нет или сессия не
-    читается — `code` без изменений (отметки целы, лишнего шага нет)."""
+    проход по неполному стопу исчерпан — отметки стираются, шаг ещё раз (один).
+    После применённого ответа шаг, остановивший интервью неполным, начинает
+    свежий проход — его первый пункт ставится со строкой «ждёт ответа»; после
+    исчерпанного прохода снова неполный — прежний вывод стопа. Прогона, ждущего
+    интервью, нет — устаревшие вопрос интервью и отметки снимаются
+    (`_drop_stale_interview`); сессия не читается — `code` без изменений
+    (отметки целы, лишнего шага нет)."""
     state = _waiting_run(target.repo, subject, incomplete=True)
     if state is None:
+        _drop_stale_interview(target.repo, subject)
         return code
     try:
         posted, applied = _locked_pass(state)
@@ -1717,7 +1730,7 @@ def _remote_interview(
         return code  # как `_say_question`: шаг уже сказал своё
     if posted is not None:
         if posted.kind != pending.INTERVIEW_QUESTION or applied:
-            say(pending.wait_line(posted))
+            say(pending.wait_line(posted, _reply_subject(state)))
             return 0
         return code
     stopped = _stopped_incomplete(state)
@@ -1725,13 +1738,54 @@ def _remote_interview(
         return code
     ir.clear_marks(rs.run_dir(state.run_id))
     code = _step(target, subject, role, chatting=False)
-    waiting = _waiting_run(target.repo, subject)
-    if waiting is not None:
-        try:
-            _locked_pass(waiting)  # ответов нет (сняты выше): только постановка
-        except _SessionUnreadable:
-            pass
+    waiting = _waiting_run(target.repo, subject, incomplete=not stopped)
+    if waiting is None:
+        _drop_stale_interview(target.repo, subject)
+        return code
+    try:
+        posted, _ = _locked_pass(waiting)  # ответов нет (сняты выше): постановка
+    except _SessionUnreadable:
+        return code
+    if posted is not None and posted.kind != pending.INTERVIEW_QUESTION:
+        say(pending.wait_line(posted, _reply_subject(waiting)))
+        return 0
     return code
+
+
+def _interview_live(state: rs.RunState) -> bool:
+    """Интервью прогона ещё идёт: ждёт ответа или остановлено неполным."""
+    return state.status == WAITING or _stopped_incomplete(state)
+
+
+def _drop_stale_interview(repo: str, subject: str | None) -> None:
+    """Интервью конвейера кончилось (вне `dfl run` без терминала — например,
+    `dfl correct`): снять в каталогах его прогонов вопрос интервью, ответы на
+    него и отметки прохода — `dfl pending` не покажет законченное интервью.
+    Вопросы других видов не трогаются; прогон занят — снимет следующий вызов."""
+    runs, _ = _repo_runs(repo)
+    try:
+        cust = _select_customer(runs, subject)
+    except DflError:
+        return
+    if cust is None:
+        return
+    for state in (cust, _engineer_of(cust, runs)):
+        if state is None or _interview_live(state):
+            continue
+        try:
+            with run_lock.run_lock(state.run_id):
+                _drop_interview_files(rs.run_dir(state.run_id))
+        except run_lock.LockBusy:
+            continue
+
+
+def _drop_interview_files(rd: Path) -> None:
+    """Снять вопрос интервью с ответами и отметки прохода (замок держит
+    вызывающий); вопрос другого вида остаётся."""
+    rec = pending.load(rd)
+    if rec is not None and rec.get("kind") in pending.INTERVIEW_KINDS:
+        pending.discard(rd)
+    ir.clear_marks(rd)
 
 
 class _SessionUnreadable(Exception):
@@ -1769,6 +1823,9 @@ def _remote_pass(state: rs.RunState) -> tuple[pending.Question | None, bool]:
             upstream=_upstream_text(state),
         )
         if found is None:
+            rec = pending.load(rd)  # вопрос, которого проход больше не ставит
+            if rec is not None and rec.get("kind") in pending.INTERVIEW_KINDS:
+                pending.discard(rd)
             return None, applied
         q, data = found
         text = pending.take(rd, q)
@@ -2646,9 +2703,12 @@ def _apply_items(state: rs.RunState, path: Path, qid: str) -> None:
     rec = pending.load(rd)
     if rec is None:
         raise DflError(t(pending.NO_PENDING))
+    kind, key = str(rec.get("kind", "")), str(rec.get("key", ""))
+    if kind in pending.INTERVIEW_KINDS and not _interview_live(state):
+        _drop_interview_files(rd)
+        raise DflError(ITEMS_STALE.format(run_id=state.run_id, status=state.status))
     if rec.get("id") != qid:
         raise DflError(t(pending.STALE))
-    kind, key = str(rec.get("kind", "")), str(rec.get("key", ""))
     if kind not in pending.INTERVIEW_KINDS or key.startswith("verdict:"):
         raise DflError(ITEMS_NOT_CONTENT)
     text, raw = _read_items(path)
@@ -2698,7 +2758,8 @@ def _send_items(
         if kind == pending.INTERVIEW_TOPUP:
             parts = [(holder, text, _items_entries(text, raw, view))]
         elif key.startswith("criterion:"):
-            parts = [_criterion_part(key.split(":", 1)[1], text, raw, view)]
+            eid = key.split(":", 1)[1]
+            parts = [_criterion_part(eid, text, raw, view, str(rec.get("id", "")))]
         else:
             parts = _traces_parts(key, raw, view)
     except st.FormError as exc:
@@ -2713,18 +2774,21 @@ def _items_entries(text: str, raw: str, view: SessionView) -> list[dict]:
 
 
 def _criterion_part(
-    eid: str, text: str, raw: str, view: SessionView
+    eid: str, text: str, raw: str, view: SessionView, qid: str
 ) -> tuple[str, str, list[dict]]:
     """GC-08 как `gate_repair._fill_criterion`: пункты — по правилам
     `gate_repair._criterion_items` (только критерий пункта и новые `Q`, на
     которые он ссылается). Согласие с гипотезой скила (`gate_repair._agrees`)
     — заметка «Критерий для …: <гипотеза>»; иные слова — в `Preference`,
-    заметка «Уточнение к …»."""
+    заметка «Уточнение к …». Слов нет (голое «нет», «не так», только id) —
+    отказ с просьбой сказать словами (`qid` — вопрос в подсказке пропуска)."""
     record = view.entry_record(eid)
     agreed = gr._agrees(text)
     if not agreed:
         research = {e.id: e.body for e in view.entries if e.id.startswith("Q-")}
         words = gr._without_ids(text, research)
+        if _bare_no(words):
+            raise DflError(CRITERION_WORDS.format(qid=qid))
         record["Preference"] = gr._preference(record, words)
     items = gr._criterion_items(eid, record, view, raw)
     entries = yaml.safe_load(st.to_payload("", items, view))["entries"]
@@ -2734,6 +2798,13 @@ def _criterion_part(
     else:
         note = f"Уточнение к «{record['body']}»: {words}"
     return view.holders[eid], note, entries
+
+
+def _bare_no(words: str) -> bool:
+    """Слов нет или только несогласие («нет», «не так») — как
+    `gate_repair._confirmation`: такой ответ в `Preference` не пишется."""
+    tokens = gr._tokens(words)
+    return not tokens or (tokens[0] in gr.NO_WORDS and set(tokens) <= gr.NO_TAIL)
 
 
 def _traces_parts(

@@ -209,9 +209,10 @@ def _line(qid: str, text: str, subject: str | None = None) -> str:
     return i18n.t(WAIT_LINE).format(first=first, pick=pick, qid=qid)
 
 
-def wait_line(q: Question) -> str:
-    """Строка «ждёт ответа» для вывода `dfl run`."""
-    return _line(q.id, q.text)
+def wait_line(q: Question, subject: str | None = None) -> str:
+    """Строка «ждёт ответа» для вывода `dfl run`; `subject` — тема в
+    подсказке, когда без неё `dfl pending`/`dfl reply` не выберут прогон."""
+    return _line(q.id, q.text, subject)
 
 
 def wait_text(run_dir: Path, subject: str | None = None) -> str:

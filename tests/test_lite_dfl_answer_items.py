@@ -717,3 +717,51 @@ def test_items_repair_traces_invalid_target_refused(
     assert "раскладка не принята" in err and f"не годится: {bad}" in err
     assert fakes.sent.calls == []
     assert ir.load_marks(_rd())["done"] == []
+
+
+def test_items_stale_interview_refused_and_dropped(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Финальное ревью I3: интервью уже кончилось (прогон не ждёт ответа и не
+    остановлен неполным) — отказ; устаревший вопрос и отметки сняты, в
+    discovery ничего не уходит."""
+    view = _customer_view()
+    fakes = _fakes(env, monkeypatch, view)
+    state = _waiting(RUN, "WS-1", "customer")
+    rec = _question_rec(view)
+    ir.mark(_rd(), "topic:jobs", "skipped")
+    state.status = "brief_ready"
+    rs.save(state)
+    _items(env, "ответ", [{"prefix": "FR", "body": "Отчёт", "priority": "must"}])
+    assert env.run("answer", "--items", ITEMS, "--id", rec["id"]) == 2
+    assert "уже не ждёт ответа" in capsys.readouterr().err
+    assert pending.load(_rd()) is None and not (_rd() / ir.PASS_FILE).exists()
+    assert fakes.sent.calls == [] and fakes.runs == []
+
+
+@pytest.mark.parametrize("text", ["нет", "Не так.", "нет Q-99", "Q-99"])
+def test_items_repair_criterion_bare_no_refused(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    text: str,
+) -> None:
+    """Финальное ревью M1: голое несогласие или ответ, пустой без id, — как в
+    терминале (`gate_repair._confirmation`): в `Preference` не пишется,
+    отказ с просьбой сказать словами; вопрос остаётся."""
+    view = _repair_view()
+    fakes = _fakes(env, monkeypatch, view)
+    _stopped("status вернул 11: findings в /r/interview-findings.json")
+    rec = _post(ir._criterion("FR-01", view))
+    _items(
+        env,
+        text,
+        [{"prefix": "FR", "id": "FR-01", "body": "Отчёт", "acceptance": "за 1 мин"}],
+    )
+    assert env.run("answer", "--items", ITEMS, "--id", rec["id"]) == 2
+    err = capsys.readouterr().err
+    assert "своими словами" in err and f"--id {rec['id']}" in err
+    assert fakes.sent.calls == [] and fakes.runs == []
+    assert (pending.load(_rd()) or {}).get("id") == rec["id"]

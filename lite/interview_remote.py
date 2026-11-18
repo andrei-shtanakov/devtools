@@ -38,6 +38,9 @@ VERDICT_ANSWER = "dfl reply --id {qid} --text 'да' | '<что не так>' | 
 CONTENT_ACCEPTS = "ответ своими словами (раскладка — dfl answer) или «пропустить»"
 VERDICT_ACCEPTS = "«да», что не так словами или «пропустить»"
 CRITERION_GOAL = "Как проверить, что выполнено: «{body}»?"
+TRACES_TEXT = (
+    gr.TRACES_INTRO.removesuffix(" предлагаю связи:") + " без связей: {bodies}"
+)
 TRACES_GOAL = "С какими системами или ограничениями связаны: {bodies}?"
 NOT_CONTENT = "ответ по существу — через dfl answer --items"
 
@@ -184,15 +187,16 @@ def _criterion(eid: str, view: SessionView) -> tuple[pending.Question, dict] | N
 
 
 def _traces(eids: list[str], view: SessionView) -> tuple[pending.Question, dict] | None:
-    """GC-13: один вопрос на все IF/AP без связей."""
+    """GC-13: один вопрос на все IF/AP без связей; текст называет пункты
+    (без id), как вопрос GC-08 — свой пункт."""
     eids = [eid for eid in eids if eid in view.holders]
     if not eids:
         return None
     qid = view.holders[eids[0]]
     records = [view.entry_record(eid) for eid in eids]
     key = "traces:" + ",".join(eids)
-    q = _content(pending.INTERVIEW_REPAIR, key, gr.TRACES_INTRO)
     bodies = ", ".join(f"«{r['body']}»" for r in records)
+    q = _content(pending.INTERVIEW_REPAIR, key, TRACES_TEXT.format(bodies=bodies))
     prompt = _holder_prompt(qid, TRACES_GOAL.format(bodies=bodies), view)
     data = _data(view.asked.get(qid, ""), qid, records, prompt)
     return q, {**data, "answer": CONTENT_ANSWER.format(qid=q.id)}

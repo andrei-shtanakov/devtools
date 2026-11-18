@@ -28,6 +28,7 @@ from tests.test_lite_dfl import (  # noqa: F401
     Discovery,
     Env,
     _question_reply,
+    _run,
     _stopped,
     _tty,
     _waiting,
@@ -544,7 +545,7 @@ def test_enterprise_interview_end_to_end_without_terminal(
         elif code == 0:
             state.status = "brief_ready"
         rs.save(state)
-        return 0
+        return 1 if code == 11 else 0  # как `spec_loop._report_interview_stop`
 
     monkeypatch.setattr(spec_loop, "main", spec_main)
 
@@ -563,16 +564,18 @@ def test_enterprise_interview_end_to_end_without_terminal(
     assert sess.sent[-1][:2] == ("q-goals", False)
     assert [e["id"] for e in sess.sent[-1][2]["entries"]] == ["G-01"]
 
-    # Вопрос 2 — пропуск через `dfl reply`; конец интервью с неполной темой.
+    # Вопрос 2 — пропуск через `dfl reply`; конец интервью с неполной темой:
+    # тот же `dfl run` ставит первый пункт свежего прохода (добор).
     q2 = _pending_json(env, capsys)
     assert q2["key"] == "q-functions" and q2["text"].startswith("Вопрос 2 (")
     assert env.run("reply", "--id", q2["id"], "--text", "пропустить") == 0
+    capsys.readouterr()
     assert env.run("run") == 0
+    assert "ждёт ответа: Не хватает" in capsys.readouterr().out
     assert sess.sent[-1] == ("q-functions", False, {"text": "пропустить"})
     assert rs.load(RUN).status == "stopped_interview"
 
     # Добор непокрытой темы — раскладкой скила держателю темы.
-    assert env.run("run") == 0
     top = _pending_json(env, capsys)
     assert (top["kind"], top["key"]) == (pending.INTERVIEW_TOPUP, "topic:functions")
     _answer_items(
@@ -629,3 +632,126 @@ def test_enterprise_interview_end_to_end_without_terminal(
     assert json.loads(capsys.readouterr().out) is None
     assert not (_rd() / ir.PASS_FILE).exists()
     assert fakes.calls == []
+
+
+def _stops_incomplete_after_send(env: Env, fakes: Discovery) -> Any:  # noqa: F811
+    """Шаг раннера: до отправки ответа прогон ждёт, после — остановлен
+    неполным с кодом 1 (как настоящий `spec_loop._report_interview_stop`)."""
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        if not fakes.calls:
+            return 0
+        _stopped(INCOMPLETE)
+        return 1
+
+    return spec_main
+
+
+def test_answer_file_in_terminal_keeps_terminal_path(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Финальное ревью I1: `dfl answer --file` в терминале — прежний путь:
+    код шага (неполный стоп — 1), без pending и строки «ждёт ответа»."""
+    _tty(monkeypatch)
+    _waiting(RUN, "WS-1", "customer")
+    monkeypatch.setattr(dfl, "_discovery_status", lambda s, c: _status(11))
+    monkeypatch.setattr(spec_loop, "main", _stops_incomplete_after_send(env, fakes))
+    (env.tmp / "target" / "answer.yaml").write_text("text: да\n", encoding="utf-8")
+    assert env.run("answer", "--file", "answer.yaml") == 1
+    assert rs.load(RUN).status == "stopped_interview"
+    assert _pending() is None and not (_rd() / ir.PASS_FILE).exists()
+    assert "ждёт ответа" not in capsys.readouterr().out
+
+
+def test_reply_skip_ending_interview_posts_topup(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Финальное ревью I2: пропуск последнего вопроса через `dfl reply`, шаг
+    остановил интервью неполным — тот же `dfl run` ставит добор со строкой
+    «ждёт ответа» и кодом 0 (не «нет вопросов» у неполного стопа)."""
+    _waiting(RUN, "WS-1", "customer")
+
+    def status(session_id: str, cwd: Path) -> iv.DiscoveryReply:
+        return _status(11) if fakes.calls else _question_reply()
+
+    monkeypatch.setattr(dfl, "_discovery_status", status)
+    monkeypatch.setattr(spec_loop, "main", _stops_incomplete_after_send(env, fakes))
+    assert env.run("run") == 0
+    rec = _pending()
+    assert rec is not None and rec["kind"] == pending.INTERVIEW_QUESTION
+    assert env.run("reply", "--id", rec["id"], "--text", "пропустить") == 0
+    capsys.readouterr()
+    assert env.run("run") == 0
+    assert fakes.flags == [("q-1", False)]
+    top = _pending()
+    assert top is not None and top["kind"] == pending.INTERVIEW_TOPUP
+    assert top["key"] == "topic:jobs"
+    assert f"ждёт ответа: {top['text']}" in capsys.readouterr().out
+
+
+def _step_to(env: Env, status: str) -> Any:  # noqa: F811
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        state = rs.load(RUN)
+        state.status = status
+        rs.save(state)
+        return 0
+
+    return spec_main
+
+
+def test_stale_interview_pending_dropped_by_run(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Финальное ревью I3: интервью кончилось вне `dfl run` без терминала
+    (например, `dfl correct`), шаг довёл прогон до `brief_ready` — вопрос
+    интервью, ответы и отметки прохода сняты."""
+    _incomplete(monkeypatch)
+    assert env.run("run") == 0
+    rec = _pending()
+    assert rec is not None and rec["kind"] == pending.INTERVIEW_TOPUP
+    ir.mark(_rd(), "criterion:FR-01", "done")
+    assert env.run("reply", "--id", rec["id"], "--text", "пропустить") == 0
+    monkeypatch.setattr(spec_loop, "main", _step_to(env, "brief_ready"))
+    assert env.run("run") == 0
+    assert _pending() is None
+    for name in (pending.REPLIES_FILE, ir.PASS_FILE):
+        assert not (_rd() / name).exists()
+
+
+def test_stale_clear_keeps_other_kinds(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Снятие устаревшего интервью не трогает вопрос другого вида."""
+    _incomplete(monkeypatch)
+    pending.post(_rd(), pending.Question(pending.MANUAL, "m1", "Проверьте"))
+    monkeypatch.setattr(spec_loop, "main", _step_to(env, "brief_ready"))
+    assert env.run("run") == 0
+    rec = _pending()
+    assert rec is not None and rec["kind"] == pending.MANUAL
+
+
+def test_interview_wait_line_names_subject_when_several(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Финальное ревью M3: в репо несколько тем — строка «ждёт ответа» несёт
+    `--subject`, иначе `dfl pending`/`dfl reply` прогон не выберут."""
+    _incomplete(monkeypatch)
+    _run("WS-2-a", "WS-2", "customer", "waiting_interview", subject="другая")
+    assert env.run("run", "--subject", "тема") == 0
+    out = capsys.readouterr().out
+    assert "ждёт ответа: Не хватает" in out and "--subject 'тема'" in out
