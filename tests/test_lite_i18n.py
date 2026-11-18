@@ -124,6 +124,7 @@ def test_old_run_json_loads_as_ru(tmp_path, monkeypatch):
 
 
 def test_language_round_trips(tmp_path, monkeypatch):
+    monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
     monkeypatch.setattr(state, "PERSONAL_ROOT", tmp_path / "personal")
     run = state.new_personal_run(
         "x", "o/r", "r", "/t", state.date(2026, 1, 1), language="en"

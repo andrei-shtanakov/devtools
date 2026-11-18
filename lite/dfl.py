@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import functools
 import hashlib
+import io
 import json
 import os
 import re
@@ -28,7 +29,7 @@ import sys
 import tempfile
 import traceback
 from collections.abc import Callable
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stdout
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import cast
@@ -44,14 +45,15 @@ from governance.facts import Outcome
 from governance.ops import Ops, RealOps
 from lite import edge_resolve as er
 from lite import failure_log as fl
+from lite import i18n, pending, runlog
 from lite import interview_chat as ic
 from lite import interview_view as iview
 from lite import manual_ask as ma
 from lite import owner_review as orv
-from lite import pending, runlog
 from lite import review_pause as rp
 from lite import stop_findings as sf
 from lite import structure as st
+from lite.i18n import t
 from lite.init_repo import DEVTOOLS, InitError, init_repo, real_gh
 from lite.interview_state import InterviewStateError, load_session
 from lite.output import (
@@ -145,6 +147,11 @@ ABANDON_ENTERPRISE_UNKNOWN = (
     "enterprise-конвейеры репо не проверены — журнал прогона не читается "
     "(dfl status назовёт его)"
 )
+ABANDON_PERSONAL_LEFT = (
+    "открытые PR прогона (spec-PR, integration-PR), ветка "
+    "spec/{ws_id}-personal и файлы {bundle_dir} в репо не тронуты — "
+    "уберите их сами; вернуть прогон — перенести каталог обратно в {root}"
+)
 TRACK_ENTERPRISE_TAKEN = (
     "тема «{subject}» ведётся личным путём (прогон {run_id}), --track enterprise "
     "не применим — продолжить её: dfl run без --track; enterprise-конвейер для "
@@ -168,6 +175,18 @@ TRACK_NO_TTY_HINT = (
 REVIEW_SHOWN = "review-shown.json"
 #: узлы паузы волны, на которые «дальше» уже получено без терминала (#766)
 REVIEW_ACKED = "review-acked.json"
+#: команды, продолжающие активный личный прогон: язык вызова — его язык (#769)
+PERSONAL_COMMANDS = frozenset({"run", "abandon", "pending", "reply"})
+LANG_REFUSAL = "неизвестный язык ({error}) — допустимы: {langs}"
+LANG_MISMATCH = (
+    "прогон {run_id} ведётся на языке {stored} — {requested} из --lang/DFL_LANG "
+    "не применён"
+)
+LANG_INVALID = (
+    "прогон {run_id}: язык {raw!r} в run.json не поддерживается — продолжаю на ru"
+)
+#: строка баннера test по-английски; русская — `df_config.test_banner_line`
+BANNER_LINE_EN = "test mode: {count} checks relaxed — list: dfl status -v"
 OWNER_REVIEW_PAUSED = "просмотр этапа «{label}» прерван — продолжить: dfl run"
 OWNER_NEEDS_CLAUDE = (
     "замечания на паузе поддерживаются только с автором claude "
@@ -242,6 +261,7 @@ def main(
     `defer` запись откладывается: `cli` выполнит её с полным хвостом вывода;
     без него — пишется сразу с пустым хвостом."""
     global _LOG_PATH
+    i18n.set_language(i18n.DEFAULT_LANG)  # состояние не переживает вызов
     raw = list(sys.argv[1:] if argv is None else argv)
     args = _parser().parse_args(raw)
     _set_level(args)
@@ -450,8 +470,10 @@ def _dispatch(
 ) -> tuple[int, BaseException | None]:
     """Тело подкоманды: (код, отказ-исключение или `None`).
 
-    Лог вызова открывается после строки режима test (её отказ лога не пишет)."""
+    Лог вызова открывается после строки режима test (её отказ лога не пишет);
+    язык вызова — до неё (`_call_language`)."""
     try:
+        i18n.set_language(_call_language(args, cwd))
         _require_test_mode(
             status_header=args.command == "status",
             quiet=args.command == "pending" and args.json,
@@ -488,6 +510,56 @@ def _dispatch(
     except REFUSALS as exc:
         say(refusal(f"dfl {args.command}", str(exc)), 0, err=True)
         return 2, exc
+
+
+def _call_language(args: argparse.Namespace, cwd: Path) -> str:
+    """Язык вызова до первого вывода: язык продолжаемого личного прогона,
+    иначе `--lang`, `DFL_LANG`, `ru` (`i18n.resolve`).
+
+    Недопустимый флаг/env — `DflError` (отказ по-русски, код 2). Расхождение
+    с сохранённым языком и недопустимое значение в run.json — одна строка
+    предупреждения на языке прогона (stderr: `pending --json` чист)."""
+    flag = getattr(args, "lang", None)
+    raw_env = os.environ.get(i18n.ENV_VAR)
+    env = {i18n.ENV_VAR: raw_env} if raw_env else {}  # пустая — как не задана
+    run = _continued_run(args, cwd)
+    stored: str | None = None
+    invalid = False
+    if run is not None:
+        stored, invalid = i18n.stored_language(run.language)
+    try:
+        lang = i18n.resolve(flag, env, stored)
+    except i18n.LanguageError as exc:
+        langs = ", ".join(i18n.LANGS)
+        raise DflError(LANG_REFUSAL.format(error=exc, langs=langs)) from exc
+    requested = flag or raw_env
+    with i18n.language(lang):
+        if run is not None and invalid:
+            message = LANG_INVALID.format(run_id=run.run_id, raw=run.language)
+            say(message, err=True)
+        elif run is not None and requested and requested != lang:
+            message = t(LANG_MISMATCH).format(
+                run_id=run.run_id, stored=lang, requested=requested
+            )
+            say(message, err=True)
+    return lang
+
+
+def _continued_run(
+    args: argparse.Namespace, cwd: Path
+) -> personal_state.PersonalRun | None:
+    """Активный личный прогон, который продолжит команда, — без побочных
+    эффектов: репо не регистрируется, предупреждения `active_for` о битых
+    прогонах здесь глушатся (их напечатает сама команда)."""
+    if args.command not in PERSONAL_COMMANDS:
+        return None
+    try:
+        target = _registered_target(cwd)
+        slug = user_targets.slug_from_url(target.repo_url)
+    except (DflError, user_targets.TargetsError, OSError, ValueError):
+        return None
+    with redirect_stdout(io.StringIO()):
+        return personal_state.active_for(slug, subject=args.subject)
 
 
 def _reply_text(args: argparse.Namespace) -> str:
@@ -532,6 +604,11 @@ def _parser() -> argparse.ArgumentParser:
         "--review",
         help="этапы с паузой на просмотр: через запятую, all или none "
         "(без него — из конфига); только для нового прогона",
+    )
+    p_run.add_argument(
+        "--lang",
+        help="язык вывода нового прогона: ru или en (без него — DFL_LANG, "
+        "иначе ru); продолжение — на языке прогона",
     )
     p_ans = add("answer", help="ответ на вопрос интервью и dfl run")
     p_ans.add_argument(
@@ -607,12 +684,28 @@ def _require_test_mode(*, status_header: bool = False, quiet: bool = False) -> N
         return
     level = verbosity()
     full = level >= runlog.PASSTHROUGH_LEVEL or (status_header and level >= 1)
-    banner = df_config.test_banner(cfg) if full else df_config.test_banner_line(cfg)
+    if i18n.current() == "en":
+        banner = _test_banner_en(cfg, full=full)
+    elif full:
+        banner = df_config.test_banner(cfg)
+    else:
+        banner = df_config.test_banner_line(cfg)
     if banner is not None:
         say(banner)
     if status_header:
-        say(f"конфиг: {df_config.canonical_config_path()}", 1)
+        say(t("конфиг: {path}").format(path=df_config.canonical_config_path()), 1)
     say("")
+
+
+def _test_banner_en(cfg: df_config.DfConfig, *, full: bool = False) -> str | None:
+    """Баннер режима test по-английски из тех же фактов, что
+    `df_config.test_banner` (`full`) и `test_banner_line`; strict — `None`."""
+    if cfg.mode == "strict":
+        return None
+    if not full:
+        return BANNER_LINE_EN.format(count=len(df_config.TEST_RELAXATIONS))
+    items = "\n".join(f"  - {t(item)}" for item in df_config.TEST_RELAXATIONS)
+    return f"{t(df_config.TEST_BANNER_HEADER)}\n{items}"
 
 
 def run(
@@ -827,11 +920,11 @@ def _personal(
         raise DflError(TRACK_PERSONAL_TAKEN.format(subject=subject))
     if track is None and new:
         if not _track_tty():
-            say(TRACK_NO_TTY_HINT)
+            say(t(TRACK_NO_TTY_HINT))
             return None
         track = _ask_track(ic.stdin_read)
         if track is None:
-            say(TRACK_STOPPED)
+            say(t(TRACK_STOPPED))
             return 0
     if track != "personal":
         return None
@@ -843,9 +936,10 @@ def _personal(
         date.today(),
         resolve_review(review, rp.PERSONAL_STAGES),
         manual_checks=True,
+        language=i18n.current(),
     )
     personal_state.save(run)
-    say(f"личный прогон {run.run_id}", 1)
+    say(t("личный прогон {run_id}").format(run_id=run.run_id), 1)
     return _advance_personal(run)
 
 
@@ -865,16 +959,16 @@ def _new_subject(repo: str, subject: str) -> bool:
 def _ask_track(read: ic.Read) -> str | None:
     """Вопрос о типе проекта; ответ номером. `None` — EOF или `/стоп`."""
     while True:
-        say(TRACK_QUESTION)
+        say(t(TRACK_QUESTION))
         for n, option in enumerate(TRACK_OPTIONS, start=1):
-            say(f"{n}. {option}")
+            say(f"{n}. {t(option)}")
         text = ic.read_answer(read, quick=str.isdigit)
         if text is None:
             return None
         text = text.strip()
         if text.isdigit() and 1 <= int(text) <= len(TRACKS):
             return TRACKS[int(text) - 1]
-        say(TRACK_RETRY)
+        say(t(TRACK_RETRY))
 
 
 def _advance_personal(run: personal_state.PersonalRun) -> int:
@@ -2079,9 +2173,32 @@ def _forge():
 
 
 def status(cwd: Path) -> int:
-    """Прогоны репо из журнала и следующий шаг; форджа и эффектов нет."""
+    """Прогоны репо из журнала и следующий шаг; форджа и эффектов нет.
+
+    Заголовок — на языке вызова; блок личного прогона — на его языке,
+    enterprise-блоки — по-русски (#769)."""
     target = _registered_target(cwd)
     runs, broken = _repo_runs(target.repo)
+    with i18n.language(i18n.DEFAULT_LANG):
+        _enterprise_status(runs, broken)
+    active_slug = user_targets.slug_from_url(target.repo_url)
+    active = personal_state.active_for(active_slug)
+    if active is not None:
+        with i18n.language(_run_language(active)):
+            _active_status(active)
+    for done in personal_state.finished_for(active_slug):
+        with i18n.language(_run_language(done)):
+            _finished_status(done)
+    return 0
+
+
+def _run_language(run: personal_state.PersonalRun) -> str:
+    """Сохранённый язык личного прогона (недопустимый — `ru`)."""
+    return i18n.stored_language(run.language)[0]
+
+
+def _enterprise_status(runs: list[rs.RunState], broken: list[str]) -> None:
+    """`dfl status`: строки enterprise-прогонов журнала."""
     ambiguous = _several_subjects(runs)
     for run_id in broken:
         say(f"{run_id}  не читается: {rs.run_dir(run_id)}/run.json")
@@ -2098,27 +2215,32 @@ def status(cwd: Path) -> int:
             _manual_status(state.ops.get(MANUAL_OP) or {}, state.repo_slug)
         for key, op_status in _op_statuses(state).items():
             say(f"  {key}: {op_status}", 2)
-    active_slug = user_targets.slug_from_url(target.repo_url)
-    active = personal_state.active_for(active_slug)
-    if active is not None:
-        line = f"личный прогон {active.run_id}: шаг {active.step}"
-        # вопрос из `pending.json` точнее причины стопа (ответ мог быть записан)
-        reason = (
-            pending.wait_text(personal_state.run_dir(active.run_id))
-            or active.stop_reason
-        )
-        say(f"{line} — {reason}" if reason else line)
-        if verbosity() >= 1:
-            _manual_status(active.manual, active.repo_slug)
-    for done in personal_state.finished_for(active_slug):
-        tail = mc.summary(mc.checks_of(done.manual), done.manual.get("answers") or {})
-        if not tail and not (verbosity() >= 1 and done.manual.get("checks")):
-            continue
-        line = f"личный прогон {done.run_id}: закончен"
-        say(f"{line}; {tail}" if tail else line)
-        if verbosity() >= 1:
-            _manual_status(done.manual, done.repo_slug)
-    return 0
+
+
+def _active_status(active: personal_state.PersonalRun) -> None:
+    """`dfl status`: строка активного личного прогона."""
+    line = t("личный прогон {run_id}: шаг {step}").format(
+        run_id=active.run_id, step=active.step
+    )
+    # вопрос из `pending.json` точнее причины стопа (ответ мог быть записан)
+    reason = (
+        pending.wait_text(personal_state.run_dir(active.run_id)) or active.stop_reason
+    )
+    say(f"{line} — {reason}" if reason else line)
+    if verbosity() >= 1:
+        _manual_status(active.manual, active.repo_slug)
+
+
+def _finished_status(done: personal_state.PersonalRun) -> None:
+    """`dfl status`: законченный личный прогон — только с ответами на ручные
+    проверки (или их список при `-v`)."""
+    tail = mc.summary(mc.checks_of(done.manual), done.manual.get("answers") or {})
+    if not tail and not (verbosity() >= 1 and done.manual.get("checks")):
+        return
+    line = t("личный прогон {run_id}: закончен").format(run_id=done.run_id)
+    say(f"{line}; {tail}" if tail else line)
+    if verbosity() >= 1:
+        _manual_status(done.manual, done.repo_slug)
 
 
 def _manual_status(record: dict, repo_slug: str) -> None:
@@ -2128,7 +2250,8 @@ def _manual_status(record: dict, repo_slug: str) -> None:
     for check in mc.checks_of(record):
         answer = answers.get(check.beh_id)
         if answer is None:
-            say(f"  {check.beh_id} ({check.task_id}): ждёт ответа", 1)
+            waits = t("ждёт ответа")
+            say(f"  {check.beh_id} ({check.task_id}): {waits}", 1)
             continue
         line = f"  {check.beh_id} ({check.task_id}): "
         line += mc.VERDICT_WORDS.get(str(answer.get("verdict")), "?")
@@ -2138,9 +2261,8 @@ def _manual_status(record: dict, repo_slug: str) -> None:
         if issue:
             state = _forge().issue_state(repo_slug, int(issue))
             mark = {"CLOSED": "закрыт — выполнено позже", "OPEN": "открыт"}
-            line += (
-                f" → issue #{issue} ({mark.get(str(state), 'состояние не прочитано')})"
-            )
+            word = t(mark.get(str(state), "состояние не прочитано"))
+            line += f" → issue #{issue} ({word})"
         say(line, 1)
 
 
@@ -2384,9 +2506,9 @@ def abandon(cwd: Path, subject: str | None) -> int:
         if subject is None:
             left = _enterprise_unfinished(target.repo)
             if left is None:
-                print(ABANDON_ENTERPRISE_UNKNOWN)
+                print(t(ABANDON_ENTERPRISE_UNKNOWN))
             elif left:
-                print(ABANDON_ENTERPRISE_LEFT)
+                print(t(ABANDON_ENTERPRISE_LEFT))
         return rc
     runs = _readable_runs(target.repo)
     cust = _existing_customer(runs, subject)
@@ -2423,15 +2545,18 @@ def _enterprise_unfinished(repo: str) -> bool | None:
 
 
 def _abandon_personal(run: personal_state.PersonalRun) -> int:
-    """Личный прогон — в брошенные; PR, ветку и файлы бандла не трогает."""
+    """Личный прогон — в брошенные; PR, ветку и файлы бандла не трогает.
+    Сообщения — на языке прогона."""
     dest = personal_state.abandon(run)
-    print(f"брошен: {run.run_id} → {dest}")
-    print(
-        f"открытые PR прогона (spec-PR, integration-PR), ветка "
-        f"spec/{run.ws_id}-personal и файлы {run.bundle_dir} в репо не тронуты — "
-        "уберите их сами; вернуть прогон — перенести каталог обратно в "
-        f"{personal_state.personal_root()}"
-    )
+    with i18n.language(_run_language(run)):
+        print(t("брошен: {run_id} → {dest}").format(run_id=run.run_id, dest=dest))
+        print(
+            t(ABANDON_PERSONAL_LEFT).format(
+                ws_id=run.ws_id,
+                bundle_dir=run.bundle_dir,
+                root=personal_state.personal_root(),
+            )
+        )
     return 0
 
 
