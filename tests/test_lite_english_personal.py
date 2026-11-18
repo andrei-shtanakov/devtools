@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
@@ -191,6 +192,7 @@ def test_old_run_stays_russian(
     assert [r.run_id for r in personal.runs] == [run.run_id]
 
 
+# сценарий 6 демо-набора (смешанные прогоны в `status`)
 def test_status_mixed_runs(
     env: Env,  # noqa: F811
     registered: None,
@@ -915,3 +917,39 @@ def test_edge_stop_reasons_en() -> None:
     assert "20-design.md can be fixed by hand" in foreign
     assert "dfl abandon" in foreign and "dfl abandon" in unmet
     _clean(unmet + "\n" + foreign)
+
+
+def _fresh_scenario(e: Env, w: World) -> None:  # noqa: F811
+    """Чистый старт сценария: без прогонов, пакета и очередей фейкового мира."""
+    shutil.rmtree(ps.personal_root(), ignore_errors=True)
+    shutil.rmtree(e.tmp / "target", ignore_errors=True)
+    (e.tmp / "target").mkdir()
+    w.reads, w.turns, w.launched, w.prompts = [], [], [], []
+    w.verdicts, w.tty, w.ops = {}, False, FakeOps
+    w.texts = {
+        "20-design.md": [EN_DESIGN],
+        "30-decomposition.md": [EN_DECOMPOSITION],
+    }
+
+
+def test_all_scenarios_no_misses(
+    env: Env,  # noqa: F811
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Сценарии 1-7 подряд в одном процессе: промахов каталога нет."""
+    i18n.reset_misses()
+    scenarios = (
+        test_s1_new_run_track_interview_brief,
+        test_s2_pause_continue_separate_call,
+        test_s3_reply_remarks_and_remove_confirm,
+        test_s3_edge_question_via_reply,
+        test_s4_edge_resolution_terminal,
+        test_s5_manual_check,
+        test_s7_stop_and_refusal,
+    )
+    for scenario in scenarios:
+        _fresh_scenario(env, world)
+        scenario(env, world, capsys)
+        i18n.set_language("ru")
+    assert i18n.misses() == frozenset()
