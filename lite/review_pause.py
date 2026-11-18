@@ -33,7 +33,7 @@ from lite.interview_chat import STOP_WORD, Read, read_answer
 PERSONAL_STAGES = ("brief", "design", "decomposition")
 DONE_WORDS = pending_mod.REVIEW_DONE_WORDS
 _YES_WORDS = frozenset({"1", "да"})
-_NO_WORDS = frozenset({"2", "нет", "оставить", "оставить как было"})
+_NO_WORDS = pending_mod.CONFIRM_KEEP_WORDS
 #: что принимает `dfl reply` на паузе этапа, кроме брифа (#766 срез 2)
 REMOTE_ACCEPTS = "«дальше» или замечания своими словами"
 UNCLEAR_ANSWER = "не понял ответ — номер или слово варианта"

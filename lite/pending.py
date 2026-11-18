@@ -50,6 +50,7 @@ REVIEW_REFUSAL = (
     "замечания к этапу пока принимаются только в терминале: dfl run; "
     "без замечаний — «дальше»"
 )
+REVIEW_EMPTY_REFUSAL = "ответ: «дальше» или замечания словами"
 MANUAL_REFUSAL = "ответ: 1/выполнено, 2/не выполнено[: заметка], 3/с оговоркой: <текст>"
 CONFIRM_REFUSAL = "ответ: 1/{yes} или 2/оставить"
 EDGE_REFUSAL = "ответ: номер варианта 1–{n}, «своё: …» или «не согласен: <почему>»"
@@ -218,11 +219,9 @@ def is_done(text: str) -> bool:
 def _check_review(text: str, rec: Mapping | None) -> str | None:
     if is_done(text):
         return None
-    if not text.strip():
-        return REVIEW_REFUSAL
     if rec is not None and rec.get("key") == "brief":
         return REVIEW_REFUSAL
-    return None
+    return None if text.strip() else REVIEW_EMPTY_REFUSAL
 
 
 def _options(rec: Mapping | None) -> list[str]:

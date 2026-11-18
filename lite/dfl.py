@@ -988,7 +988,7 @@ def _resolve_rounds(
             else er.Outcome.NOT_APPLICABLE
         )
         if outcome is er.Outcome.WAITING:  # круг записан в слот (`_resolve`)
-            say(pending.wait_text(rd))
+            say(pending.wait_text(rd, _reply_subject(state)))
             if calls.spent():
                 say(calls.line())
             return 0
@@ -1090,7 +1090,9 @@ def _owner_review_rounds(
 
     `remote` — без терминала (#766): «дальше», замечания и ответы на вопрос
     об удалении приходят через `dfl reply` (`pending.asker` каталога
-    прогона), вопрос ждёт — код 0."""
+    прогона), вопрос ждёт — код 0. Стоп проверки после правки разбирается
+    так же (`_resolve_rounds` с `remote`): вопрос разбора ждёт `dfl reply`,
+    а не новой платной проверки при следующем `dfl run`."""
     calls = er.PaidCalls()
     while (state := _owner_review_run(target.repo, subject)) is not None:
         ask = pending.asker(rs.run_dir(state.run_id)) if remote else None
@@ -1100,13 +1102,12 @@ def _owner_review_rounds(
                 say(calls.line())
             return stopped
         revised = _pause_revised(state.run_id)
-        code = _step(target, subject, role, chatting=not remote)
+        code = _step(target, subject, role, chatting=not remote, resolving=remote)
         if revised and _edge_ran(state):
             calls.check += 1
         if calls.spent():
             say(calls.line())
-        if not remote:
-            code = _resolve_rounds(target, subject, role, code)
+        code = _resolve_rounds(target, subject, role, code, remote=remote)
     return code
 
 
@@ -1273,7 +1274,7 @@ def _owner_answer_remote(
         return ""
     answer = rp.ask_remote(stage, label, [path], ask=ask)
     if answer is None:
-        say(pending.wait_text(rs.run_dir(state.run_id)))
+        say(pending.wait_text(rs.run_dir(state.run_id), _reply_subject(state)))
         return None
     if not answer:
         _ack(state, stage)  # только «дальше»: узел с замечаниями ещё правится
@@ -1847,6 +1848,18 @@ def _repo_runs(repo: str) -> tuple[list[rs.RunState], list[str]]:
     return out, broken
 
 
+def _reply_subject(state: rs.RunState) -> str | None:
+    """Тема для подсказки `dfl reply`: в репо несколько незаконченных тем —
+    без неё `dfl pending`/`dfl reply` прогон не выберут (как `dfl status`)."""
+    return state.subject if _several_subjects(_repo_runs(state.repo)[0]) else None
+
+
+def _several_subjects(runs: list[rs.RunState]) -> bool:
+    """В репо больше одного незаконченного конвейера (customer-прогона)."""
+    unfinished = [s for s in runs if _frame(s) == "customer" and not _finished(s, runs)]
+    return len(unfinished) > 1
+
+
 def _frame(state: rs.RunState) -> str | None:
     return (state.interview or {}).get("frame")
 
@@ -2068,8 +2081,7 @@ def status(cwd: Path) -> int:
     """Прогоны репо из журнала и следующий шаг; форджа и эффектов нет."""
     target = _registered_target(cwd)
     runs, broken = _repo_runs(target.repo)
-    unfinished = [s for s in runs if _frame(s) == "customer" and not _finished(s, runs)]
-    ambiguous = len(unfinished) > 1
+    ambiguous = _several_subjects(runs)
     for run_id in broken:
         say(f"{run_id}  не читается: {rs.run_dir(run_id)}/run.json")
     for state in runs:

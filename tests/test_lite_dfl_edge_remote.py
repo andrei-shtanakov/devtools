@@ -21,6 +21,7 @@ import pytest
 from governance import run_state as rs
 from governance import spec_loop
 from governance.author_launch import LaunchOutcome
+from governance.runner import WAITING_OWNER_REVIEW, review_pause_passed
 from lite import dfl, pending
 from lite import edge_resolve as er
 from lite import interview_chat as ic
@@ -34,6 +35,7 @@ from tests.test_lite_dfl import (  # noqa: F401
     _tty,
     env,
 )
+from tests.test_lite_dfl_owner_review import _author
 from tests.test_lite_edge_resolve import BEFORE, _decision_item
 
 RUN_ID = "WS-1-a"
@@ -371,3 +373,88 @@ def test_new_edge_check_resets_saved_round(
     rec = pending.load(rs.run_dir(RUN_ID))
     assert rec is not None and er.OVERRIDE_OFFER not in rec["options"]
     assert _slot() is not None and _slot()["round"] == 1  # type: ignore[index]
+
+
+def test_owner_revision_edge_stop_resolved_without_tty(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """Пауза просмотра без терминала → замечание через `dfl reply` → правка
+    → повторная проверка волны с находками: вопрос разбора в `pending.json`
+    (код 0, слот круга), не «поправьте»; ответ → `dfl run` сходится без
+    лишней платной проверки (как в терминале)."""
+    _remote(monkeypatch)
+    f = _fakes(env, monkeypatch, [])
+    owner = _author(monkeypatch, BEFORE + "\nуточнено\n")
+    checks: list[str] = []
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(list(argv))
+        if not (rs.run_dir(RUN_ID) / "run.json").exists():
+            state = _run(RUN_ID, "WS-1", "customer", WAITING_OWNER_REVIEW, subject="t")
+            state.target_dir = str(env.tmp / "target")
+            state.wave = 2
+            state.review_pause = ["requirements"]
+            state.ops["edge-2"] = {"status": "completed", "verdict": "PASS"}
+            rs.save(state)
+            return 0
+        state = rs.load(RUN_ID)
+        if state.status == WAITING_OWNER_REVIEW and not review_pause_passed(state):
+            return 0
+        if not checks:
+            checks.append("R1")
+            _stop(env, "R1")
+            return 1
+        checks.append("pass")
+        _passed(env)
+        return 0
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    rd = rs.run_dir(RUN_ID)
+    assert env.run("run", "--subject", "t") == 0
+    rec = pending.load(rd)
+    assert rec is not None and rec["kind"] == pending.REVIEW
+    assert env.run("reply", "--id", str(rec["id"]), "--text", "уточни FR-01") == 0
+    _read(capfd)
+
+    assert env.run("run", "--subject", "t") == 0  # правка, проверка, вопрос
+    out, _ = _read(capfd)
+    if (rec := pending.load(rd)) is not None and rec["kind"] != pending.EDGE:
+        assert rec["kind"] == pending.REMARKS_CONFIRM
+        assert env.run("reply", "--id", str(rec["id"]), "--text", "1") == 0
+        assert env.run("run", "--subject", "t") == 0
+        out, _ = _read(capfd)
+    assert len(owner) == 1 and checks == ["R1"]
+    rec = pending.load(rd)
+    assert rec is not None and rec["kind"] == pending.EDGE
+    assert "ждёт ответа: замечание R1 major" in out
+    assert "дальше: поправьте" not in out
+    assert _slot() is not None and _slot()["round"] == 1  # type: ignore[index]
+    assert len(f.prompts) == 1
+
+    _reply(env, "1")
+    assert env.run("run", "--subject", "t") == 0
+    assert checks == ["R1", "pass"]  # только перепроверка после переписывания
+    assert f.revisions == [FILE] and len(f.prompts) == 1
+    assert rs.load(RUN_ID).status == "running"
+    assert pending.load(rd) is None and _slot() is None
+
+
+def test_edge_wait_line_names_subject_when_ambiguous(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """Две незаконченные темы в репо: подсказка `dfl reply` называет тему —
+    без неё `dfl pending`/`dfl reply` прогон не выберут (как `dfl status`)."""
+    _remote(monkeypatch)
+    _fakes(env, monkeypatch, ["R1"])
+    assert env.run("run", "--subject", "t") == 0
+    _read(capfd)
+    _run("WS-2-a", "WS-2", "customer", "running", subject="другая")
+    assert env.run("run", "--subject", "t") == 0  # тот же вопрос, без шага
+    out, _ = _read(capfd)
+    rec = pending.load(rs.run_dir(RUN_ID))
+    assert rec is not None
+    assert f"dfl reply --subject 't' --id {rec['id']}" in out

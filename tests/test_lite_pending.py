@@ -143,10 +143,18 @@ def test_review_reply_accepts_remarks_except_brief():
     brief = _rec(pending.REVIEW, "brief")
     assert pending.check(pending.REVIEW, "убери", brief) == pending.REVIEW_REFUSAL
     assert pending.check(pending.REVIEW, "дальше", brief) is None
-    assert pending.check(pending.REVIEW, "  ", _rec(pending.REVIEW)) == (
-        pending.REVIEW_REFUSAL
-    )
     assert pending.check(pending.REVIEW, "правка") is None
+
+
+def test_empty_review_reply_refusal_by_stage():
+    """Пустой ответ: бриф — «только в терминале», прочие этапы и вопрос без
+    записи — «дальше» или замечания словами (замечания `dfl reply` берёт)."""
+    empty = pending.REVIEW_EMPTY_REFUSAL
+    assert empty == "ответ: «дальше» или замечания словами"
+    assert pending.check(pending.REVIEW, "  ", _rec(pending.REVIEW)) == empty
+    assert pending.check(pending.REVIEW, "") == empty
+    brief = _rec(pending.REVIEW, "brief")
+    assert pending.check(pending.REVIEW, " ", brief) == pending.REVIEW_REFUSAL
 
 
 def test_is_done():
