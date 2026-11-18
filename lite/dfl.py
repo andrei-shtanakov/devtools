@@ -513,7 +513,7 @@ def _dispatch(
         i18n.set_language(_call_language(args, cwd))
         _require_test_mode(
             status_header=args.command == "status",
-            quiet=args.command == "pending" and args.json,
+            quiet=args.command in ("pending", "interview") and args.json,
         )
         _open_log(args, cwd, raw)
         if args.command == "status":
@@ -535,7 +535,7 @@ def _dispatch(
         if args.command == "abandon":
             return abandon(cwd, args.subject), None
         if args.command == "interview":
-            return interview(cwd, args.subject), None
+            return interview(cwd, args.subject, as_json=args.json), None
         if args.command == "pending":
             return pending_cmd(cwd, args.subject, as_json=args.json), None
         if args.command == "reply":
@@ -673,6 +673,7 @@ def _parser() -> argparse.ArgumentParser:
     p_ab.add_argument("--subject", help="тема конвейера, если их несколько")
     p_iv = add("interview", help="что собрано в интервью")
     p_iv.add_argument("--subject", help="тема конвейера, если их несколько")
+    p_iv.add_argument("--json", action="store_true", help="состояние как JSON")
     p_cor = add("correct", help="поправить собранное текстом")
     p_cor.add_argument("text", help="поправка, например: не раз в неделю, а в месяц")
     p_cor.add_argument("--subject", help="тема конвейера, если их несколько")
@@ -2836,10 +2837,11 @@ def _discovery(args: list[str], cwd: Path) -> iv.DiscoveryReply:
     return iv.parse_reply(done.returncode, done.stdout, done.stderr)
 
 
-def interview(cwd: Path, subject: str | None) -> int:
+def interview(cwd: Path, subject: str | None, *, as_json: bool = False) -> int:
     """Состояние интервью текстом: вопрос, темы, пункты, что мешает готовности.
 
-    Агент и терминал не нужны; работает в любом статусе прогона с сессией."""
+    Агент и терминал не нужны; работает в любом статусе прогона с сессией.
+    `as_json` — то же данными для скила (`_interview_data`, #766 срез 3)."""
     state = _interview_run(cwd, subject)
     _enterprise_language()
     session_id = str((state.interview or {}).get("session_id"))
@@ -2848,10 +2850,41 @@ def interview(cwd: Path, subject: str | None) -> int:
     except InterviewStateError as exc:
         raise DflError(str(exc)) from exc
     reply = _discovery_status(session_id, rs.run_dir(state.run_id))
+    if as_json:
+        data = _interview_data(state, view, reply)
+        say(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
     print(f"Тема: {state.subject}")
     failure = _status_failure(reply)
     print(iview.render_view(view, ic.current_question(reply), failure))
     return 0
+
+
+def _interview_data(
+    state: rs.RunState, view: SessionView, reply: iv.DiscoveryReply
+) -> dict:
+    """`dfl interview --json`: вопрос, покрытие тем, находки, готовность и
+    причина сбоя `discovery status` (`unavailable`)."""
+    q = ic.current_question(reply)
+    question = (
+        None
+        if q is None
+        else {
+            "id": q.id,
+            "topic": q.coverage_key,
+            "label": st.TOPIC_LABELS.get(q.coverage_key, q.coverage_key),
+            "text": q.text,
+        }
+    )
+    return {
+        "run_id": state.run_id,
+        "subject": state.subject,
+        "question": question,
+        "coverage": ir.coverage(view),
+        "findings": ir.findings(view),
+        "readiness": view.readiness,
+        "unavailable": _status_failure(reply),
+    }
 
 
 def _status_failure(reply: iv.DiscoveryReply) -> str | None:

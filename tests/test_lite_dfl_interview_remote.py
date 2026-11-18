@@ -8,10 +8,12 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from governance import interview as iv
 from governance import run_lock, spec_loop
@@ -20,6 +22,8 @@ from lite import dfl, pending
 from lite import interview_remote as ir
 from lite.interview_state import Entry, InterviewStateError, SessionView
 from tests.test_lite_dfl import (  # noqa: F401
+    REPO,
+    URL,
     Chat,
     Discovery,
     Env,
@@ -372,3 +376,256 @@ def test_no_agent_called(
     assert env.run("run") == 0
     assert fakes.calls == []
     assert ir.load_marks(_rd()) == {"skipped": [], "done": []}
+
+
+def _interview_json(env: Env, capsys: pytest.CaptureFixture[str]) -> dict:  # noqa: F811
+    capsys.readouterr()
+    assert env.run("interview", "--json") == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_interview_json_shape(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`dfl interview --json`: вопрос с темой, покрытие, находки, готовность;
+    stdout — только JSON (без баннера режима test)."""
+    _waiting(RUN, "WS-1", "customer")
+    action = {"question_id": "q-7", "coverage_key": "jobs", "question_text": "Что?"}
+    reply = iv.DiscoveryReply(20, {"next_action": action}, "")
+    monkeypatch.setattr(dfl, "_discovery_status", lambda s, c: reply)
+    out = _interview_json(env, capsys)
+    assert out["run_id"] == RUN and out["subject"] == "тема"
+    assert out["question"] == {
+        "id": "q-7",
+        "topic": "jobs",
+        "label": "задачи пользователей",
+        "text": "Что?",
+    }
+    assert out["coverage"] == ir.coverage(_view())
+    assert out["findings"] == ir.findings(_view())
+    assert out["readiness"] == "incomplete" and out["unavailable"] is None
+    failed = iv.DiscoveryReply(1, {"operation": {"reason": "упал"}}, "")
+    monkeypatch.setattr(dfl, "_discovery_status", lambda s, c: failed)
+    out = _interview_json(env, capsys)
+    assert out["question"] is None and out["unavailable"] == "упал"
+    assert fakes.calls == []
+
+
+GOALS = ("q-goals", "goals", "Зачем это нужно?")
+FUNCTIONS = ("q-functions", "functions", "Что система должна делать?")
+
+
+@dataclass
+class Session:
+    """Фейк discovery сквозного теста: вопросы по очереди, ответы, проверка
+    брифа. Темы покрыты пунктами; FR без числа в критерии — GC-08; Must-FR
+    без вердикта `X` — GC-05; находок нет — код 0."""
+
+    questions: list[tuple[str, str, str]]
+    answers: dict[str, dict] = field(default_factory=dict)
+    asked: dict[str, str] = field(default_factory=dict)
+    sent: list[tuple[str, bool, dict]] = field(default_factory=list)
+
+    def answer(
+        self,
+        session_id: str,
+        role: str,
+        file: Path,
+        cwd: Path,
+        *,
+        question: str | None = None,
+        supersede: bool = False,
+    ) -> iv.DiscoveryReply:
+        payload = yaml.safe_load(file.read_text(encoding="utf-8"))
+        assert question is not None
+        self.sent.append((question, supersede, payload))
+        if not supersede:
+            assert question == self.questions.pop(0)[0]
+        self.asked.setdefault(question, question.removeprefix("q-"))
+        self.answers.pop(question, None)  # последний ответ — в конце
+        self.answers[question] = payload
+        return iv.DiscoveryReply(20, {"operation": {"status": "ok"}}, "")
+
+    def status(self, session_id: str, cwd: Path) -> iv.DiscoveryReply:
+        if self.questions:
+            qid, key, text = self.questions[0]
+            action = {"question_id": qid, "coverage_key": key, "question_text": text}
+            return iv.DiscoveryReply(20, {"next_action": action}, "")
+        lines = self._findings()
+        return iv.DiscoveryReply(11 if lines else 0, {"findings": lines}, "")
+
+    def view(self, session_id: str) -> SessionView:
+        held = {
+            e["id"]: (qid, e)
+            for qid, a in self.answers.items()
+            for e in a.get("entries") or []
+        }
+        return SessionView(
+            frame="customer",
+            required={"goals": "G", "functions": "FR"},
+            optional={"metrics": "M"},
+            entries=[
+                Entry(eid, e["body"], {k: v for k, v in e.items() if k[0].isupper()})
+                for eid, (_q, e) in held.items()
+            ],
+            declared=list(held),
+            holders={eid: qid for eid, (qid, _e) in held.items()},
+            answers=dict(self.answers),
+            answered_keys=[self.asked[q] for q in self.answers],
+            readiness="incomplete" if self._findings() else "ready",
+            findings=self._findings(),
+            asked=dict(self.asked),
+        )
+
+    def _findings(self) -> list[str]:
+        entries = [e for a in self.answers.values() for e in a.get("entries") or []]
+        prefixes = {e["id"].rsplit("-", 1)[0] for e in entries}
+        lines = [
+            f"required topic '{key}' is not covered"
+            for key, prefix in (("goals", "G"), ("functions", "FR"))
+            if prefix not in prefixes
+        ]
+        judged = {e.get("target") for e in entries if e["id"].startswith("X-")}
+        for e in entries:
+            if not e["id"].startswith("FR-"):
+                continue
+            if not any(c.isdigit() for c in str(e.get("Acceptance", ""))):
+                lines.append(f"GC-08 error [{e['id']}] нет **Acceptance** (числа)")
+            if e.get("Priority") == "Must" and e["id"] not in judged:
+                lines.append(
+                    "GC-05 error [coverage.feasibility_review] "
+                    f"Must-требование {e['id']} без вердикта"
+                )
+        return lines
+
+
+def _pending_json(env: Env, capsys: pytest.CaptureFixture[str]) -> dict:  # noqa: F811
+    capsys.readouterr()
+    assert env.run("pending", "--json") == 0
+    rec = json.loads(capsys.readouterr().out)
+    assert rec is not None and rec["answered"] is False
+    return rec
+
+
+def _answer_items(env: Env, qid: str, text: str, items: list[dict]) -> None:  # noqa: F811
+    doc = json.dumps({"text": text, "items": items}, ensure_ascii=False)
+    (env.tmp / "target" / "items.json").write_text(doc, encoding="utf-8")
+    assert env.run("answer", "--items", "items.json", "--id", qid) == 0
+
+
+def test_enterprise_interview_end_to_end_without_terminal(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Спека §7: интервью до следующей стадии только через `dfl run`,
+    `dfl pending --json`, `dfl reply`, `dfl answer --items`; агент и разговор
+    в терминале не зовутся (фейки `fakes` падают при вызове)."""
+    sess = Session([GOALS, FUNCTIONS])
+    monkeypatch.setattr(dfl, "load_session", sess.view)
+    monkeypatch.setattr(dfl, "_discovery_status", sess.status)
+    monkeypatch.setattr(dfl, "_discovery_answer", sess.answer)
+    target = dfl.user_targets.UserTarget(REPO, (env.tmp / "target").resolve(), URL)
+    monkeypatch.setattr(dfl.user_targets, "load", lambda: {REPO: target})
+
+    def spec_main(argv: list[str]) -> int:
+        """Шаг раннера: статус прогона — по состоянию фейка discovery."""
+        env.spec_calls.append(list(argv))
+        state = _waiting(RUN, "WS-1", "customer")
+        assert state.interview is not None
+        code = sess.status("", Path()).code
+        if code == 11:
+            state.status = "stopped_interview"
+            state.interview["stop_reason"] = INCOMPLETE
+        elif code == 0:
+            state.status = "brief_ready"
+        rs.save(state)
+        return 0
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+
+    # Новый прогон без терминала: вопрос 1 — в pending, с промптом и покрытием.
+    assert env.run("run", "--subject", "тема") == 0
+    q1 = _pending_json(env, capsys)
+    assert (q1["kind"], q1["key"]) == (pending.INTERVIEW_QUESTION, "q-goals")
+    assert ir.HUMAN_PLACEHOLDER in q1["data"]["prompt"]
+    assert [t["covered"] for t in q1["data"]["coverage"]] == [False, False, False]
+    _answer_items(
+        env,
+        q1["id"],
+        "Хотим меньше ручной сверки",
+        [{"prefix": "G", "body": "Меньше ручной сверки", "priority": "must"}],
+    )
+    assert sess.sent[-1][:2] == ("q-goals", False)
+    assert [e["id"] for e in sess.sent[-1][2]["entries"]] == ["G-01"]
+
+    # Вопрос 2 — пропуск через `dfl reply`; конец интервью с неполной темой.
+    q2 = _pending_json(env, capsys)
+    assert q2["key"] == "q-functions" and q2["text"].startswith("Вопрос 2 (")
+    assert env.run("reply", "--id", q2["id"], "--text", "пропустить") == 0
+    assert env.run("run") == 0
+    assert sess.sent[-1] == ("q-functions", False, {"text": "пропустить"})
+    assert rs.load(RUN).status == "stopped_interview"
+
+    # Добор непокрытой темы — раскладкой скила держателю темы.
+    assert env.run("run") == 0
+    top = _pending_json(env, capsys)
+    assert (top["kind"], top["key"]) == (pending.INTERVIEW_TOPUP, "topic:functions")
+    _answer_items(
+        env,
+        top["id"],
+        "Нужен отчёт по складу, быстро",
+        [
+            {
+                "prefix": "FR",
+                "body": "Отчёт по складу",
+                "priority": "must",
+                "acceptance": "быстро",
+            }
+        ],
+    )
+    assert sess.sent[-1][:2] == ("q-functions", True)
+    assert [e["id"] for e in sess.sent[-1][2]["entries"]] == ["FR-01"]
+
+    # Находка GC-08: критерий — раскладкой с обновлением FR-01.
+    fix = _pending_json(env, capsys)
+    assert (fix["kind"], fix["key"]) == (pending.INTERVIEW_REPAIR, "criterion:FR-01")
+    _answer_items(
+        env,
+        fix["id"],
+        "Отчёт за минуту",
+        [
+            {
+                "prefix": "FR",
+                "id": "FR-01",
+                "body": "Отчёт по складу",
+                "acceptance": "отчёт готов за 1 минуту",
+            }
+        ],
+    )
+    fr = sess.sent[-1][2]["entries"][0]
+    assert (fr["id"], fr["Acceptance"]) == ("FR-01", "отчёт готов за 1 минуту")
+
+    # Находка GC-05: вердикт реализуемости — `dfl reply да`.
+    verdict = _pending_json(env, capsys)
+    assert verdict["key"] == "verdict:FR-01"
+    seen = _interview_json(env, capsys)
+    assert seen["readiness"] == "incomplete" and seen["question"] is None
+    assert [t["covered"] for t in seen["coverage"]] == [True, True, False]
+    assert any("GC-05" in f["raw"] for f in seen["findings"])
+    assert env.run("reply", "--id", verdict["id"], "--text", "да") == 0
+    assert env.run("run") == 0
+    x = sess.sent[-1][2]["entries"][-1]
+    assert (x["id"], x["target"], x["status"]) == ("X-01", "FR-01", "resolved")
+
+    # Шаг дальше: бриф собран, ждущих вопросов нет.
+    assert rs.load(RUN).status == "brief_ready"
+    capsys.readouterr()
+    assert env.run("pending", "--json") == 0
+    assert json.loads(capsys.readouterr().out) is None
+    assert not (_rd() / ir.PASS_FILE).exists()
+    assert fakes.calls == []
