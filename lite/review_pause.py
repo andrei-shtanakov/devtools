@@ -141,3 +141,59 @@ def _choice(read: Read, yes: frozenset[str]) -> str | None:
         return None
     word = answer.strip().casefold()
     return word if word in yes | _NO_WORDS else ""
+
+
+def _named(item: str, title: str) -> str:
+    return f"{item} — «{title}»" if title else item
+
+
+def confirm_question(
+    stage: str, item: str, kind: str, title: str
+) -> pending_mod.Question:
+    """Вопрос «Удалить …?» (вид — `kind`) для `dfl pending`; тот же текст,
+    что в терминале."""
+    question, word = _QUESTIONS[kind]
+    return pending_mod.Question(
+        pending_mod.REMARKS_CONFIRM,
+        f"{stage}:{item}",
+        question.format(named=_named(item, title)),
+        options=(word, "оставить"),
+    )
+
+
+def confirm_answer(text: str, kind: str) -> bool | None:
+    """Ответ на вопрос вида `kind`: `True` — согласие, `False` — оставить,
+    `None` — не разобран (слово чужого вопроса — не согласие)."""
+    word = text.strip().casefold()
+    if word in _YES_WORDS | {_QUESTIONS[kind][1]}:
+        return True
+    if word in _NO_WORDS:
+        return False
+    return None
+
+
+def confirm_remote(
+    items: list[str],
+    *,
+    stage: str,
+    titles: Mapping[str, str],
+    kinds: Mapping[str, str],
+    ask: pending_mod.Ask,
+    answers: dict[str, bool],
+) -> set[str] | None:
+    """Подтверждение без терминала: по каждому id без ответа в `answers`
+    спросить через `ask`; ответ — в `answers` (сохраняет вызывающий).
+    `None` — вопрос записан, прогон ждёт; иначе разрешённые id."""
+    for item in items:
+        if item in answers:
+            continue
+        kind = kinds.get(item, REMOVE)
+        q = confirm_question(stage, item, kind, titles.get(item, ""))
+        reply = ask(q)
+        parsed = None if reply is None else confirm_answer(reply, kind)
+        if parsed is None:
+            if reply is not None:
+                ask(q)  # непонятный ответ — вопрос записывается снова
+            return None
+        answers[item] = parsed
+    return {item for item in items if answers[item]}
