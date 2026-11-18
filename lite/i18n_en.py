@@ -182,4 +182,371 @@ EN: dict[str, str] = {
     "«дальше»": "“next”",
     "«дальше» или замечания своими словами": "“next” or your remarks in your own words",
     "Верно? 1. да · 2. поправить: <что>": "Correct? 1. yes · 2. fix: <what>",
+    # экран личного пути (Task 6): отказ, ошибки до прогона, подсказки
+    "{command}: отказ (код {code})": "{command}: refusal (code {code})",
+    "причина:": "reason:",
+    "что сделать:": "what to do:",
+    "отчёт разработчикам: dfl report": "report to the developers: dfl report",
+    "подробно: dfl log": "details: dfl log",
+    (
+        "dfl работает только в режиме test (mode = {mode}) — "
+        'поставьте mode = "test" в {path} '
+        "(install.sh существующий конфиг не переписывает) или работайте "
+        "через make"
+    ): (
+        "dfl works only in test mode (mode = {mode}) — "
+        'set mode = "test" in {path} '
+        "(install.sh does not overwrite an existing config) or work "
+        "through make"
+    ),
+    "{cwd} не зарегистрирован — сначала dfl run в этом каталоге": (
+        "{cwd} is not registered — first dfl run in this directory"
+    ),
+    "{exc} — дождитесь конца dfl run и повторите": (
+        "{exc} — wait for dfl run to finish and repeat"
+    ),
+    # dfl pending / dfl reply
+    "вопросов нет": "no questions",
+    "ссылка: {link}": "link: {link}",
+    "принимается: {accepts}": "accepted: {accepts}",
+    "ответ: dfl reply --id {qid} --text '…'": "answer: dfl reply --id {qid} --text '…'",
+    "нет вопроса, ждущего ответа — dfl pending": (
+        "no question awaits an answer — dfl pending"
+    ),
+    "вопрос уже другой — dfl pending": "the question has changed — dfl pending",
+    "ответ записан — продолжить: dfl run": "answer recorded — continue: dfl run",
+    (
+        "ждёт ответа: {first} — вопрос: dfl pending{pick}; "
+        "ответ: dfl reply{pick} --id {qid} --text '…'"
+    ): (
+        "awaiting an answer: {first} — question: dfl pending{pick}; "
+        "answer: dfl reply{pick} --id {qid} --text '…'"
+    ),
+    # ввод в терминале (lite/interview_chat.py)
+    "(пустая строка — отправить)": "(empty line — send)",
+    "/стоп": "/stop",
+    (
+        "строка не прочитана: в ней битый символ (часто — Backspace стёр полбуквы); "
+        "введите эту строку ещё раз"
+    ): (
+        "the line was not read: it has a broken character (often Backspace erased"
+        " half a letter); type this line again"
+    ),
+    "ввод не читается — интервью остановлено; продолжить: dfl run": (
+        "input is unreadable — the interview is stopped; continue: dfl run"
+    ),
+    "ответ не принят — ответьте на вопрос ещё раз": (
+        "the answer was not accepted — answer the question again"
+    ),
+    "расскажите об этом своими словами («пропустить» — оставить так)": (
+        "tell about it in your own words (“skip” — leave it as is)"
+    ),
+    # интервьюер личного пути
+    "Что поправить?": "What to fix?",
+    (
+        "агент не ответил по форме дважды подряд — интервью остановлено; "
+        "продолжить: dfl run"
+    ): (
+        "the agent did not answer in the format twice in a row — the interview "
+        "is stopped; continue: dfl run"
+    ),
+    "агент недоступен ({reason}) — интервью остановлено; продолжить: dfl run": (
+        "the agent is unavailable ({reason}) — the interview is stopped;"
+        " continue: dfl run"
+    ),
+    "платных вызовов агента: {n}": "paid agent calls: {n}",
+    (
+        "строить пока нечего: нет ни одной функции с критерием приёмки — "
+        "расскажите, что должно работать (или /стоп)"
+    ): (
+        "nothing to build yet: no function has an acceptance criterion — "
+        "tell what should work (or /stop)"
+    ),
+    "строка журнала интервью не прочитана — пропущена": (
+        "an interview journal line was not read — skipped"
+    ),
+    # пауза на просмотр этапа (lite/review_pause.py)
+    "этап «{label}» готов и прошёл проверку — посмотрите": (
+        "stage “{label}” is ready and passed the check — take a look"
+    ),
+    "этап «{label}» готов и прошёл проверку — посмотрите:": (
+        "stage “{label}” is ready and passed the check — take a look:"
+    ),
+    (
+        "замечания своими словами (пустая строка — отправить); "
+        "«дальше» — без замечаний; {stop} — прервать"
+    ): (
+        "remarks in your own words (empty line — send); "
+        "“next” — no remarks; {stop} — interrupt"
+    ),
+    "неизвестный этап: {unknown}; допустимы: {stages}": (
+        "unknown stage: {unknown}; allowed: {stages}"
+    ),
+    "не понял ответ — номер или слово варианта": (
+        "did not get that — the option number or word"
+    ),
+    "Удалить {named}? 1. удалить · 2. оставить": "Remove {named}? 1. remove · 2. keep",
+    "Снять Must с {named}? 1. снять · 2. оставить": (
+        "Drop Must from {named}? 1. drop · 2. keep"
+    ),
+    "Принять правку {named}? 1. принять · 2. оставить как было": (
+        "Accept the change to {named}? 1. accept · 2. keep as it was"
+    ),
+    "просмотр этапа «{label}» прерван — продолжить: dfl run": (
+        "review of stage “{label}” interrupted — continue: dfl run"
+    ),
+    (
+        "ждёт просмотра этапа «{label}» — откройте {links}; замечания — dfl run в "
+        "терминале"
+    ): (
+        "awaiting review of stage “{label}” — open {links}; remarks — dfl run in "
+        "a terminal"
+    ),
+    (
+        "замечание не применено: правка удаляла или ослабляла {ids} — "
+        "сформулируйте иначе (dfl run)"
+    ): (
+        "the remark was not applied: the revision removed or weakened {ids} — "
+        "phrase it differently (dfl run)"
+    ),
+    (
+        "бриф правится словами: опишите правку как замечание — файл возвращён "
+        "к согласованной версии"
+    ): (
+        "the brief is changed with words: describe the change as a remark — the "
+        "file is restored to the agreed version"
+    ),
+    (
+        "платных вызовов: {head}сортировка {triage}, переписывание "
+        "{revise}, проверка {check}"
+    ): ("paid calls: {head}triage {triage}, revision {revise}, check {check}"),
+    "авторинг {n}, ": "authoring {n}, ",
+    # шаги личного пути (lite/personal/flow.py)
+    "продолжить: dfl run": "continue: dfl run",
+    "бросить прогон и начать заново — dfl abandon": (
+        "abandon the run and start over — dfl abandon"
+    ),
+    "интервью прервано — продолжить: dfl run": "interview paused — continue: dfl run",
+    "интервью не завершено — {retry}": "the interview is not finished — {retry}",
+    (
+        "ветка по умолчанию {slug} не установлена ({detail}) — "
+        "база {base} (не закрепляется)"
+    ): (
+        "the default branch of {slug} is not established ({detail}) — "
+        "base {base} (not pinned)"
+    ),
+    "декомпозиция нарушает инварианты — правка автором, круг {n}": (
+        "the decomposition breaks invariants — revision by the author, round {n}"
+    ),
+    (
+        "декомпозиция нарушает инварианты после {rounds} кругов правки: "
+        "{problems} — поправьте {name} вручную и повторите dfl run ({abandon})"
+    ): (
+        "the decomposition breaks invariants after {rounds} revision rounds: "
+        "{problems} — fix {name} by hand and repeat dfl run ({abandon})"
+    ),
+    "правка {name} не состоялась: {why}": "revision of {name} failed: {why}",
+    "правка {name} отклонена — ослабляет узел: {ids}; файл возвращён": (
+        "revision of {name} rejected — it weakens the node: {ids}; file restored"
+    ),
+    "бриф прогона не прочитан ({path}): {exc}": (
+        "the run's brief was not read ({path}): {exc}"
+    ),
+    "автор {name} не написал узел: {why} — {retry}": (
+        "the author did not write {name}: {why} — {retry}"
+    ),
+    "проверка ребра не состоялась: {why}": "the edge check did not run: {why}",
+    (
+        "замечания edge-check к {name} не сошлись за {rounds} "
+        "круга — поправьте узел и повторите dfl run ({abandon})"
+    ): (
+        "edge-check findings on {name} did not converge in {rounds} "
+        "rounds — fix the node and repeat dfl run ({abandon})"
+    ),
+    "разбор замечаний к {name} не завершён ({outcome}) — {retry}": (
+        "resolution of findings on {name} is not finished ({outcome}) — {retry}"
+    ),
+    "замечания к этапу «{label}» — правка, круг {n}": (
+        "remarks on stage “{label}” — revision, round {n}"
+    ),
+    (
+        "в {target} незакоммиченные чужие изменения: {foreign} — "
+        "уберите их и повторите dfl run"
+    ): (
+        "{target} has uncommitted foreign changes: {foreign} — "
+        "remove them and repeat dfl run"
+    ),
+    (
+        "{target} на ветке {branch}, ожидалась {base} (или ветка прогона "
+        "{run_branch}) — переключитесь и повторите dfl run"
+    ): (
+        "{target} is on branch {branch}, expected {base} (or the run branch "
+        "{run_branch}) — switch and repeat dfl run"
+    ),
+    "tasks.md не построен: {exc}": "tasks.md was not built: {exc}",
+    (
+        "ветка прогона {branch} несёт чужие изменения относительно "
+        "origin/{base}: {foreign} — это коммит в ветке прогона или "
+        "незапушенный коммит локальной {base}; уберите его из ветки "
+        "прогона (или запушьте {base}) и повторите dfl run ({abandon})"
+    ): (
+        "the run branch {branch} carries foreign changes relative to "
+        "origin/{base}: {foreign} — a commit on the run branch or an "
+        "unpushed commit of the local {base}; remove it from the run "
+        "branch (or push {base}) and repeat dfl run ({abandon})"
+    ),
+    "spec-PR не создан: {exc} — {retry}": "spec PR not created: {exc} — {retry}",
+    (
+        "ветка прогона {branch} с коммитом бандла пропала — верните её "
+        "(git reflog) и повторите dfl run ({abandon})"
+    ): (
+        "the run branch {branch} with the bundle commit is gone — restore it "
+        "(git reflog) and repeat dfl run ({abandon})"
+    ),
+    "ветка прогона {branch} не прочитана: {detail} — {retry}": (
+        "the run branch {branch} was not read: {detail} — {retry}"
+    ),
+    (
+        "ветка прогона {branch} уже есть и несёт коммиты, которых прогон не "
+        "делал (или это не установлено), — разберите её вручную (удалите или "
+        "переименуйте) и повторите dfl run ({abandon})"
+    ): (
+        "the run branch {branch} already exists and carries commits the run did "
+        "not make (or this is not established) — sort it out by hand (delete or "
+        "rename it) and repeat dfl run ({abandon})"
+    ),
+    "spec-PR #{pr} закрыт без мержа — решите вручную ({abandon})": (
+        "spec PR #{pr} is closed without a merge — decide by hand ({abandon})"
+    ),
+    "spec-PR #{pr} не вмержен — {why}": "spec PR #{pr} is not merged — {why}",
+    (
+        "spec-PR #{pr} не вмержен — human-merge.sh вернул {rc}: "
+        "проверки PR ещё идут или не прошли — повторите dfl run позже"
+    ): (
+        "spec PR #{pr} is not merged — human-merge.sh returned {rc}: "
+        "the PR checks are still running or failed — repeat dfl run later"
+    ),
+    "spec-PR #{pr} вмержен": "spec PR #{pr} merged",
+    "checkout/pull {base} не удался: {exc} — {retry}": (
+        "checkout/pull {base} failed: {exc} — {retry}"
+    ),
+    "конфиг DarkFactory не прочитан: {exc}": (
+        "the DarkFactory config was not read: {exc}"
+    ),
+    "мерж агентом только в режиме test, конфиг: {mode} — смержите сами": (
+        "the agent merges only in test mode, config: {mode} — merge it yourself"
+    ),
+    "запушенная голова не записана — {retry}": (
+        "the pushed head is not recorded — {retry}"
+    ),
+    (
+        "голова PR {head} ≠ запушенной прогоном {pushed} — ветку меняли "
+        "снаружи; разберите вручную"
+    ): (
+        "PR head {head} ≠ the head pushed by the run {pushed} — the branch was "
+        "changed from outside; sort it out by hand"
+    ),
+    "(нет)": "(none)",
+    "факты PR #{pr} не прочитаны: {exc} — {retry}": (
+        "facts of PR #{pr} were not read: {exc} — {retry}"
+    ),
+    "факты PR #{pr} не прочитаны: ответ форджи не объект": (
+        "facts of PR #{pr} were not read: the forge answer is not an object"
+    ),
+    "список PR {prefix}* не прочитан: {exc} — {retry}": (
+        "the list of PRs {prefix}* was not read: {exc} — {retry}"
+    ),
+    (
+        "исход spec-runner run не наблюдён, открыт integration-PR "
+        "{partial} — он может быть частичным; закройте его и "
+        "повторите dfl run (повтор перезапустит раннер; {abandon})"
+    ): (
+        "the outcome of spec-runner run was not observed, integration PR "
+        "{partial} is open — it may be partial; close it and "
+        "repeat dfl run (the repeat restarts the runner; {abandon})"
+    ),
+    "повтор покажет, что сделано, и не создаст новую ветку": (
+        "the repeat shows what is done and does not create a new branch"
+    ),
+    "повтор перезапустит раннер": "the repeat restarts the runner",
+    "spec-runner run вернул {rc} — разберите и повторите dfl run ({promise})": (
+        "spec-runner run returned {rc} — sort it out and repeat dfl run ({promise})"
+    ),
+    "найдено {n}: {new}": "found {n}: {new}",
+    "не найден": "none found",
+    "spec-runner run: ожидался один новый integration-PR, {found} — {retry}": (
+        "spec-runner run: one new integration PR was expected, {found} — {retry}"
+    ),
+    "integration-PR #{pr} открыт": "integration PR #{pr} opened",
+    "integration-PR прогона не известен — повторите dfl run": (
+        "the run's integration PR is unknown — repeat dfl run"
+    ),
+    "integration-PR #{pr} вмержен — конвейер закончен": (
+        "integration PR #{pr} merged — the pipeline is finished"
+    ),
+    "смержите https://github.com/{slug}/pull/{pr} — затем dfl run": (
+        "merge https://github.com/{slug}/pull/{pr} — then dfl run"
+    ),
+    # отказы `dfl run` на личном пути (lite/dfl.py)
+    (
+        "тема «{subject}» уже есть у enterprise-конвейера (идёт или закончен), "
+        "--track personal не применим — продолжить её: dfl run --subject "
+        "'{subject}' без --track; личный проект заведите под другой темой "
+        "(или сначала dfl abandon)"
+    ): (
+        "the subject “{subject}” already has an enterprise pipeline (running or "
+        "finished), --track personal does not apply — to continue it: dfl run "
+        "--subject '{subject}' without --track; start the personal project under "
+        "another subject (or dfl abandon first)"
+    ),
+    (
+        "тема «{subject}» ведётся личным путём (прогон {run_id}), --track enterprise "
+        "не применим — продолжить её: dfl run без --track; enterprise-конвейер для "
+        "неё — сначала dfl abandon, затем dfl run --subject '<тема>' --track enterprise"
+    ): (
+        "the subject “{subject}” is on the personal path (run {run_id}), --track "
+        "enterprise does not apply — to continue it: dfl run without --track; an "
+        "enterprise pipeline for it — first dfl abandon, then dfl run --subject "
+        "'<subject>' --track enterprise"
+    ),
+    (
+        "--track требует --subject: активного личного прогона в репо нет — "
+        "dfl run --subject '<тема>' --track personal"
+    ): (
+        "--track needs --subject: the repo has no active personal run — "
+        "dfl run --subject '<subject>' --track personal"
+    ),
+    (
+        "этапы с паузой на просмотр зафиксированы при старте прогона: {recorded} — "
+        "продолжить: dfl run без --review; другой выбор — сначала dfl abandon, "
+        "затем dfl run --subject '<тема>' --review <этапы>"
+    ): (
+        "the stages with a review pause were fixed at the start of the run: "
+        "{recorded} — to continue: dfl run without --review; another choice — "
+        "first dfl abandon, then dfl run --subject '<subject>' --review <stages>"
+    ),
+    "без пауз": "no pauses",
+    (
+        "--review: пауза на просмотр этапа работает только с автором claude "
+        "(harness.author = claude) — поставьте его в конфиге или запустите без "
+        "--review"
+    ): (
+        "--review: the stage review pause works only with the claude author "
+        "(harness.author = claude) — set it in the config or run without --review"
+    ),
+    (
+        "[review] pause_after не действует: пауза на просмотр этапа работает только "
+        "с автором claude (harness.author = claude) — прогон идёт без пауз"
+    ): (
+        "[review] pause_after has no effect: the stage review pause works only "
+        "with the claude author (harness.author = claude) — the run goes without "
+        "pauses"
+    ),
+    (
+        "неизвестный этап: {unknown}; допустимы: личный путь: "
+        "{personal}; enterprise: {enterprise}"
+    ): (
+        "unknown stage: {unknown}; allowed: personal path: "
+        "{personal}; enterprise: {enterprise}"
+    ),
 }

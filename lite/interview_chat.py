@@ -21,6 +21,7 @@ from collections.abc import Callable
 from governance import interview as iv
 from governance import run_state as rs
 from lite import gate_repair as gr
+from lite.i18n import t
 from lite.interview_state import SessionView
 from lite.output import say
 from lite.structure import (
@@ -167,7 +168,7 @@ def _top_up_topic(
         return
     label = TOPIC_LABELS.get(key, key)
     q = Question(qid, key, f"Расскажите про тему «{label}».")
-    text = _ask_human(f"Не хватает: {label} — {TOP_UP_HINT}", read)
+    text = _ask_human(f"Не хватает: {label} — {t(TOP_UP_HINT)}", read)
     if is_skip(text):
         return
     held = view.held_answer(qid)
@@ -219,7 +220,7 @@ def _settle(
         if reply.code not in (1, 2):
             return
         if refusal:
-            say(REFUSED_TEXT)
+            say(t(REFUSED_TEXT))
             return
         refusal = reply.envelope.get("operation", {}).get("reason", "") or "отказ"
 
@@ -306,7 +307,7 @@ def _hint_once() -> None:
     """Подсказка об отправке — под первым вопросом процесса, дальше не мешает."""
     if not _hinted:
         _hinted.append(True)
-        say(SEND_HINT)
+        say(t(SEND_HINT))
 
 
 def is_skip(text: str) -> bool:
@@ -336,8 +337,8 @@ def stdin_read(prompt: str) -> str | None:
         if line is not None and not _has_broken_bytes(line):
             return line
         if attempt < MAX_BROKEN_READS:
-            say(BROKEN_INPUT)
-    say(BROKEN_INPUT_STOP)
+            say(t(BROKEN_INPUT))
+    say(t(BROKEN_INPUT_STOP))
     return None
 
 

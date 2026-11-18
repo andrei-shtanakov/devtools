@@ -142,60 +142,92 @@ class Brief:
     open_items: tuple[str, ...] = ()
 
 
-def _str(obj: object, key: str, where: str) -> str:
+#: ошибки формы брифа по языку прогона (уходят интервьюеру в повтор)
+_FORM_ERRORS = {
+    "ru": {
+        "str": "{where}: поле «{key}» должно быть строкой",
+        "list": "{where}: поле «{key}» должно быть списком строк",
+        "items": "бриф: поле «{key}» должно быть списком",
+        "context": "бриф: поле «context» должно быть объектом",
+        "object": "бриф: ожидается JSON-объект",
+        "goal": "цель",
+        "function": "функция",
+        "brief": "бриф",
+    },
+    "en": {
+        "str": "{where}: the field “{key}” must be a string",
+        "list": "{where}: the field “{key}” must be a list of strings",
+        "items": "brief: the field “{key}” must be a list",
+        "context": "brief: the field “context” must be an object",
+        "object": "brief: a JSON object is expected",
+        "goal": "goal",
+        "function": "function",
+        "brief": "brief",
+    },
+}
+
+
+def _str(obj: object, key: str, where: str, lang: str = "ru") -> str:
     if not isinstance(obj, dict) or not isinstance(obj.get(key), str):
-        raise FormError(f"{where}: поле «{key}» должно быть строкой")
+        raise FormError(_FORM_ERRORS[lang]["str"].format(where=where, key=key))
     return obj[key]
 
 
-def _str_list(obj: object, key: str, where: str) -> tuple[str, ...]:
+def _str_list(obj: object, key: str, where: str, lang: str = "ru") -> tuple[str, ...]:
     items = obj.get(key) if isinstance(obj, dict) else None
     if not isinstance(items, list) or not all(isinstance(i, str) for i in items):
-        raise FormError(f"{where}: поле «{key}» должно быть списком строк")
+        raise FormError(_FORM_ERRORS[lang]["list"].format(where=where, key=key))
     return tuple(items)
 
 
-def _items(data: dict, key: str) -> list:
+def _items(data: dict, key: str, lang: str = "ru") -> list:
     items = data.get(key)
     if not isinstance(items, list):
-        raise FormError(f"бриф: поле «{key}» должно быть списком")
+        raise FormError(_FORM_ERRORS[lang]["items"].format(key=key))
     return items
 
 
-def _goal(obj: object) -> Goal:
+def _goal(obj: object, lang: str = "ru") -> Goal:
+    where = _FORM_ERRORS[lang]["goal"]
     return Goal(
-        _str(obj, "id", "цель"), _str(obj, "title", "цель"), _str(obj, "text", "цель")
+        _str(obj, "id", where, lang),
+        _str(obj, "title", where, lang),
+        _str(obj, "text", where, lang),
     )
 
 
-def _function(obj: object) -> Function:
-    where = "функция"
+def _function(obj: object, lang: str = "ru") -> Function:
+    where = _FORM_ERRORS[lang]["function"]
     return Function(
-        _str(obj, "id", where),
-        _str(obj, "title", where),
-        _str_list(obj, "goals", where),
-        _str_list(obj, "criteria", where),
-        _str(obj, "words", where),
+        _str(obj, "id", where, lang),
+        _str(obj, "title", where, lang),
+        _str_list(obj, "goals", where, lang),
+        _str_list(obj, "criteria", where, lang),
+        _str(obj, "words", where, lang),
     )
 
 
-def _context(obj: object) -> Context:
+def _context(obj: object, lang: str = "ru") -> Context:
     if not isinstance(obj, dict):
-        raise FormError("бриф: поле «context» должно быть объектом")
-    values = {k: _str(obj, k, "context") for k, _ in CONTEXT_LABELS}
-    other = _str(obj, "other", "context") if "other" in obj else ""
+        raise FormError(_FORM_ERRORS[lang]["context"])
+    values = {k: _str(obj, k, "context", lang) for k, _ in CONTEXT_LABELS}
+    other = _str(obj, "other", "context", lang) if "other" in obj else ""
     return Context(**values, other=other)
 
 
-def brief_from_json(data: object) -> Brief:
-    """Parse the interviewer's JSON into a `Brief`; `FormError` on bad shape."""
+def brief_from_json(data: object, *, lang: str = "ru") -> Brief:
+    """Parse the interviewer's JSON into a `Brief`; `FormError` on bad shape.
+
+    `lang` — язык сообщений `FormError` (они уходят агенту в повтор)."""
+    texts = _FORM_ERRORS[lang]
     if not isinstance(data, dict):
-        raise FormError("бриф: ожидается JSON-объект")
-    open_items = _str_list(data, "open_items", "бриф") if "open_items" in data else ()
+        raise FormError(texts["object"])
+    has_open = "open_items" in data
+    open_items = _str_list(data, "open_items", texts["brief"], lang) if has_open else ()
     return Brief(
-        goals=tuple(_goal(g) for g in _items(data, "goals")),
-        functions=tuple(_function(f) for f in _items(data, "functions")),
-        context=_context(data.get("context")),
+        goals=tuple(_goal(g, lang) for g in _items(data, "goals", lang)),
+        functions=tuple(_function(f, lang) for f in _items(data, "functions", lang)),
+        context=_context(data.get("context"), lang),
         open_items=open_items,
     )
 

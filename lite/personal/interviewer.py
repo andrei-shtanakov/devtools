@@ -113,6 +113,24 @@ _PROMPT_TEXTS = {
     },
 }
 
+#: ошибки протокола интервьюера по языку прогона (уходят агенту в повтор)
+_FORM_ERRORS = {
+    "ru": {
+        "json": "в ответе нет JSON-объекта",
+        "key": 'ожидается ключ "ask" или "brief"',
+        "cap": 'лимит вопросов исчерпан — ожидается {"brief": …}, не вопрос',
+        "ask": 'поле "ask" должно быть непустой строкой',
+        "options": 'поле "options" должно быть списком строк',
+    },
+    "en": {
+        "json": "the answer has no JSON object",
+        "key": 'expected the key "ask" or "brief"',
+        "cap": 'the question limit is reached — expected {"brief": …}, not a question',
+        "ask": 'the field "ask" must be a non-empty string',
+        "options": 'the field "options" must be a list of strings',
+    },
+}
+
 Entry = dict[str, Any]
 
 
@@ -179,7 +197,7 @@ def _parse_entry(line: str) -> Entry | None:
         and isinstance(entry.get("text"), str)
     ):
         return entry
-    say(CORRUPT_LINE)
+    say(i18n.t(CORRUPT_LINE))
     return None
 
 
@@ -207,13 +225,13 @@ def interview(
     except _Failed:
         return Halt.FAILED
     except AgentUnavailable as exc:
-        say(UNAVAILABLE_STOP.format(reason=exc))
+        say(i18n.t(UNAVAILABLE_STOP).format(reason=exc))
         return Halt.FAILED
     except KeyboardInterrupt:
         say("")
         return Halt.PAUSED
     finally:
-        say(PAID_CALLS.format(n=calls))
+        say(i18n.t(PAID_CALLS).format(n=calls))
 
 
 def append_correction(run_dir: Path, text: str, *, lang: str = "ru") -> None:
@@ -259,7 +277,7 @@ def _nothing_to_build(turn: BriefTurn, log: _Log, read: Read) -> None:
     """Бриф без целей или функций не на подтверждение: спросить человека, что
     должно работать; бриф и ответ уходят в разговор (агент их увидит)."""
     while True:
-        say(NOTHING_TO_BUILD)
+        say(i18n.t(NOTHING_TO_BUILD))
         text = read_answer(read)
         if text is None:
             raise _Stop
@@ -318,10 +336,10 @@ def _next_turn(
         prompt = build_prompt(entries, subject, at_cap=at_cap, error=error, lang=lang)
         raw = agent(prompt)
         try:
-            return parse_turn(raw, allow_ask=not at_cap)
+            return parse_turn(raw, allow_ask=not at_cap, lang=lang)
         except FormError as exc:
             error = str(exc)
-    say(FORM_STOP)
+    say(i18n.t(FORM_STOP))
     raise _Failed
 
 
@@ -362,26 +380,33 @@ def _render_entry(entry: Entry, lang: str = "ru") -> str:
     return f"{_SPEAKERS[lang].get(str(role), str(role))}: {entry['text']}"
 
 
-def parse_turn(raw: str, *, allow_ask: bool = True) -> AskTurn | BriefTurn:
-    """Ответ агента → `AskTurn` | `BriefTurn`; не по протоколу — `FormError`."""
-    doc = first_json_object(raw)
+def parse_turn(
+    raw: str, *, allow_ask: bool = True, lang: str = "ru"
+) -> AskTurn | BriefTurn:
+    """Ответ агента → `AskTurn` | `BriefTurn`; не по протоколу — `FormError`
+    (сообщение — на языке `lang`: оно уходит агенту в повтор)."""
+    errors = _FORM_ERRORS[lang]
+    try:
+        doc = first_json_object(raw)
+    except FormError:
+        raise FormError(errors["json"]) from None
     if "brief" in doc:
         data = doc["brief"]
-        brief = brief_from_json(data)
+        brief = brief_from_json(data, lang=lang)
         return BriefTurn(brief, data)
     if "ask" not in doc:
-        raise FormError('ожидается ключ "ask" или "brief"')
+        raise FormError(errors["key"])
     if not allow_ask:
-        raise FormError('лимит вопросов исчерпан — ожидается {"brief": …}, не вопрос')
-    return _ask_turn(doc)
+        raise FormError(errors["cap"])
+    return _ask_turn(doc, errors)
 
 
-def _ask_turn(doc: dict[str, Any]) -> AskTurn:
+def _ask_turn(doc: dict[str, Any], errors: dict[str, str]) -> AskTurn:
     question, options = doc.get("ask"), doc.get("options", [])
     if not isinstance(question, str) or not question.strip():
-        raise FormError('поле "ask" должно быть непустой строкой')
+        raise FormError(errors["ask"])
     if not isinstance(options, list) or not all(isinstance(o, str) for o in options):
-        raise FormError('поле "options" должно быть списком строк')
+        raise FormError(errors["options"])
     return AskTurn(question.strip(), tuple(o.strip() for o in options if o.strip()))
 
 
@@ -445,7 +470,7 @@ def _correction(text: str, read: Read) -> str:
     if text.isdigit():
         if text != "2":
             return ""
-        say(WHAT_TO_FIX)
+        say(i18n.t(WHAT_TO_FIX))
         more = read_answer(read)
         if more is None:
             raise _Stop

@@ -177,6 +177,14 @@ REVIEW_SHOWN = "review-shown.json"
 REVIEW_ACKED = "review-acked.json"
 #: команды, продолжающие активный личный прогон: язык вызова — его язык (#769)
 PERSONAL_COMMANDS = frozenset({"run", "abandon", "pending", "reply"})
+TEST_MODE_ONLY = (
+    "dfl работает только в режиме test (mode = {mode}) — "
+    'поставьте mode = "test" в {path} '
+    "(install.sh существующий конфиг не переписывает) или работайте "
+    "через make"
+)
+LOCK_BUSY = "{exc} — дождитесь конца dfl run и повторите"
+NOT_REGISTERED = "{cwd} не зарегистрирован — сначала dfl run в этом каталоге"
 LANG_REFUSAL = "неизвестный язык ({error}) — допустимы: {langs}"
 LANG_MISMATCH = (
     "прогон {run_id} ведётся на языке {stored} — {requested} из --lang/DFL_LANG "
@@ -346,10 +354,10 @@ def _failure_hint() -> None:
     """Ненулевой код: с логом — `подробно: dfl log` (и `dfl report` с `-v`),
     без лога — прежняя подсказка `dfl report`."""
     if not _LOG_PATH:
-        say(REPORT_HINT, 0, err=True)
+        say(t(REPORT_HINT), 0, err=True)
         return
-    say(LOG_HINT, 0, err=True)
-    say(REPORT_HINT, 1, err=True)
+    say(t(LOG_HINT), 0, err=True)
+    say(t(REPORT_HINT), 1, err=True)
 
 
 def _open_log(args: argparse.Namespace, cwd: Path, raw: list[str]) -> None:
@@ -676,10 +684,9 @@ def _require_test_mode(*, status_header: bool = False, quiet: bool = False) -> N
     cfg = df_config.load()
     if cfg.mode != "test":
         raise DflError(
-            f"dfl работает только в режиме test (mode = {cfg.mode!r}) — "
-            f'поставьте mode = "test" в {df_config.canonical_config_path()} '
-            "(install.sh существующий конфиг не переписывает) или работайте "
-            "через make"
+            t(TEST_MODE_ONLY).format(
+                mode=repr(cfg.mode), path=df_config.canonical_config_path()
+            )
         )
     if quiet:  # машинный вывод (`pending --json`): без баннера в stdout
         return
@@ -729,7 +736,7 @@ def run(
     С автором не claude выход с паузы невозможен — `--review` с этапами
     отказывает сразу (RF-a)."""
     if _review_selected(review, track) and not _author_is_claude():
-        raise DflError(REVIEW_NEEDS_CLAUDE)  # RF-a: до регистрации и эффектов
+        raise DflError(t(REVIEW_NEEDS_CLAUDE))  # RF-a: до регистрации и эффектов
     target = user_targets.register(cwd)
     code = _personal(target, subject, track, review)
     if code is not None:
@@ -785,13 +792,14 @@ def _pending_lines(rec: dict, *, answered: bool = False) -> list[str]:
     lines = [str(rec.get("text", ""))]
     for n, option in enumerate(rec.get("options") or [], start=1):
         lines.append(f"  {n}. {option}")
-    lines += [f"ссылка: {link}" for link in rec.get("links") or []]
+    lines += [t("ссылка: {link}").format(link=link) for link in rec.get("links") or []]
     if rec.get("accepts"):
-        lines.append(f"принимается: {rec['accepts']}")
+        lines.append(t("принимается: {accepts}").format(accepts=rec["accepts"]))
     if answered:
-        lines.append(pending.ANSWERED)
+        lines.append(t(pending.ANSWERED))
     else:
-        lines.append(f"ответ: dfl reply --id {rec.get('id', '')} --text '…'")
+        reply = t("ответ: dfl reply --id {qid} --text '…'")
+        lines.append(reply.format(qid=rec.get("id", "")))
     return lines
 
 
@@ -805,7 +813,7 @@ def pending_cmd(cwd: Path, subject: str | None, *, as_json: bool) -> int:
         say(json.dumps(out, ensure_ascii=False, indent=2))
         return 0
     if rec is None:
-        say("вопросов нет")
+        say(t("вопросов нет"))
         return 0
     for line in _pending_lines(rec, answered=done):
         say(line)
@@ -816,15 +824,15 @@ def reply_cmd(cwd: Path, subject: str | None, qid: str, text: str) -> int:
     """`dfl reply`: записать ответ на ждущий вопрос `qid`; дальше — `dfl run`."""
     run_dir = _pending_dir(cwd, subject, register=True)
     if run_dir is None:
-        raise DflError(pending.NO_PENDING)
+        raise DflError(t(pending.NO_PENDING))
     try:
         with run_lock.run_lock(run_dir.name):
             pending.record(run_dir, qid, text)
     except run_lock.LockBusy as exc:
-        raise DflError(f"{exc} — дождитесь конца dfl run и повторите") from exc
+        raise DflError(t(LOCK_BUSY).format(exc=exc)) from exc
     except pending.PendingError as exc:
         raise DflError(str(exc)) from exc
-    say(pending.ANSWERED)
+    say(t(pending.ANSWERED))
     return 0
 
 
@@ -843,7 +851,7 @@ def resolve_review(flag: str | None, stages: tuple[str, ...]) -> tuple[str, ...]
         names = getattr(df_config.load(), "review_pause_after", ())
         chosen = rp.from_config(tuple(names), stages)
         if chosen and not _author_is_claude():
-            say(REVIEW_CONFIG_DROPPED)  # RF-a: не блокирует прогон
+            say(t(REVIEW_CONFIG_DROPPED))  # RF-a: не блокирует прогон
             return ()
     return tuple(stage for stage in stages if stage in chosen)
 
@@ -866,9 +874,14 @@ def _review_selected(flag: str | None, track: str | None = None) -> bool:
         names = [n.strip() for n in flag.split(",") if n.strip()]
         unknown = ", ".join(n for n in names if n not in ALL_STAGES)
         raise DflError(
-            f"неизвестный этап: {unknown}; допустимы: личный путь: "
-            f"{', '.join(rp.PERSONAL_STAGES)}; enterprise: "
-            f"{', '.join(rp.ENTERPRISE_STAGES)}"
+            t(
+                "неизвестный этап: {unknown}; допустимы: личный путь: "
+                "{personal}; enterprise: {enterprise}"
+            ).format(
+                unknown=unknown,
+                personal=", ".join(rp.PERSONAL_STAGES),
+                enterprise=", ".join(rp.ENTERPRISE_STAGES),
+            )
         ) from exc
 
 
@@ -878,7 +891,8 @@ def _check_review(
     """Продолжение прогона: `--review`, расходящийся с записанным, — отказ."""
     if flag is None or resolve_review(flag, stages) == tuple(recorded):
         return
-    raise DflError(REVIEW_FIXED.format(recorded=", ".join(recorded) or "без пауз"))
+    shown = ", ".join(recorded) or t("без пауз")
+    raise DflError(t(REVIEW_FIXED).format(recorded=shown))
 
 
 def _review_argv(stages: tuple[str, ...] | list[str]) -> list[str]:
@@ -906,7 +920,7 @@ def _personal(
     if active is not None:
         if track == "enterprise":
             raise DflError(
-                TRACK_ENTERPRISE_TAKEN.format(
+                t(TRACK_ENTERPRISE_TAKEN).format(
                     subject=active.subject, run_id=active.run_id
                 )
             )
@@ -914,11 +928,11 @@ def _personal(
         return _advance_personal(active)
     if subject is None:
         if track == "personal":
-            raise DflError(TRACK_NEEDS_SUBJECT)
+            raise DflError(t(TRACK_NEEDS_SUBJECT))
         return None
     new = _new_subject(target.repo, subject)
     if track == "personal" and not new:
-        raise DflError(TRACK_PERSONAL_TAKEN.format(subject=subject))
+        raise DflError(t(TRACK_PERSONAL_TAKEN).format(subject=subject))
     if track is None and new:
         if not _track_tty():
             say(t(TRACK_NO_TTY_HINT))
@@ -1490,7 +1504,7 @@ def _write_pause_op(state: rs.RunState, *, complete: bool) -> None:
             else:
                 rs.op_start(now, key, revised=True)
     except run_lock.LockBusy as exc:
-        raise DflError(f"{exc} — дождитесь конца dfl run и повторите") from exc
+        raise DflError(t(LOCK_BUSY).format(exc=exc)) from exc
 
 
 def _say_not_converged(
@@ -2040,7 +2054,7 @@ def _manual_save(state: rs.RunState) -> None:
             now.ops[MANUAL_OP] = state.ops[MANUAL_OP]
             rs.save(now)
     except run_lock.LockBusy as exc:
-        raise DflError(f"{exc} — дождитесь конца dfl run и повторите") from exc
+        raise DflError(t(LOCK_BUSY).format(exc=exc)) from exc
 
 
 def _select_customer(
@@ -2276,7 +2290,7 @@ def _registered_target(cwd: Path) -> user_targets.UserTarget:
     for target in user_targets.load().values():
         if here == target.path or target.path in here.parents:
             return target
-    raise DflError(f"{cwd} не зарегистрирован — сначала dfl run в этом каталоге")
+    raise DflError(t(NOT_REGISTERED).format(cwd=cwd))
 
 
 def _next_hint(state: rs.RunState, runs: list[rs.RunState]) -> str | None:
@@ -2526,7 +2540,7 @@ def abandon(cwd: Path, subject: str | None) -> int:
             try:
                 stack.enter_context(run_lock.run_lock(run_id))
             except run_lock.LockBusy as exc:
-                raise DflError(f"{exc} — дождитесь конца dfl run и повторите") from exc
+                raise DflError(t(LOCK_BUSY).format(exc=exc)) from exc
         dest.mkdir(parents=True, exist_ok=False)
         for run_id in moved:
             shutil.move(str(rs.run_dir(run_id)), str(dest / run_id))

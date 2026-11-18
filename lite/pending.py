@@ -55,6 +55,11 @@ AGREE_EN = {"удалить": "remove", "снять": "drop", "принять": 
 NO_PENDING = "нет вопроса, ждущего ответа — dfl pending"
 STALE = "вопрос уже другой — dfl pending"
 ANSWERED = "ответ записан — продолжить: dfl run"
+#: строка «ждёт ответа» (начало — `manual_ask.WAIT_PREFIX` на обоих языках)
+WAIT_LINE = (
+    "ждёт ответа: {first} — вопрос: dfl pending{pick}; "
+    "ответ: dfl reply{pick} --id {qid} --text '…'"
+)
 REVIEW_REFUSAL = (
     "замечания к этапу пока принимаются только в терминале: dfl run; "
     "без замечаний — «дальше»"
@@ -181,10 +186,7 @@ def asker(run_dir: Path) -> Ask:
 def _line(qid: str, text: str, subject: str | None = None) -> str:
     first = text.splitlines()[0] if text.strip() else ""
     pick = f" --subject '{subject}'" if subject else ""
-    return (
-        f"ждёт ответа: {first} — вопрос: dfl pending{pick}; "
-        f"ответ: dfl reply{pick} --id {qid} --text '…'"
-    )
+    return i18n.t(WAIT_LINE).format(first=first, pick=pick, qid=qid)
 
 
 def wait_line(q: Question) -> str:
@@ -200,7 +202,7 @@ def wait_text(run_dir: Path, subject: str | None = None) -> str:
     if rec is None:
         return ""
     if answered(run_dir):
-        return ANSWERED
+        return i18n.t(ANSWERED)
     return _line(str(rec.get("id", "")), str(rec.get("text", "")), subject)
 
 
@@ -242,9 +244,12 @@ def _check_confirm(text: str, rec: Mapping | None) -> str | None:
     yes = options[0] if options else "да"
     word = text.strip().casefold()
     en = AGREE_EN.get(yes.casefold(), "yes")
-    accepted = {"1", "да", "yes", yes.casefold(), en} | CONFIRM_KEEP_WORDS
+    ru = {v: k for k, v in AGREE_EN.items()}.get(yes.casefold(), "да")
+    accepted = {"1", "да", "yes", yes.casefold(), en, ru} | CONFIRM_KEEP_WORDS
     if word in accepted:
         return None
+    if yes.casefold() in AGREE_EN.values():  # вопрос английского прогона
+        en = yes.casefold()
     shown = en if i18n.current() == "en" else yes
     return i18n.t(CONFIRM_REFUSAL).format(yes=shown)
 
@@ -286,9 +291,9 @@ def record(run_dir: Path, qid: str, text: str) -> None:
     """Записать ответ на ожидающий вопрос `qid` или отказать `PendingError`."""
     current = load(run_dir)
     if current is None:
-        raise PendingError(NO_PENDING)
+        raise PendingError(i18n.t(NO_PENDING))
     if current.get("id") != qid:
-        raise PendingError(STALE)
+        raise PendingError(i18n.t(STALE))
     reason = check(str(current.get("kind", "")), text, current)
     if reason is not None:
         raise PendingError(reason)

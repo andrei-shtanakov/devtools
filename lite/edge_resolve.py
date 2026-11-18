@@ -118,11 +118,11 @@ class PaidCalls:
 
     def line(self) -> str:
         """Строка для человека."""
-        head = f"авторинг {self.author}, " if self.author else ""
-        return (
-            f"платных вызовов: {head}сортировка {self.triage}, переписывание "
-            f"{self.revise}, проверка {self.check}"
-        )
+        head = i18n.t("авторинг {n}, ").format(n=self.author) if self.author else ""
+        return i18n.t(
+            "платных вызовов: {head}сортировка {triage}, переписывание "
+            "{revise}, проверка {check}"
+        ).format(head=head, triage=self.triage, revise=self.revise, check=self.check)
 
 
 @dataclass(frozen=True)
