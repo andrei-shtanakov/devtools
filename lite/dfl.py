@@ -47,6 +47,7 @@ from lite import edge_resolve as er
 from lite import failure_log as fl
 from lite import i18n, pending, runlog
 from lite import interview_chat as ic
+from lite import interview_remote as ir
 from lite import interview_view as iview
 from lite import manual_ask as ma
 from lite import owner_review as orv
@@ -55,7 +56,7 @@ from lite import stop_findings as sf
 from lite import structure as st
 from lite.i18n import t
 from lite.init_repo import DEVTOOLS, InitError, init_repo, real_gh
-from lite.interview_state import InterviewStateError, load_session
+from lite.interview_state import InterviewStateError, SessionView, load_session
 from lite.output import (
     refusal,
     say,
@@ -762,6 +763,8 @@ def run(
         )
         if remote:
             code = _resolve_rounds(target, subject, role, code, remote=True)
+    if not chatting:
+        code = _remote_interview(target, subject, role, code)
     if not _is_tty() and _owner_review_run(target.repo, subject) is not None:
         return _owner_review_rounds(target, subject, role, code, remote=True)
     if chatting and _waiting_run(target.repo, subject) is not None:
@@ -1630,7 +1633,10 @@ def _stopped_incomplete(state: rs.RunState) -> bool:
 
 
 def _converse(state: rs.RunState) -> ic.ChatResult:
-    """Интервью разговором; сбой агента или состояния сессии — отказ `dfl`."""
+    """Интервью разговором; сбой агента или состояния сессии — отказ `dfl`.
+    Терминал побеждает: вопрос, ответы и отметки прохода без терминала
+    снимаются (`_drop_remote`)."""
+    _drop_remote(state)
     try:
         return _chat(state)
     except (ic.ChatError, InterviewStateError) as exc:
@@ -1650,6 +1656,102 @@ def _chat(state: rs.RunState) -> ic.ChatResult:
         load=load_session,
         upstream=lambda: _upstream_text(state),
     )
+
+
+def _remote_interview(
+    target: user_targets.UserTarget, subject: str | None, role: str, code: int
+) -> int:
+    """Интервью без терминала (#766 срез 3): после шага — вопрос в pending.
+
+    Записанные ответы (`dfl reply`) применяются по одному, пока есть ответ на
+    текущий вопрос; ответа нет — вопрос ставится в `pending.json` (вопрос
+    discovery молча: его уже показал шаг; добор и починка — строкой «ждёт
+    ответа», код 0). Вопросов нет, а ответ применён (прогон ждёт ответа) или
+    проход по неполному стопу исчерпан — отметки стираются, шаг ещё раз (один:
+    снова неполный — прежний вывод стопа). Прогона, ждущего интервью, нет или
+    сессия не читается — `code` без изменений."""
+    state = _waiting_run(target.repo, subject, incomplete=True)
+    if state is None:
+        return code
+    try:
+        with run_lock.run_lock(state.run_id):
+            posted, applied = _remote_pass(state)
+    except run_lock.LockBusy as exc:
+        raise DflError(_lock_busy(exc)) from exc
+    if posted is not None:
+        if posted.kind != pending.INTERVIEW_QUESTION or applied:
+            say(pending.wait_line(posted))
+            return 0
+        return code
+    stopped = _stopped_incomplete(state)
+    if not stopped and not (applied and state.status == WAITING):
+        return code
+    ir.clear_marks(rs.run_dir(state.run_id))
+    return _step(target, subject, role, chatting=False)
+
+
+def _remote_pass(state: rs.RunState) -> tuple[pending.Question | None, bool]:
+    """Под замком прогона: применить записанные ответы и поставить следующий
+    вопрос. Итог — поставленный вопрос (`None` — вопросов нет или сессия не
+    читается) и был ли применён хоть один ответ."""
+    rd = rs.run_dir(state.run_id)
+    session_id = str((state.interview or {}).get("session_id"))
+    applied = False
+    while True:
+        try:
+            reply = _discovery_status(session_id, rd)
+            view = load_session(session_id)
+        except (InterviewStateError, OSError, df_config.ConfigError):
+            return None, applied  # как `_say_question`: шаг уже сказал своё
+        found = ir.next_question(
+            reply,
+            view,
+            ir.load_marks(rd),
+            incomplete=_stopped_incomplete(state),
+            upstream=_upstream_text(state),
+        )
+        if found is None:
+            return None, applied
+        q, data = found
+        text = pending.take(rd, q)
+        if text is None:
+            pending.post(rd, q, data)
+            return q, applied
+        _apply_remote(state, q, text, view)
+        applied = True
+
+
+def _apply_remote(
+    state: rs.RunState, q: pending.Question, text: str, view: SessionView
+) -> None:
+    """Применить ответ `dfl reply` на вопрос `q`; пункт добора или починки —
+    отметка прохода. Отказ discovery или ответ не того вида — `DflError`."""
+    try:
+        reason = ir.apply_reply(
+            pending.as_dict(q),
+            text,
+            view,
+            send=_sender(state),
+            resend=_sender(state, supersede=True),
+        )
+    except ValueError as exc:
+        raise DflError(str(exc)) from exc
+    if reason is not None:
+        raise DflError(f"discovery не принял ответ ({reason}) — dfl pending")
+    if q.kind != pending.INTERVIEW_QUESTION:
+        how = "skipped" if ic.is_skip(text) else "done"
+        ir.mark(rs.run_dir(state.run_id), q.key, how)
+
+
+def _drop_remote(state: rs.RunState) -> None:
+    """Терминал победил: снять вопрос, ответы и отметки прохода без терминала."""
+    rd = rs.run_dir(state.run_id)
+    try:
+        with run_lock.run_lock(state.run_id):
+            pending.discard(rd)
+            ir.clear_marks(rd)
+    except run_lock.LockBusy as exc:
+        raise DflError(_lock_busy(exc)) from exc
 
 
 def _upstream_text(state: rs.RunState) -> str:
@@ -2436,6 +2538,7 @@ def answer(
             f"discovery не принял ответ ({reason}) — исправьте {path} "
             "и повторите dfl answer"
         )
+    _drop_remote(state)
     return run(cwd, cust.subject, role, chat=False)
 
 
