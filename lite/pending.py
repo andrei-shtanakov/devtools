@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +19,8 @@ from governance import manual_checks as mc
 
 REVIEW = "review"
 MANUAL = "manual"
+REMARKS_CONFIRM = "remarks-confirm"
+EDGE = "edge"
 PENDING_FILE = "pending.json"
 REPLIES_FILE = "replies.json"
 
@@ -35,6 +37,12 @@ VERDICT_WORDS = {
 #: слова «этап готов, дальше» для паузы ревью
 REVIEW_DONE_WORDS = frozenset({"дальше", "да", "ок", "1"})
 
+#: префиксы свободного ответа по узлу (как в `edge_resolve`)
+EDGE_OWN_PREFIX = "своё:"
+EDGE_DISAGREE_PREFIX = "не согласен:"
+#: слова «оставить как было» для подтверждения замечаний
+CONFIRM_KEEP_WORDS = frozenset({"2", "нет", "оставить", "оставить как было"})
+
 NO_PENDING = "нет вопроса, ждущего ответа — dfl pending"
 STALE = "вопрос уже другой — dfl pending"
 ANSWERED = "ответ записан — продолжить: dfl run"
@@ -43,6 +51,8 @@ REVIEW_REFUSAL = (
     "без замечаний — «дальше»"
 )
 MANUAL_REFUSAL = "ответ: 1/выполнено, 2/не выполнено[: заметка], 3/с оговоркой: <текст>"
+CONFIRM_REFUSAL = "ответ: 1/{yes} или 2/оставить"
+EDGE_REFUSAL = "ответ: номер варианта 1–{n}, «своё: …» или «не согласен: <почему>»"
 
 
 class PendingError(Exception):
@@ -200,11 +210,63 @@ def _check_manual(text: str) -> str | None:
     return None
 
 
-def check(kind: str, text: str) -> str | None:
-    """Причина отказа принять ответ или `None`."""
+def is_done(text: str) -> bool:
+    """Ответ — слово «этап готов, дальше»."""
+    return text.strip().casefold() in REVIEW_DONE_WORDS
+
+
+def _check_review(text: str, rec: Mapping | None) -> str | None:
+    if is_done(text):
+        return None
+    if not text.strip():
+        return REVIEW_REFUSAL
+    if rec is not None and rec.get("key") == "brief":
+        return REVIEW_REFUSAL
+    return None
+
+
+def _options(rec: Mapping | None) -> list[str]:
+    return [str(o) for o in (rec or {}).get("options") or ()]
+
+
+def _check_confirm(text: str, rec: Mapping | None) -> str | None:
+    options = _options(rec)
+    yes = options[0] if options else "да"
+    word = text.strip().casefold()
+    accepted = {"1", "да", yes.casefold()} | CONFIRM_KEEP_WORDS
+    if word in accepted:
+        return None
+    return CONFIRM_REFUSAL.format(yes=yes)
+
+
+def _fold(text: str) -> str:
+    return text.casefold().replace("ё", "е")
+
+
+def _check_edge(text: str, rec: Mapping | None) -> str | None:
+    n = len(_options(rec))
+    body = text.strip()
+    if body.isdigit() and 1 <= int(body) <= n:
+        return None
+    for prefix in (EDGE_OWN_PREFIX, EDGE_DISAGREE_PREFIX):
+        folded = _fold(body)
+        if folded.startswith(_fold(prefix)) and body[len(prefix) :].strip():
+            return None
+    return EDGE_REFUSAL.format(n=n)
+
+
+def check(kind: str, text: str, rec: Mapping | None = None) -> str | None:
+    """Причина отказа принять ответ или `None`.
+
+    `rec` — записанный вопрос (`load()`): по нему проверяются варианты и
+    этап `brief` (замечания к нему через reply не принимаются).
+    """
     if kind == REVIEW:
-        done = text.strip().casefold() in REVIEW_DONE_WORDS
-        return None if done else REVIEW_REFUSAL
+        return _check_review(text, rec)
+    if kind == REMARKS_CONFIRM:
+        return _check_confirm(text, rec)
+    if kind == EDGE:
+        return _check_edge(text, rec)
     if kind == MANUAL:
         return _check_manual(text)
     return f"неизвестный вид вопроса: {kind}"
@@ -217,7 +279,7 @@ def record(run_dir: Path, qid: str, text: str) -> None:
         raise PendingError(NO_PENDING)
     if current.get("id") != qid:
         raise PendingError(STALE)
-    reason = check(str(current.get("kind", "")), text)
+    reason = check(str(current.get("kind", "")), text, current)
     if reason is not None:
         raise PendingError(reason)
     replies = _read_json(run_dir / REPLIES_FILE) or {}
