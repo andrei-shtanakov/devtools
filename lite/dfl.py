@@ -1634,11 +1634,17 @@ def _stopped_incomplete(state: rs.RunState) -> bool:
 
 def _converse(state: rs.RunState) -> ic.ChatResult:
     """Интервью разговором; сбой агента или состояния сессии — отказ `dfl`.
-    Терминал побеждает: вопрос, ответы и отметки прохода без терминала
-    снимаются (`_drop_remote`)."""
-    _drop_remote(state)
+
+    Терминал побеждает (спека §5.1): разговор идёт под замком прогона —
+    `dfl run` без терминала в это время получает отказ «прогон занят»; вопрос,
+    ответы и отметки прохода без терминала снимаются. Внутри `_chat` замок
+    прогона никто не берёт (discovery и агент — внешние процессы)."""
     try:
-        return _chat(state)
+        with run_lock.run_lock(state.run_id):
+            _drop_remote_files(rs.run_dir(state.run_id))
+            return _chat(state)
+    except run_lock.LockBusy as exc:
+        raise DflError(_lock_busy(exc)) from exc
     except (ic.ChatError, InterviewStateError) as exc:
         raise DflError(str(exc)) from exc
 
@@ -1668,16 +1674,16 @@ def _remote_interview(
     discovery молча: его уже показал шаг; добор и починка — строкой «ждёт
     ответа», код 0). Вопросов нет, а ответ применён (прогон ждёт ответа) или
     проход по неполному стопу исчерпан — отметки стираются, шаг ещё раз (один:
-    снова неполный — прежний вывод стопа). Прогона, ждущего интервью, нет или
-    сессия не читается — `code` без изменений."""
+    снова неполный — прежний вывод стопа); шаг оставил прогон ждать ответа —
+    его вопрос ставится молча. Прогона, ждущего интервью, нет или сессия не
+    читается — `code` без изменений (отметки целы, лишнего шага нет)."""
     state = _waiting_run(target.repo, subject, incomplete=True)
     if state is None:
         return code
     try:
-        with run_lock.run_lock(state.run_id):
-            posted, applied = _remote_pass(state)
-    except run_lock.LockBusy as exc:
-        raise DflError(_lock_busy(exc)) from exc
+        posted, applied = _locked_pass(state)
+    except _SessionUnreadable:
+        return code  # как `_say_question`: шаг уже сказал своё
     if posted is not None:
         if posted.kind != pending.INTERVIEW_QUESTION or applied:
             say(pending.wait_line(posted))
@@ -1687,13 +1693,34 @@ def _remote_interview(
     if not stopped and not (applied and state.status == WAITING):
         return code
     ir.clear_marks(rs.run_dir(state.run_id))
-    return _step(target, subject, role, chatting=False)
+    code = _step(target, subject, role, chatting=False)
+    waiting = _waiting_run(target.repo, subject)
+    if waiting is not None:
+        try:
+            _locked_pass(waiting)  # ответов нет (сняты выше): только постановка
+        except _SessionUnreadable:
+            pass
+    return code
+
+
+class _SessionUnreadable(Exception):
+    """Статус или сессия discovery не прочитались — не «вопросов нет»."""
+
+
+def _locked_pass(state: rs.RunState) -> tuple[pending.Question | None, bool]:
+    """`_remote_pass` под замком прогона; занят (разговор в терминале) —
+    отказ «прогон занят»."""
+    try:
+        with run_lock.run_lock(state.run_id):
+            return _remote_pass(state)
+    except run_lock.LockBusy as exc:
+        raise DflError(_lock_busy(exc)) from exc
 
 
 def _remote_pass(state: rs.RunState) -> tuple[pending.Question | None, bool]:
-    """Под замком прогона: применить записанные ответы и поставить следующий
-    вопрос. Итог — поставленный вопрос (`None` — вопросов нет или сессия не
-    читается) и был ли применён хоть один ответ."""
+    """Применить записанные ответы и поставить следующий вопрос (замок держит
+    вызывающий). Итог — поставленный вопрос (`None` — вопросов нет) и был ли
+    применён хоть один ответ; сессия не читается — `_SessionUnreadable`."""
     rd = rs.run_dir(state.run_id)
     session_id = str((state.interview or {}).get("session_id"))
     applied = False
@@ -1701,8 +1728,8 @@ def _remote_pass(state: rs.RunState) -> tuple[pending.Question | None, bool]:
         try:
             reply = _discovery_status(session_id, rd)
             view = load_session(session_id)
-        except (InterviewStateError, OSError, df_config.ConfigError):
-            return None, applied  # как `_say_question`: шаг уже сказал своё
+        except (InterviewStateError, OSError, df_config.ConfigError) as exc:
+            raise _SessionUnreadable(str(exc)) from exc
         found = ir.next_question(
             reply,
             view,
@@ -1717,15 +1744,17 @@ def _remote_pass(state: rs.RunState) -> tuple[pending.Question | None, bool]:
         if text is None:
             pending.post(rd, q, data)
             return q, applied
-        _apply_remote(state, q, text, view)
+        _apply_remote(state, q, data, text, view)
         applied = True
 
 
 def _apply_remote(
-    state: rs.RunState, q: pending.Question, text: str, view: SessionView
+    state: rs.RunState, q: pending.Question, data: dict, text: str, view: SessionView
 ) -> None:
     """Применить ответ `dfl reply` на вопрос `q`; пункт добора или починки —
-    отметка прохода. Отказ discovery или ответ не того вида — `DflError`."""
+    отметка прохода. Отказ discovery или ответ не того вида — вопрос снова в
+    `pending.json` (с данными `data`) и `DflError`."""
+    rd = rs.run_dir(state.run_id)
     try:
         reason = ir.apply_reply(
             pending.as_dict(q),
@@ -1735,23 +1764,30 @@ def _apply_remote(
             resend=_sender(state, supersede=True),
         )
     except ValueError as exc:
+        pending.post(rd, q, data)
         raise DflError(str(exc)) from exc
     if reason is not None:
+        pending.post(rd, q, data)
         raise DflError(f"discovery не принял ответ ({reason}) — dfl pending")
     if q.kind != pending.INTERVIEW_QUESTION:
         how = "skipped" if ic.is_skip(text) else "done"
-        ir.mark(rs.run_dir(state.run_id), q.key, how)
+        ir.mark(rd, q.key, how)
 
 
 def _drop_remote(state: rs.RunState) -> None:
-    """Терминал победил: снять вопрос, ответы и отметки прохода без терминала."""
-    rd = rs.run_dir(state.run_id)
+    """Терминал победил: под замком снять устаревшие вопрос, ответы и отметки
+    прохода без терминала (следующий `dfl run` поставит вопрос заново)."""
     try:
         with run_lock.run_lock(state.run_id):
-            pending.discard(rd)
-            ir.clear_marks(rd)
+            _drop_remote_files(rs.run_dir(state.run_id))
     except run_lock.LockBusy as exc:
         raise DflError(_lock_busy(exc)) from exc
+
+
+def _drop_remote_files(rd: Path) -> None:
+    """Снять вопрос, ответы и отметки прохода (замок держит вызывающий)."""
+    pending.discard(rd)
+    ir.clear_marks(rd)
 
 
 def _upstream_text(state: rs.RunState) -> str:

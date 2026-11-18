@@ -14,11 +14,11 @@ from typing import Any
 import pytest
 
 from governance import interview as iv
+from governance import run_lock, spec_loop
 from governance import run_state as rs
-from governance import spec_loop
 from lite import dfl, pending
 from lite import interview_remote as ir
-from lite.interview_state import Entry, SessionView
+from lite.interview_state import Entry, InterviewStateError, SessionView
 from tests.test_lite_dfl import (  # noqa: F401
     Chat,
     Discovery,
@@ -165,27 +165,51 @@ def test_pass_exhausted_steps_once_and_new_pass_asks_again(
     assert len(env.spec_calls) == calls + 3
 
 
+def _next_question(qid: str, text: str) -> iv.DiscoveryReply:
+    action = {"session_id": "s", "question_id": qid, "question_text": text}
+    return iv.DiscoveryReply(20, {"next_action": action}, "")
+
+
 def test_question_skip_applied_then_step_once(
     env: Env,  # noqa: F811
     fakes: Discovery,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Пропуск вопроса discovery: голый текст ответом; вопросов больше нет —
-    шаг один раз (как `dfl answer`)."""
+    шаг один раз (как `dfl answer`); шаг оставил прогон ждать ответа — его
+    вопрос в `pending.json`, молча."""
     _waiting(RUN, "WS-1", "customer")
-    monkeypatch.setattr(
-        dfl,
-        "_discovery_status",
-        lambda s, c: _status(0) if fakes.calls else _question_reply(),
-    )
+    stepped_after_send: list[bool] = []
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(argv)
+        if fakes.calls:
+            stepped_after_send.append(True)
+        return 0
+
+    def status(session_id: str, cwd: Path) -> iv.DiscoveryReply:
+        if not fakes.calls:
+            return _question_reply()
+        if stepped_after_send:
+            return _next_question("q-2", "Что болит?")
+        return _status(0)
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    monkeypatch.setattr(dfl, "_discovery_status", status)
     assert env.run("run") == 0
     rec = _pending()
     assert rec is not None
     assert env.run("reply", "--id", rec["id"], "--text", "пропустить") == 0
     calls = len(env.spec_calls)
+    capsys.readouterr()
     assert env.run("run") == 0
     assert fakes.flags == [("q-1", False)]
-    assert len(env.spec_calls) == calls + 2 and _pending() is None
+    assert len(env.spec_calls) == calls + 2
+    nxt = _pending()
+    assert nxt is not None and nxt["kind"] == pending.INTERVIEW_QUESTION
+    assert nxt["key"] == "q-2" and "Что болит?" in nxt["text"]
+    assert "ждёт ответа" not in capsys.readouterr().out
 
 
 def test_discovery_refusal_is_dfl_error(
@@ -203,6 +227,82 @@ def test_discovery_refusal_is_dfl_error(
     fakes.code = 2
     assert env.run("run") == 2
     assert "payload missing text" in capsys.readouterr().err
+    again = _pending()  # вопрос снова виден `dfl pending`
+    assert again is not None and again["id"] == rec["id"] and again["data"]
+
+
+def test_content_reply_for_topup_is_dfl_error(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ответ по существу мимо `dfl reply` (тот бы отказал) — `DflError`."""
+    _incomplete(monkeypatch)
+    assert env.run("run") == 0
+    rec = _pending()
+    assert rec is not None
+    replies = {rec["id"]: "задачи такие"}
+    (_rd() / pending.REPLIES_FILE).write_text(json.dumps(replies), encoding="utf-8")
+    capsys.readouterr()
+    assert env.run("run") == 2
+    assert "через dfl answer --items" in capsys.readouterr().err
+    assert (_pending() or {}).get("id") == rec["id"]
+
+
+def test_unreadable_session_keeps_marks_no_extra_step(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Сессия не читается — не «проход исчерпан»: отметки целы, шаг один."""
+    _incomplete(monkeypatch)
+    ir.mark(_rd(), "topic:jobs", "skipped")
+
+    def broken(session_id: str) -> SessionView:
+        raise InterviewStateError("discovery show: boom")
+
+    monkeypatch.setattr(dfl, "load_session", broken)
+    assert env.run("run") == 0
+    assert len(env.spec_calls) == 1
+    assert ir.load_marks(_rd())["skipped"] == ["topic:jobs"]
+    assert _pending() is None
+
+
+def test_remote_refused_while_terminal_chats(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Замок прогона у терминала — `dfl run` без терминала: «прогон занят»."""
+    _incomplete(monkeypatch)
+    with run_lock.run_lock(RUN):
+        assert env.run("run") == 2
+    assert "исполняется другим процессом" in capsys.readouterr().err
+    assert _pending() is None
+
+
+def test_terminal_chat_holds_run_lock(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _incomplete(monkeypatch)
+    _tty(monkeypatch)
+    busy: list[bool] = []
+
+    def chat(state: rs.RunState) -> object:
+        try:
+            with run_lock.run_lock(state.run_id):
+                busy.append(False)
+        except run_lock.LockBusy:
+            busy.append(True)
+        return dfl.ic.ChatResult.FINISHED
+
+    monkeypatch.setattr(dfl, "_chat", chat)
+    assert env.run("run") == 0
+    assert busy == [True]
 
 
 def test_terminal_chat_discards_pending(
@@ -271,4 +371,4 @@ def test_no_agent_called(
         assert env.run("reply", "--id", rec["id"], "--text", "пропустить") == 0
     assert env.run("run") == 0
     assert fakes.calls == []
-    assert json.loads(json.dumps(ir.load_marks(_rd()))) == {"skipped": [], "done": []}
+    assert ir.load_marks(_rd()) == {"skipped": [], "done": []}
