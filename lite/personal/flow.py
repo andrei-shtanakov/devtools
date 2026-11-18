@@ -632,8 +632,9 @@ def _ask_pause(ctx: _Ctx, stage: str, label: str, paths: list[Path]) -> str | No
     (терминал побеждает: после живого ответа вопрос снят)."""
     rd = run_dir(ctx.run.run_id)
     q = rp.question(stage, label, paths)
-    if pending.take(rd, q) is not None:
-        return ""
+    recorded = pending.take(rd, q)
+    if recorded is not None:
+        return rp.reply_text(recorded)
     answer = rp.ask(label, paths, read=ctx.read)
     if answer is not None:
         pending.discard(rd)

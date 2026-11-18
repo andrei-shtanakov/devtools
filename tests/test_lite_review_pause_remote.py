@@ -280,3 +280,38 @@ def test_enterprise_live_answer_drops_recorded_reply(
     assert env.run("run", "--subject", "t") == 0
     replies = rd / pending.REPLIES_FILE
     assert not replies.exists() or qid not in json.loads(replies.read_text("utf-8"))
+
+
+def test_personal_terminal_recorded_remark_is_revised(tmp_path) -> None:
+    """Ревью #808: замечание, записанное `dfl reply`, в терминале не теряется
+    и не становится «дальше» — его правит автор."""
+    run = _run(tmp_path, ("design",))
+    assert _advance(run, FakeOps(run), read=_no_read, tty=False) == 0
+    _reply(run, "добавь логи")
+    author = _author(DESIGN + "\nЛоги пишутся в stderr.\n")
+    _advance(run, FakeOps(run), read=lambda prompt: None, launch=author, tty=True)
+    assert run.step == "design"  # после правки — пауза снова
+    assert len(author.prompts) == 1  # type: ignore[attr-defined]
+    rd = state.run_dir(run.run_id)
+    assert [(r.text, r.applied) for r in rp.all_remarks(rd)] == [("добавь логи", True)]
+
+
+def test_enterprise_terminal_recorded_remark_is_revised(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ревью #808: enterprise-путь — записанное замечание идёт в правку."""
+    _bind_streams(monkeypatch)
+    _tty(monkeypatch, False)
+    _steps(env, monkeypatch)
+    calls = _enterprise_author(monkeypatch, DESIGN + "\nуточнено\n")
+    assert env.run("run", "--subject", "t") == 0
+    rd = rs.run_dir(RUN_ID)
+    rec = pending.load(rd)
+    assert rec is not None
+    pending.record(rd, str(rec["id"]), "уточнить D-01")
+    _tty(monkeypatch)
+    monkeypatch.setattr(ic, "stdin_read", lambda prompt: "дальше")
+    env.run("run", "--subject", "t")
+    assert len(calls) == 1
+    assert [r.text for r in rp.all_remarks(rd)] == ["уточнить D-01"]

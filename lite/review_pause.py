@@ -105,6 +105,12 @@ def ask_remote(
     answer = ask(question(stage, stage_label, paths))
     if answer is None:
         return None
+    return reply_text(answer)
+
+
+def reply_text(answer: str) -> str:
+    """Ответ `dfl reply` на паузу: `""` — «дальше», иначе текст замечаний.
+    Одно правило для пути без терминала и для записанного ответа в терминале."""
     return "" if pending_mod.is_done(answer) else answer.strip()
 
 

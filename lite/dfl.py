@@ -1233,8 +1233,9 @@ def _owner_answer(
         return ""
     rd = rs.run_dir(state.run_id)
     q = rp.question(stage, label, [path])
-    if pending.take(rd, q) is not None:
-        return ""
+    recorded = pending.take(rd, q)
+    if recorded is not None:
+        return rp.reply_text(recorded)
     answer = rp.ask(label, [path], read=ic.stdin_read)
     if answer is None:
         say(OWNER_REVIEW_PAUSED.format(label=label))
