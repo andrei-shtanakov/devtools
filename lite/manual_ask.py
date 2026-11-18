@@ -49,7 +49,7 @@ def is_wait(reason: str) -> bool:
     return reason in _PAUSED_FORMS or reason.startswith(_WAIT_HEADS)
 
 
-def ask_one(check: mc.ManualCheck, read: Read, lang: str = "ru") -> dict | None:
+def ask_one(check: mc.ManualCheck, read: Read, *, lang: str = "ru") -> dict | None:
     """Ответ на одну проверку: `{"verdict", "note"}`; `None` — стоп/EOF.
     Вопрос — на языке `lang` прогона."""
     while True:
@@ -75,7 +75,9 @@ def ask_one(check: mc.ManualCheck, read: Read, lang: str = "ru") -> dict | None:
                 return {"verdict": verdict, "note": note}
 
 
-def question_of(check: mc.ManualCheck, hint: str, lang: str = "ru") -> pending.Question:
+def question_of(
+    check: mc.ManualCheck, hint: str, *, lang: str = "ru"
+) -> pending.Question:
     """Вопрос для `dfl pending`; подсказка, на каком коде проверять (#806), —
     в `links`: id вопроса считается от `text`, и подсказка (она зависит от
     состояния PR) не должна его менять — записанный `dfl reply` пропал бы."""
@@ -151,20 +153,21 @@ def _answer(
     tty: bool,
     run_dir: Path | None,
     hint: str,
+    *,
     lang: str = "ru",
 ) -> dict | str | None:
     """Ответ на проверку: записанный `dfl reply`, из терминала или без него.
 
     Строка — стоп «ждёт ответа»; `None` — человек остановил ввод.
     """
-    q = question_of(check, hint, lang)
+    q = question_of(check, hint, lang=lang)
     if run_dir is None:
-        return ask_one(check, read, lang) if tty else None
+        return ask_one(check, read, lang=lang) if tty else None
     if tty:
         recorded = _parsed(pending.take(run_dir, q))
         if recorded:
             return recorded
-        live = ask_one(check, read, lang)
+        live = ask_one(check, read, lang=lang)
         if live is not None:
             pending.discard(run_dir)  # терминал побеждает: вопрос снят
         return live
@@ -233,7 +236,7 @@ def settle(
         if warning := stale_warning(facts, pr, workdir):
             notice(warning)
     for check in todo:
-        answer = _answer(check, read, tty, run_dir, hint, lang)
+        answer = _answer(check, read, tty, run_dir, hint, lang=lang)
         if isinstance(answer, str):
             return answer
         if answer is None:

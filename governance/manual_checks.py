@@ -95,11 +95,6 @@ def verdict_words(lang: str = "ru") -> dict[str, str]:
     return _TEXTS[lang]["verdicts"]
 
 
-def options(lang: str = "ru") -> str:
-    """Строка вариантов ответа на языке `lang`."""
-    return _TEXTS[lang]["options"]
-
-
 #: снятый сценарий — `status: waived` в строке checked_by (как criteria_graph)
 _WAIVED = re.compile(r"\*\*checked_by\*\*.*`status:\s*waived`")
 

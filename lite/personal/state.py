@@ -13,6 +13,7 @@ from pathlib import Path
 
 from governance import run_state as rs
 from governance import spec_loop
+from lite import i18n
 from lite.output import say
 
 #: Корень личных прогонов; `None` — `personal-runs` рядом с `rs.RUNS_ROOT`,
@@ -67,9 +68,12 @@ class PersonalRun:
     manual_checks: bool = False
     manual: dict = field(default_factory=dict)
     #: язык прогона (#769): задаётся при создании, дальше не меняется;
-    #: старые run.json — `ru`. Недопустимое значение `load` не правит —
-    #: нормализует вызывающий через `i18n.stored_language`.
+    #: старые run.json — `ru`. Недопустимое значение `load` заменяет на
+    #: `ru` (`i18n.stored_language`): дальше читают только `ru`/`en`.
     language: str = "ru"
+    #: недопустимый язык из run.json как был (для предупреждения `dfl`);
+    #: `None` — значение было допустимым. Не сохраняется.
+    invalid_language: object = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         self.review_pause = tuple(self.review_pause)
@@ -132,7 +136,9 @@ def save(run: PersonalRun) -> None:
     """Атомарная запись `run.json`: temp в том же каталоге + `os.replace`."""
     target = run_dir(run.run_id)
     target.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(asdict(run), ensure_ascii=False, indent=2, sort_keys=True)
+    data = asdict(run)
+    del data["invalid_language"]  # не состояние прогона: только для предупреждения
+    payload = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
     fd, tmp_name = tempfile.mkstemp(dir=target, prefix=".run.json.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -144,10 +150,15 @@ def save(run: PersonalRun) -> None:
 
 
 def load(run_id: str) -> PersonalRun:
-    """Читает `run.json`; незнакомые ключи игнорируются."""
+    """Читает `run.json`; незнакомые ключи игнорируются. Недопустимый язык —
+    `ru`, исходное значение — в `invalid_language` (#769)."""
     raw = json.loads((run_dir(run_id) / "run.json").read_text(encoding="utf-8"))
-    known = {f.name for f in fields(PersonalRun)}
-    return PersonalRun(**{k: v for k, v in raw.items() if k in known})
+    known = {f.name for f in fields(PersonalRun)} - {"invalid_language"}
+    run = PersonalRun(**{k: v for k, v in raw.items() if k in known})
+    run.language, invalid = i18n.stored_language(raw.get("language"))
+    if invalid:
+        run.invalid_language = raw.get("language")
+    return run
 
 
 def active_for(repo_slug: str, subject: str | None = None) -> PersonalRun | None:

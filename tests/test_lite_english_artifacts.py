@@ -10,6 +10,7 @@ issue и комментарий ручных проверок, хвост ито
 from __future__ import annotations
 
 import dataclasses
+import json
 from datetime import date
 from pathlib import Path
 
@@ -366,3 +367,64 @@ def test_status_verbose_en_verdict_words(
     out = capsys.readouterr().out
     assert "manual checks — with caveat: 1" in out
     assert "  BEH-02 (TASK-002): passed with caveat — slow" in out
+
+
+# --- недопустимый язык в run.json (ревью Task 5, Important 1) -------------------
+
+
+def _run_with_raw_language(tmp_path: Path, raw: object) -> state.PersonalRun:
+    run = _run(tmp_path, language="ru")
+    path = state.run_dir(run.run_id) / "run.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["language"] = raw
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return state.load(run.run_id)
+
+
+def test_invalid_stored_language_loads_as_ru(tmp_path: Path) -> None:
+    """`load` отдаёт только `ru`/`en`; исходное значение — для предупреждения,
+    в run.json при следующей записи — `ru`."""
+    run = _run_with_raw_language(tmp_path, "fr")
+    assert run.language == "ru" and run.invalid_language == "fr"
+    state.save(run)
+    saved = json.loads(
+        (state.run_dir(run.run_id) / "run.json").read_text(encoding="utf-8")
+    )
+    assert saved["language"] == "ru" and "invalid_language" not in saved
+    again = state.load(run.run_id)
+    assert again.language == "ru" and again.invalid_language is None
+
+
+def test_invalid_stored_language_spec_pr_in_russian(tmp_path: Path) -> None:
+    """Прогон с `language: "fr"` проходит spec-PR (tasks.md + тело PR) по-русски,
+    без KeyError."""
+    run = _run_with_raw_language(tmp_path, "fr")
+    bundle = Path(run.target_dir) / run.bundle_dir
+    bundle.mkdir(parents=True)
+    for name in ("20-design.md", "30-decomposition.md"):
+        (bundle / name).write_text(
+            (FIXTURES / name).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    run.step = "spec-pr"
+    ops = FakeOps(run)
+    bodies: list[str] = []
+    original_pr = ops.create_pr
+
+    def create_pr(target_dir, repo_slug, branch, title, body, label, **kw):
+        bodies.append(body)
+        return original_pr(target_dir, repo_slug, branch, title, body, label, **kw)
+
+    ops.create_pr = create_pr  # type: ignore[method-assign]
+    flow.advance(
+        run,
+        ops,
+        read=lambda _p: None,
+        agent=lambda p: "",
+        launch=launch,
+        check=checker("PASS"),
+    )
+    assert run.spec_pr == SPEC_PR
+    [body] = bodies
+    assert body.startswith("Личный путь `dfl`: бриф, дизайн, декомпозиция")
+    tasks_md = Path(run.target_dir) / tasks.TASKS_PATH.format(ws_id=run.ws_id)
+    assert "Личный путь: бриф одобрен владельцем" in tasks_md.read_text("utf-8")

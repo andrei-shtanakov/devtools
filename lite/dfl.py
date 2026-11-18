@@ -526,7 +526,8 @@ def _call_language(args: argparse.Namespace, cwd: Path) -> str:
     stored: str | None = None
     invalid = False
     if run is not None:
-        stored, invalid = i18n.stored_language(run.language)
+        # `load` уже заменил недопустимый язык на `ru` и сохранил исходный
+        stored, invalid = run.language, run.invalid_language is not None
     try:
         lang = i18n.resolve(flag, env, stored)
     except i18n.LanguageError as exc:
@@ -535,7 +536,7 @@ def _call_language(args: argparse.Namespace, cwd: Path) -> str:
     requested = flag or raw_env
     with i18n.language(lang):
         if run is not None and invalid:
-            message = LANG_INVALID.format(run_id=run.run_id, raw=run.language)
+            message = LANG_INVALID.format(run_id=run.run_id, raw=run.invalid_language)
             say(message, err=True)
         elif run is not None and requested and requested != lang:
             message = t(LANG_MISMATCH).format(
