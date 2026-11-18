@@ -24,9 +24,15 @@ CAVEAT_PROMPT = "текст оговорки:"
 WAIT_PREFIX = "ждёт ответа: "
 #: код PR живёт в ветке прогона, рабочий каталог dfl не трогает (#806)
 CHECKOUT_HINT = "проверяйте код из PR #{pr}: gh pr checkout {pr} (назад: git switch -)"
+#: влитый PR: ветку форджа обычно удаляет, checkout неисполним
+MERGED_HINT = "PR #{pr} влит: проверяйте на обновлённой базе (git pull)"
 STALE_WARNING = (
     "⚠ в рабочем каталоге нет кода PR #{pr} — проверка пройдёт на старом коде; "
     "сначала: gh pr checkout {pr}"
+)
+STALE_MERGED_WARNING = (
+    "⚠ в рабочем каталоге нет кода влитого PR #{pr} — проверка пройдёт на "
+    "старом коде; сначала: git pull"
 )
 
 
@@ -64,12 +70,13 @@ def ask_one(check: mc.ManualCheck, read: Read) -> dict | None:
                 return {"verdict": verdict, "note": note}
 
 
-def question_of(check: mc.ManualCheck, pr: int) -> pending.Question:
-    """Вопрос для `dfl pending`: проверка и перед вариантами ответа —
-    на каком коде проверять (#806); первая строка — сама проверка."""
-    head, options = mc.question(check).rsplit("\n", 1)
-    text = f"{head}\n{CHECKOUT_HINT.format(pr=pr)}\n{options}"
-    return pending.Question(pending.MANUAL, check.beh_id, text)
+def question_of(check: mc.ManualCheck, hint: str) -> pending.Question:
+    """Вопрос для `dfl pending`; подсказка, на каком коде проверять (#806), —
+    в `links`: id вопроса считается от `text`, и подсказка (она зависит от
+    состояния PR) не должна его менять — записанный `dfl reply` пропал бы."""
+    return pending.Question(
+        pending.MANUAL, check.beh_id, mc.question(check), links=(hint,)
+    )
 
 
 def _git_ok(workdir: Path, *args: str) -> bool:
@@ -82,26 +89,48 @@ def _git_ok(workdir: Path, *args: str) -> bool:
     return proc.returncode == 0
 
 
-def _pr_head(ops, repo_slug: str, pr: int) -> str | None:
+def pr_state(ops, repo_slug: str, pr: int) -> dict:
+    """Факты PR для подсказки; сбой форджи — `{}` (подсказка необязательна)."""
     try:
-        head = ops.pr_facts(repo_slug, pr).get("headRefOid")
-    except Exception:  # noqa: BLE001 - предупреждение необязательное
-        return None
-    return head if isinstance(head, str) and head else None
+        facts = ops.pr_facts(repo_slug, pr)
+    except Exception:  # noqa: BLE001 - любой сбой = «не узнать»
+        return {}
+    return facts if isinstance(facts, dict) else {}
 
 
-def stale_warning(ops, repo_slug: str, pr: int, workdir: Path | None) -> str | None:
-    """Предупреждение, если голова PR не входит в историю `HEAD` рабочего
-    каталога (#806); не узнать (не репо, форджа молчит) — `None`.
+def _merged(facts: dict) -> bool:
+    return facts.get("state") == "MERGED"
 
-    Предок, а не равенство: после мержа `HEAD` — merge-коммит, код PR в нём
-    есть. Объекта головы локально нет — кода тоже нет, предупреждение."""
-    if workdir is None or not _git_ok(workdir, "rev-parse", "--verify", "-q", "HEAD"):
+
+def code_hint(pr: int, facts: dict) -> str:
+    """Где проверять: открытый (или неизвестный) PR — его ветка, влитый — база."""
+    return (MERGED_HINT if _merged(facts) else CHECKOUT_HINT).format(pr=pr)
+
+
+def _code_commit(facts: dict) -> str | None:
+    """Коммит, в истории которого есть код PR: голова открытого, коммит
+    мержа влитого — squash/rebase не делают голову PR предком базы."""
+    if _merged(facts):
+        commit = facts.get("mergeCommit")
+        oid = commit.get("oid") if isinstance(commit, dict) else None
+    else:
+        oid = facts.get("headRefOid")
+    return oid if isinstance(oid, str) and oid else None
+
+
+def stale_warning(facts: dict, pr: int, workdir: Path | None) -> str | None:
+    """Предупреждение, если кода PR нет в истории `HEAD` рабочего каталога
+    (#806); не узнать (не репо, форджа молчит) — `None`. Объекта коммита
+    локально нет — кода тоже нет, предупреждение."""
+    commit = _code_commit(facts)
+    if workdir is None or commit is None:
         return None
-    head = _pr_head(ops, repo_slug, pr)
-    if head is None or _git_ok(workdir, "merge-base", "--is-ancestor", head, "HEAD"):
+    if not _git_ok(workdir, "rev-parse", "--verify", "-q", "HEAD"):
         return None
-    return STALE_WARNING.format(pr=pr)
+    if _git_ok(workdir, "merge-base", "--is-ancestor", commit, "HEAD"):
+        return None
+    warning = STALE_MERGED_WARNING if _merged(facts) else STALE_WARNING
+    return warning.format(pr=pr)
 
 
 def _parsed(text: str | None) -> dict | None:
@@ -112,13 +141,13 @@ def _parsed(text: str | None) -> dict | None:
 
 
 def _answer(
-    check: mc.ManualCheck, read: Read, tty: bool, run_dir: Path | None, pr: int
+    check: mc.ManualCheck, read: Read, tty: bool, run_dir: Path | None, hint: str
 ) -> dict | str | None:
     """Ответ на проверку: записанный `dfl reply`, из терминала или без него.
 
     Строка — стоп «ждёт ответа»; `None` — человек остановил ввод.
     """
-    q = question_of(check, pr)
+    q = question_of(check, hint)
     if run_dir is None:
         return ask_one(check, read) if tty else None
     if tty:
@@ -183,12 +212,14 @@ def settle(
     todo = mc.unanswered(record)
     if todo and not tty and run_dir is None:
         return NO_TTY.format(n=len(todo))
+    facts = pr_state(ops, repo_slug, pr) if todo else {}
+    hint = code_hint(pr, facts)
     if todo and tty:
-        notice(CHECKOUT_HINT.format(pr=pr))
-        if warning := stale_warning(ops, repo_slug, pr, workdir):
+        notice(hint)
+        if warning := stale_warning(facts, pr, workdir):
             notice(warning)
     for check in todo:
-        answer = _answer(check, read, tty, run_dir, pr)
+        answer = _answer(check, read, tty, run_dir, hint)
         if isinstance(answer, str):
             return answer
         if answer is None:
