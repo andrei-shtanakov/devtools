@@ -48,7 +48,9 @@ EDGE_DISAGREE_PREFIX = "не согласен:"
 EDGE_OWN_PREFIXES = (EDGE_OWN_PREFIX, "own:")
 EDGE_DISAGREE_PREFIXES = (EDGE_DISAGREE_PREFIX, "disagree:")
 #: слова «оставить как было» для подтверждения замечаний
-CONFIRM_KEEP_WORDS = frozenset({"2", "нет", "оставить", "оставить как было", "keep"})
+CONFIRM_KEEP_WORDS = frozenset(
+    {"2", "нет", "оставить", "оставить как было", "keep", "keep as it was"}
+)
 #: русское слово согласия вида правки → английское (`удалить` → `remove`)
 AGREE_EN = {"удалить": "remove", "снять": "drop", "принять": "accept"}
 

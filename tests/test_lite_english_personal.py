@@ -953,3 +953,25 @@ def test_all_scenarios_no_misses(
         scenario(env, world, capsys)
         i18n.set_language("ru")
     assert i18n.misses() == frozenset()
+
+
+def test_active_run_language_pinned_when_continued_run_missed(
+    env: Env,  # noqa: F811
+    personal: Advance,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Репо не в targets.toml (клон под другим именем): `_continued_run`
+    прогон не находит, язык вызова — `ru`; `_personal` находит английский
+    прогон по slug и исполняет его на языке прогона (ревью #809)."""
+    monkeypatch.delenv("DFL_LANG", raising=False)
+    run = _saved(env, language="en")
+    seen: list[str] = []
+
+    def advance(r: ps.PersonalRun) -> int:
+        seen.append(i18n.current())
+        return 0
+
+    monkeypatch.setattr(dfl, "_advance_personal", advance)
+    assert env.run("run") == 0
+    assert ps.load(run.run_id).language == "en"
+    assert seen == ["en"]

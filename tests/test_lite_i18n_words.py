@@ -64,6 +64,20 @@ def test_confirm_words_both(verb: str, agree: list[str], keep: list[str]) -> Non
     assert pending.check(pending.REMARKS_CONFIRM, "maybe", rec) is not None
 
 
+@pytest.mark.parametrize("lang", ["ru", "en"])
+def test_change_confirm_option_two_text_accepted(lang: str) -> None:
+    """Вариант 2 вопроса вида `change` — ровно напечатанная фраза — принимается
+    и `dfl reply`, и терминалом (ревью #809)."""
+    with i18n.language(lang):
+        text = rp.confirm_question("design", "D-01", rp.CHANGE, "x").text
+    phrase = text.rsplit("2. ", 1)[1].strip()
+    assert phrase in {"оставить как было", "keep as it was"}
+    assert (
+        pending.check(pending.REMARKS_CONFIRM, phrase, _confirm_rec("принять")) is None
+    )
+    assert rp.confirm_answer(phrase, rp.CHANGE) is False
+
+
 @pytest.mark.parametrize(
     ("kind", "agree"),
     [(rp.REMOVE, "remove"), (rp.DOWNGRADE, "drop"), (rp.CHANGE, "accept")],
