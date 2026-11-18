@@ -949,7 +949,11 @@ def _personal(
                 )
             )
         _check_review(review, active.review_pause, rp.PERSONAL_STAGES)
-        return _advance_personal(active)
+        # язык прогона, а не вызова: `_continued_run` мог прогон не найти
+        # (клон под другим именем) — текст и id вопроса паузы не должны
+        # зависеть от этого (ревью #809)
+        with i18n.language(active.language):
+            return _advance_personal(active)
     if subject is None:
         if track == "personal":
             raise DflError(t(TRACK_NEEDS_SUBJECT))
