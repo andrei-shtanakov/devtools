@@ -66,6 +66,10 @@ class PersonalRun:
     #: запись ответов (форма `governance.manual_checks`).
     manual_checks: bool = False
     manual: dict = field(default_factory=dict)
+    #: язык прогона (#769): задаётся при создании, дальше не меняется;
+    #: старые run.json — `ru`. Недопустимое значение `load` не правит —
+    #: нормализует вызывающий через `i18n.stored_language`.
+    language: str = "ru"
 
     def __post_init__(self) -> None:
         self.review_pause = tuple(self.review_pause)
@@ -93,6 +97,7 @@ def new_personal_run(
     today: date,
     review_pause: tuple[str, ...] = (),
     manual_checks: bool = False,
+    language: str = "ru",
 ) -> PersonalRun:
     """Новый прогон: `run_id` = ws-id + случайный суффикс."""
     ws_id = _ws_id(subject, today)
@@ -106,6 +111,7 @@ def new_personal_run(
         bundle_dir=f"workstreams/{ws_id}/spec",
         review_pause=review_pause,
         manual_checks=manual_checks,
+        language=language,
     )
 
 
