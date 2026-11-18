@@ -184,6 +184,9 @@ EN: dict[str, str] = {
     "Верно? 1. да · 2. поправить: <что>": "Correct? 1. yes · 2. fix: <what>",
     # экран личного пути (Task 6): отказ, ошибки до прогона, подсказки
     "{command}: отказ (код {code})": "{command}: refusal (code {code})",
+    "незаконченного прогона нет — первый запуск: dfl run --subject '<тема>'": (
+        "no unfinished run — first launch: dfl run --subject '<subject>'"
+    ),
     "причина:": "reason:",
     "что сделать:": "what to do:",
     "отчёт разработчикам: dfl report": "report to the developers: dfl report",

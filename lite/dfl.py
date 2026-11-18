@@ -747,6 +747,8 @@ def run(
     code = _personal(target, subject, track, review)
     if code is not None:
         return code
+    if subject is None:
+        _refuse_without_runs(target.repo)
     _enterprise_language()
     chatting = chat and _is_tty()
     if chatting and _author_is_claude():
@@ -769,6 +771,24 @@ def run(
 
 
 NO_UNFINISHED = "незаконченного прогона нет"
+NO_RUN_REFUSAL = (
+    "незаконченного прогона нет — первый запуск: dfl run --subject '<тема>'"
+)
+
+
+def _refuse_without_runs(repo: str) -> None:
+    """Голый `dfl run` без незаконченного прогона — тот же отказ, что дал бы
+    enterprise-путь (`_select_customer`), но на языке вызова: до переключения
+    на русский (`_enterprise_language`) прогона ещё нет. Нечитаемый журнал —
+    без проверки: его отказ даст сам enterprise-путь (`_readable_runs`)."""
+    runs, broken = _repo_runs(repo)
+    if broken:
+        return
+    try:
+        _select_customer(runs, None)
+    except DflError as exc:
+        if str(exc).startswith(NO_UNFINISHED):
+            raise DflError(t(NO_RUN_REFUSAL)) from exc
 
 
 def _enterprise_language() -> None:
