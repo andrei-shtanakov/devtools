@@ -80,6 +80,7 @@ TRACES_INTRO = (
     "бриф не прошёл проверку: интерфейсы и архитектурные предпочтения должны "
     "быть связаны с системами (или ограничениями); предлагаю связи:"
 )
+TRACES_NOTE = "Связи с системами уточнены."
 TRACES_CONFIRM = "Записать так? («да» — записать, «пропустить» — оставить)"
 VERDICT_INTRO = (
     "бриф не прошёл проверку: по каждой обязательной функции из брифа "
@@ -397,7 +398,7 @@ def _fill_traces(
     for qid, group in _by_holder(proposed, view).items():
         fresh = load(session)
         entries = [{**fresh.entry_record(e), "traces": proposed[e]} for e in group]
-        if not _resent(qid, "Связи с системами уточнены.", entries, fresh, resend):
+        if not _resent(qid, TRACES_NOTE, entries, fresh, resend):
             left += len(group)
     return left
 

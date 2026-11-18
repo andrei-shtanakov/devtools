@@ -118,8 +118,7 @@ ITEMS_REFUSAL = "раскладка не принята: {errors}"
 ITEMS_NOT_CONTENT = (
     "ждущий вопрос — не вопрос интервью с раскладкой: ответ через dfl reply"
 )
-REPAIR_IDS = "нужны обновления ровно пунктов {ids}"
-REPAIR_NEW = "новый пункт {eid} — в починке можно только новые Q критерия"
+REPAIR_IDS = "нужны обновления пунктов из {ids}, без новых и чужих пунктов"
 NO_INTERVIEW_REFUSAL = "интервью не идёт — начните: dfl run --subject '<тема>'"
 CHAT_STOPPED = "интервью прервано — продолжить: dfl run"
 INTERRUPTED = "прервано"
@@ -2653,11 +2652,7 @@ def _apply_items(state: rs.RunState, path: Path, qid: str) -> None:
         view = load_session(session_id)
     except InterviewStateError as exc:
         raise DflError(f"сессия интервью не читается: {exc}") from exc
-    try:
-        payload = st.payload_from_items(text, raw, view)
-    except st.FormError as exc:
-        raise DflError(ITEMS_REFUSAL.format(errors=exc)) from exc
-    reason = _send_items(state, rec, payload, view)
+    reason = _send_items(state, rec, text, raw, view)
     if reason is not None:
         raise DflError(f"discovery не принял ответ ({reason})")
     pending.clear(rd)
@@ -2679,58 +2674,88 @@ def _read_items(path: Path) -> tuple[str, str]:
 
 
 def _send_items(
-    state: rs.RunState, rec: dict, payload: str, view: SessionView
+    state: rs.RunState, rec: dict, text: str, raw: str, view: SessionView
 ) -> str | None:
-    """Отправить собранный ответ: вопрос discovery — ответом на него; добор —
-    дописать держателю; починка — каждому держателю его пункты. Итог —
+    """Проверить раскладку и отправить: вопрос discovery — ответом на него;
+    добор — дописать держателю; починка — по правилам терминала
+    (`gate_repair`). Нарушение — отказ «раскладка не принята»; итог —
     причина отказа discovery или `None`."""
     kind, key = str(rec.get("kind", "")), str(rec.get("key", ""))
-    if kind == pending.INTERVIEW_QUESTION:
-        return ir._refusal(_sender(state)(key, payload))
-    holder = str((rec.get("data") or {}).get("holder") or "")
-    if not holder:
-        raise DflError("у вопроса нет ответа-держателя — dfl run поставит его заново")
-    doc = yaml.safe_load(payload)
-    entries = list(doc.get("entries") or [])
-    if kind == pending.INTERVIEW_REPAIR:
-        groups = _repair_groups(key, entries, view, holder)
-    else:
-        groups = {holder: entries}
+    try:
+        if kind == pending.INTERVIEW_QUESTION:
+            payload = st.payload_from_items(text, raw, view)
+            return ir.discovery_refusal(_sender(state)(key, payload))
+        holder = str((rec.get("data") or {}).get("holder") or "")
+        if not holder:
+            raise DflError(
+                "у вопроса нет ответа-держателя — dfl run поставит его заново"
+            )
+        if kind == pending.INTERVIEW_TOPUP:
+            parts = [(holder, text, _items_entries(text, raw, view))]
+        elif key.startswith("criterion:"):
+            parts = [_criterion_part(key.split(":", 1)[1], text, raw, view)]
+        else:
+            parts = _traces_parts(key, text, raw, view)
+    except st.FormError as exc:
+        raise DflError(ITEMS_REFUSAL.format(errors=exc)) from exc
+    return _resend_parts(state, parts, view)
+
+
+def _items_entries(text: str, raw: str, view: SessionView) -> list[dict]:
+    """Записи ответа по раскладке (`structure.payload_from_items`)."""
+    doc = yaml.safe_load(st.payload_from_items(text, raw, view))
+    return list(doc.get("entries") or [])
+
+
+def _criterion_part(
+    eid: str, text: str, raw: str, view: SessionView
+) -> tuple[str, str, list[dict]]:
+    """GC-08 как `gate_repair._fill_criterion` со словами человека: слова —
+    в `Preference`, пункты — `gate_repair._criterion_items` (только критерий
+    пункта и новые `Q`, на которые он ссылается), заметка «Уточнение к …»."""
+    record = view.entry_record(eid)
+    research = {e.id: e.body for e in view.entries if e.id.startswith("Q-")}
+    words = gr._without_ids(text, research)
+    record["Preference"] = gr._preference(record, words)
+    items = gr._criterion_items(eid, record, view, raw)
+    entries = yaml.safe_load(st.to_payload("", items, view))["entries"]
+    note = f"Уточнение к «{record['body']}»: {words}"
+    return view.holders[eid], note, entries
+
+
+def _traces_parts(
+    key: str, text: str, raw: str, view: SessionView
+) -> list[tuple[str, str, list[dict]]]:
+    """GC-13: обновления непустого подмножества пунктов ключа (остальные —
+    находки следующего прохода, как в терминале), по держателям
+    (`view.holders`, как `gate_repair._by_holder`), заметка терминала."""
+    wanted = key.split(":", 1)[1].split(",")
+    entries = _items_entries(text, raw, view)
+    if not entries or any(e["id"] not in wanted for e in entries):
+        raise st.FormError(REPAIR_IDS.format(ids=", ".join(wanted)))
+    groups: dict[str, list[dict]] = {}
+    for entry in entries:
+        groups.setdefault(view.holders[entry["id"]], []).append(entry)
+    return [(qid, gr.TRACES_NOTE, group) for qid, group in groups.items()]
+
+
+def _resend_parts(
+    state: rs.RunState, parts: list[tuple[str, str, list[dict]]], view: SessionView
+) -> str | None:
+    """Дописать каждому держателю его записи (замена по id) и заметку; текст,
+    которым ответ держателя уже кончается (повтор после частичного отказа),
+    не дублируется. Первый отказ discovery — его причина."""
     resend = _sender(state, supersede=True)
-    for qid, group in groups.items():
+    for qid, note, entries in parts:
+        held = view.held_answer(qid)
+        said = "" if str(held.get("text") or "").endswith(note) else note
         part = yaml.safe_dump(
-            {"text": doc["text"], "entries": group}, allow_unicode=True, sort_keys=False
+            {"text": said, "entries": entries}, allow_unicode=True, sort_keys=False
         )
-        reason = ir._refusal(resend(qid, gr.appended(view.held_answer(qid), part)))
+        reason = ir.discovery_refusal(resend(qid, gr.appended(held, part)))
         if reason is not None:
             return reason
     return None
-
-
-def _repair_groups(
-    key: str, entries: list[dict], view: SessionView, holder: str
-) -> dict[str, list[dict]]:
-    """Записи починки `criterion:`/`traces:` по держателям (`view.holders`,
-    как `gate_repair._by_holder`): обновляются ровно чинимые пункты; новые —
-    только `Q` критерия (как `gate_repair._criterion_items`), они — держателю
-    вопроса. Иное — отказ «раскладка не принята»."""
-    wanted = key.split(":", 1)[1].split(",")
-    updated = [str(e["id"]) for e in entries if e["id"] in view.holders]
-    errors = []
-    if sorted(updated) != sorted(wanted):
-        errors.append(REPAIR_IDS.format(ids=", ".join(wanted)))
-    errors += [
-        REPAIR_NEW.format(eid=e["id"])
-        for e in entries
-        if e["id"] not in view.holders
-        and not (key.startswith("criterion:") and str(e["id"]).startswith("Q-"))
-    ]
-    if errors:
-        raise DflError(ITEMS_REFUSAL.format(errors="; ".join(errors)))
-    groups: dict[str, list[dict]] = {}
-    for entry in entries:
-        groups.setdefault(view.holders.get(entry["id"], holder), []).append(entry)
-    return groups
 
 
 def _existing_customer(runs: list[rs.RunState], subject: str | None) -> rs.RunState:

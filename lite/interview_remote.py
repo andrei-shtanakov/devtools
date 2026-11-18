@@ -258,7 +258,7 @@ def apply_reply(
     if not is_skip(text):
         raise ValueError(NOT_CONTENT)
     if kind == pending.INTERVIEW_QUESTION:
-        return _refusal(send(key, to_payload(text, [], view)))
+        return discovery_refusal(send(key, to_payload(text, [], view)))
     return None
 
 
@@ -273,10 +273,10 @@ def _apply_verdict(key: str, text: str, view: SessionView, resend: Send) -> str 
     payload = yaml.safe_dump(
         {"text": entry["body"], "entries": [entry]}, allow_unicode=True, sort_keys=False
     )
-    return _refusal(resend(qid, gr.appended(view.held_answer(qid), payload)))
+    return discovery_refusal(resend(qid, gr.appended(view.held_answer(qid), payload)))
 
 
-def _refusal(reply: iv.DiscoveryReply) -> str | None:
+def discovery_refusal(reply: iv.DiscoveryReply) -> str | None:
     """Отказ `discovery` (коды 1/2) — причина; иначе `None`."""
     if reply.code not in (1, 2):
         return None

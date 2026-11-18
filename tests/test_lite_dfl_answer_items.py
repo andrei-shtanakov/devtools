@@ -18,8 +18,10 @@ import pytest
 import yaml
 
 from governance import interview as iv
+from governance import run_lock
 from governance import run_state as rs
 from lite import dfl, pending
+from lite import gate_repair as gr
 from lite import interview_remote as ir
 from lite.interview_state import Entry, SessionView
 from lite.structure import Question as Asked
@@ -338,6 +340,9 @@ def test_items_repair_criterion_updates_entry_and_marks_done(
     env: Env,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Правила терминала (`gate_repair._criterion_items`): из раскладки —
+    только критерий; body, Priority, traces — прежние; слова человека — в
+    `Preference`, текст — заметка «Уточнение к …»."""
     view = _repair_view()
     fakes = _fakes(env, monkeypatch, view)
     _stopped("status вернул 11: findings в /r/interview-findings.json")
@@ -349,7 +354,8 @@ def test_items_repair_criterion_updates_entry_and_marks_done(
             {
                 "prefix": "FR",
                 "id": "FR-01",
-                "body": "Отчёт",
+                "body": "Переписанный отчёт",
+                "priority": "Could",
                 "acceptance": "отчёт за минуту",
             }
         ],
@@ -358,73 +364,195 @@ def test_items_repair_criterion_updates_entry_and_marks_done(
     assert len(fakes.sent.calls) == 1
     question, supersede, payload = fakes.sent.calls[0]
     assert (question, supersede) == ("q.a", True)
-    assert payload["text"] == "ответ а\n\nОтчёт готов за минуту"
-    by_id = {e["id"]: e for e in payload["entries"]}
-    assert list(by_id) == ["FR-01", "IF-01"]
-    assert by_id["FR-01"]["Acceptance"] == "отчёт за минуту"
-    assert by_id["FR-01"]["Priority"] == "Must"
+    assert payload["text"] == "ответ а\n\nУточнение к «Отчёт»: Отчёт готов за минуту"
+    assert [e["id"] for e in payload["entries"]] == ["FR-01", "IF-01"]
+    fr = payload["entries"][0]
+    assert fr["Acceptance"] == "отчёт за минуту"
+    assert (fr["body"], fr["Priority"]) == ("Отчёт", "Must")
+    assert fr["Preference"] == "Отчёт готов за минуту"
     assert ir.load_marks(_rd())["done"] == ["criterion:FR-01"]
     assert pending.load(_rd()) is None and len(fakes.runs) == 1
+
+
+def _traces_items() -> list[dict]:
+    return [
+        {"prefix": "IF", "id": "IF-01", "body": "API склада", "traces": ["S-01"]},
+        {
+            "prefix": "AP",
+            "id": "AP-01",
+            "body": "Пакетная загрузка",
+            "traces": ["S-01", "CON-01"],
+        },
+    ]
 
 
 def test_items_repair_traces_resends_each_holder(
     env: Env,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """GC-13: IF-01 у `q.a`, AP-01 у `q.b` — каждому держателю своя группа."""
+    """GC-13: IF-01 у `q.a`, AP-01 у `q.b` — каждому держателю своя группа и
+    заметка терминала, слова человека чужим ответам не дописываются."""
     view = _repair_view()
     fakes = _fakes(env, monkeypatch, view)
     _stopped("status вернул 11: findings в /r/interview-findings.json")
     rec = _post(ir._traces(["IF-01", "AP-01"], view))
     assert rec["data"]["holder"] == "q.a"
-    _items(
-        env,
-        "Оба про склад, подход ещё про бюджет",
-        [
-            {"prefix": "IF", "id": "IF-01", "body": "API склада", "traces": ["S-01"]},
-            {
-                "prefix": "AP",
-                "id": "AP-01",
-                "body": "Пакетная загрузка",
-                "traces": ["S-01", "CON-01"],
-            },
-        ],
-    )
+    _items(env, "Оба про склад, подход ещё про бюджет", _traces_items())
     assert env.run("answer", "--items", ITEMS, "--id", rec["id"]) == 0
-    sent = {q: (sup, p) for q, sup, p in fakes.sent.calls}
-    assert list(sent) == ["q.a", "q.b"]
-    assert all(sup for sup, _p in sent.values())
-    a = {e["id"]: e for e in sent["q.a"][1]["entries"]}
-    b = {e["id"]: e for e in sent["q.b"][1]["entries"]}
-    assert list(a) == ["FR-01", "IF-01"] and a["IF-01"]["traces"] == ["S-01"]
-    assert list(b) == ["AP-01", "S-01", "CON-01"]
-    assert b["AP-01"]["traces"] == ["S-01", "CON-01"]
+    assert [(q, sup) for q, sup, _p in fakes.sent.calls] == [
+        ("q.a", True),
+        ("q.b", True),
+    ]
+    a, b = (p for _q, _s, p in fakes.sent.calls)
+    assert [e["id"] for e in a["entries"]] == ["FR-01", "IF-01"]
+    assert [e["id"] for e in b["entries"]] == ["AP-01", "S-01", "CON-01"]
+    assert a["entries"][1]["traces"] == ["S-01"]
+    assert b["entries"][0]["traces"] == ["S-01", "CON-01"]
+    assert a["text"] == f"ответ а\n\n{gr.TRACES_NOTE}"
+    assert b["text"] == f"ответ б\n\n{gr.TRACES_NOTE}"
     assert ir.load_marks(_rd())["done"] == ["traces:IF-01,AP-01"]
 
 
-@pytest.mark.parametrize(
-    "item",
-    [
-        {"prefix": "S", "body": "Новая система"},
-        {"prefix": "IF", "id": "IF-01", "body": "API склада", "traces": ["S-01"]},
-    ],
-)
-def test_items_repair_foreign_or_new_item_refused(
+def test_items_repair_traces_subset_accepted(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Связи только части пунктов — как в терминале: остальные вернутся
+    находками следующего прохода."""
+    view = _repair_view()
+    fakes = _fakes(env, monkeypatch, view)
+    _stopped("status вернул 11: findings в /r/interview-findings.json")
+    rec = _post(ir._traces(["IF-01", "AP-01"], view))
+    _items(env, "Только API про склад", _traces_items()[1:])
+    assert env.run("answer", "--items", ITEMS, "--id", rec["id"]) == 0
+    assert [q for q, _s, _p in fakes.sent.calls] == ["q.b"]
+    assert ir.load_marks(_rd())["done"] == ["traces:IF-01,AP-01"]
+
+
+def test_items_repair_retry_does_not_duplicate_note(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Повтор после частичного отказа: ответ держателя уже кончается
+    заметкой — она не дописывается второй раз, записи заменяются по id."""
+    view = _repair_view()
+    view.answers["q.a"]["text"] = f"ответ а\n\n{gr.TRACES_NOTE}"
+    fakes = _fakes(env, monkeypatch, view)
+    _stopped("status вернул 11: findings в /r/interview-findings.json")
+    rec = _post(ir._traces(["IF-01", "AP-01"], view))
+    _items(env, "Оба про склад", _traces_items())
+    assert env.run("answer", "--items", ITEMS, "--id", rec["id"]) == 0
+    a, b = (p for _q, _s, p in fakes.sent.calls)
+    assert a["text"] == f"ответ а\n\n{gr.TRACES_NOTE}"
+    assert [e["id"] for e in a["entries"]] == ["FR-01", "IF-01"]
+    assert b["text"] == f"ответ б\n\n{gr.TRACES_NOTE}"
+
+
+def test_items_repair_partial_refusal_keeps_pending(
     env: Env,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    item: dict,
+) -> None:
+    view = _repair_view()
+    fakes = _fakes(env, monkeypatch, view)
+    real = fakes.sent.__call__
+
+    def second_refused(*a: Any, **kw: Any) -> iv.DiscoveryReply:
+        fakes.sent.code = 2 if fakes.sent.calls else 20
+        return real(*a, **kw)
+
+    monkeypatch.setattr(dfl, "_discovery_answer", second_refused)
+    _stopped("status вернул 11: findings в /r/interview-findings.json")
+    rec = _post(ir._traces(["IF-01", "AP-01"], view))
+    _items(env, "Оба про склад", _traces_items())
+    assert env.run("answer", "--items", ITEMS, "--id", rec["id"]) == 2
+    assert "discovery не принял ответ" in capsys.readouterr().err
+    assert [q for q, _s, _p in fakes.sent.calls] == ["q.a", "q.b"]
+    assert (pending.load(_rd()) or {}).get("id") == rec["id"]
+    assert ir.load_marks(_rd())["done"] == [] and fakes.runs == []
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        [],
+        [{"prefix": "S", "body": "Новая система"}],
+        [{"prefix": "FR", "id": "FR-01", "body": "Отчёт", "acceptance": "x"}],
+    ],
+)
+def test_items_repair_traces_empty_new_or_foreign_refused(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    items: list[dict],
+) -> None:
+    view = _repair_view()
+    fakes = _fakes(env, monkeypatch, view)
+    _stopped("status вернул 11: findings в /r/interview-findings.json")
+    rec = _post(ir._traces(["IF-01", "AP-01"], view))
+    _items(env, "ответ", items)
+    assert env.run("answer", "--items", ITEMS, "--id", rec["id"]) == 2
+    assert "раскладка не принята" in capsys.readouterr().err
+    assert fakes.sent.calls == []
+    assert ir.load_marks(_rd())["done"] == []
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        [{"prefix": "S", "body": "Новая система"}],
+        [{"prefix": "IF", "id": "IF-01", "body": "API склада", "traces": ["S-01"]}],
+        [{"prefix": "Q", "ref": "q-1", "body": "Ни к чему", "owner_role": "analyst"}],
+    ],
+)
+def test_items_repair_criterion_foreign_new_or_unmentioned_q_refused(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    extra: list[dict],
 ) -> None:
     view = _repair_view()
     fakes = _fakes(env, monkeypatch, view)
     _stopped("status вернул 11: findings в /r/interview-findings.json")
     rec = _post(ir._criterion("FR-01", view))
     fr = {"prefix": "FR", "id": "FR-01", "body": "Отчёт", "acceptance": "за минуту"}
-    _items(env, "ответ", [fr, item])
+    _items(env, "ответ", [fr, *extra])
     assert env.run("answer", "--items", ITEMS, "--id", rec["id"]) == 2
     assert "раскладка не принята" in capsys.readouterr().err
     assert fakes.sent.calls == []
     assert ir.load_marks(_rd())["done"] == []
+
+
+def test_items_repair_criterion_empty_refused(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    view = _repair_view()
+    fakes = _fakes(env, monkeypatch, view)
+    _stopped("status вернул 11: findings в /r/interview-findings.json")
+    rec = _post(ir._criterion("FR-01", view))
+    _items(env, "ответ", [])
+    assert env.run("answer", "--items", ITEMS, "--id", rec["id"]) == 2
+    assert "раскладка не принята" in capsys.readouterr().err
+    assert fakes.sent.calls == []
+
+
+def test_items_refused_while_run_locked(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    view = _customer_view()
+    fakes = _fakes(env, monkeypatch, view)
+    _waiting(RUN, "WS-1", "customer")
+    rec = _question_rec(view)
+    _items(env, "да", [])
+    with run_lock.run_lock(RUN):
+        assert env.run("answer", "--items", ITEMS, "--id", rec["id"]) == 2
+    assert "исполняется другим процессом" in capsys.readouterr().err
+    assert fakes.sent.calls == [] and fakes.runs == []
+    assert (pending.load(_rd()) or {}).get("id") == rec["id"]
 
 
 def test_items_without_id_refused(
@@ -494,6 +622,5 @@ def test_items_repair_criterion_new_research_q_to_holder(
     assert env.run("answer", "--items", ITEMS, "--id", rec["id"]) == 0
     [(question, _sup, payload)] = fakes.sent.calls
     assert question == "q.a"
-    by_id = {e["id"]: e for e in payload["entries"]}
-    assert list(by_id) == ["FR-01", "IF-01", "Q-01"]
-    assert by_id["FR-01"]["Acceptance"] == "отчёт быстрее, чем Q-01"
+    assert [e["id"] for e in payload["entries"]] == ["FR-01", "IF-01", "Q-01"]
+    assert payload["entries"][0]["Acceptance"] == "отчёт быстрее, чем Q-01"
