@@ -17,11 +17,16 @@ from pathlib import Path
 
 from governance import manual_checks as mc
 from lite import i18n
+from lite.interview_chat import is_skip
 
 REVIEW = "review"
 MANUAL = "manual"
 REMARKS_CONFIRM = "remarks-confirm"
 EDGE = "edge"
+INTERVIEW_QUESTION = "interview-question"
+INTERVIEW_TOPUP = "interview-topup"
+INTERVIEW_REPAIR = "interview-repair"
+INTERVIEW_KINDS = frozenset({INTERVIEW_QUESTION, INTERVIEW_TOPUP, INTERVIEW_REPAIR})
 PENDING_FILE = "pending.json"
 REPLIES_FILE = "replies.json"
 
@@ -70,6 +75,10 @@ REVIEW_EMPTY_REFUSAL = "ответ: «дальше» или замечания �
 MANUAL_REFUSAL = "ответ: 1/выполнено, 2/не выполнено[: заметка], 3/с оговоркой: <текст>"
 CONFIRM_REFUSAL = "ответ: 1/{yes} или 2/оставить"
 EDGE_REFUSAL = "ответ: номер варианта 1–{n}, «своё: …» или «не согласен: <почему>»"
+INTERVIEW_REFUSAL = (
+    "ответ по существу: dfl answer --items <файл> --id {qid}; "
+    "здесь — только «пропустить»"
+)
 
 
 class PendingError(Exception):
@@ -162,6 +171,25 @@ def answered(run_dir: Path) -> bool:
     return rec is not None and rec.get("id") in replies
 
 
+def post(run_dir: Path, q: Question, data: Mapping | None = None) -> None:
+    """Записать вопрос в `pending.json` (с данными для скила, если есть).
+
+    Сменился вопрос — ответы на прежний (гонка с `dfl reply`) не переживают
+    его; тот же вопрос — ответ мог прийти только что, его не стираем.
+    """
+    current = load(run_dir)
+    if current is None or current.get("id") != q.id:
+        (run_dir / REPLIES_FILE).unlink(missing_ok=True)
+    record_ = {
+        **as_dict(q),
+        "run_id": run_dir.name,
+        "at": datetime.now().astimezone().isoformat(),
+    }
+    if data:
+        record_["data"] = dict(data)
+    _write_json(run_dir / PENDING_FILE, record_)
+
+
 def asker(run_dir: Path) -> Ask:
     """Спрашивалка без терминала: ответ из `replies.json` или запись вопроса."""
 
@@ -169,17 +197,7 @@ def asker(run_dir: Path) -> Ask:
         text = take(run_dir, q)
         if text is not None:
             return text
-        current = load(run_dir)
-        if current is None or current.get("id") != q.id:
-            # вопрос сменился: ответы на прежний (гонка с `dfl reply`) не
-            # переживают его; тот же вопрос — ответ мог прийти только что
-            (run_dir / REPLIES_FILE).unlink(missing_ok=True)
-        record_ = {
-            **as_dict(q),
-            "run_id": run_dir.name,
-            "at": datetime.now().astimezone().isoformat(),
-        }
-        _write_json(run_dir / PENDING_FILE, record_)
+        post(run_dir, q)
         return None
 
     return ask
@@ -272,6 +290,15 @@ def _check_edge(text: str, rec: Mapping | None) -> str | None:
     return i18n.t(EDGE_REFUSAL).format(n=n)
 
 
+def _check_interview(text: str, rec: Mapping | None) -> str | None:
+    if is_skip(text):
+        return None
+    verdict = str((rec or {}).get("key", "")).startswith("verdict:")
+    if verdict and text.strip():
+        return None
+    return INTERVIEW_REFUSAL.format(qid=(rec or {}).get("id", ""))
+
+
 def check(kind: str, text: str, rec: Mapping | None = None) -> str | None:
     """Причина отказа принять ответ или `None`.
 
@@ -286,6 +313,8 @@ def check(kind: str, text: str, rec: Mapping | None = None) -> str | None:
         return _check_edge(text, rec)
     if kind == MANUAL:
         return _check_manual(text)
+    if kind in INTERVIEW_KINDS:
+        return _check_interview(text, rec)
     return f"неизвестный вид вопроса: {kind}"
 
 
