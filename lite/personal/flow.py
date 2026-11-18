@@ -463,7 +463,9 @@ def _review(ctx: _Ctx, stage: str, files: list[str]) -> bool:
     только словами: файл, разошедшийся с `brief.json`, возвращается к его
     рендеру с подсказкой, и пауза снова (дальше читают `brief.json`).
     `/стоп`/EOF — пауза (код 0); без терминала — тоже пауза (код 0)
-    с подсказкой-ссылкой: ждёт человека, не сбой.
+    с подсказкой-ссылкой: ждёт человека, не сбой. Замечания к дизайну и
+    декомпозиции приходят и через `dfl reply` (#766 срез 2); к брифу — только
+    в терминале.
     """
     rd = run_dir(ctx.run.run_id)
     paths = [ctx.bundle / name for name in files]
@@ -479,7 +481,9 @@ def _review(ctx: _Ctx, stage: str, files: list[str]) -> bool:
     round_no = 0
     while True:
         batch = rp.pending(rd, stage)
-        if batch and not ctx.tty():
+        if batch and stage == "brief" and not ctx.tty():
+            # бриф правится интервьюером — только в терминале (`dfl reply`
+            # замечания к брифу не принимает)
             return _stop_wait(ctx, NO_TTY.format(label=label, links=orv.links(paths)))
         if batch:
             round_no += 1
@@ -535,7 +539,8 @@ def _stop_wait(ctx: _Ctx, reason: str) -> bool:
 
 
 def _pause_answer(ctx: _Ctx, stage: str, label: str, paths: list[Path]) -> str | None:
-    """Ответ на паузе: `""` — «дальше»; `None` — стоп или ввод прерван.
+    """Ответ на паузе: `""` — «дальше»; текст — замечания; `None` — стоп
+    или ввод прерван.
 
     Без терминала вопрос записывается для `dfl reply` (`stop_reason` — строка
     ожидания); в терминале — `_ask_pause`."""
@@ -587,16 +592,24 @@ def _revise_by_owner(ctx: _Ctx, stage: str, batch: list[rp.Remark]) -> bool:
     принята — файл возвращён: сбой — стоп; `/стоп` на вопросе удаления —
     пауза (замечание остаётся недоигранным); правка всё равно ослабляет узел
     — замечание отклоняется (`mark_dropped`, повторно не переигрывается) и
-    стоп с просьбой сформулировать иначе."""
+    стоп с просьбой сформулировать иначе. Без терминала вопрос об удалении
+    ждёт `dfl reply` (`WAITING` — код 0); кандидат правки — в каталоге
+    прогона, следующий `dfl run` (и в терминале) автора не зовёт."""
     kind = _STAGE_KINDS[stage]
+    rd = run_dir(ctx.run.run_id)
     outcome, detail = orv.revise_by_owner(
         ctx.bundle / FILENAMES[kind],
         orv.decisions(batch),
         revise=functools.partial(_owner_revise, ctx, kind),
         read=ctx.read,
+        ask=None if ctx.tty() else pending.asker(rd),
+        store=rd,
+        stage=stage,
     )
     if outcome == orv.ACCEPTED:
         return True
+    if outcome == orv.WAITING:
+        return _stop_wait(ctx, detail)
     if outcome == orv.PAUSED:
         ctx.run.stop_reason = REVIEW_PAUSED.format(label=STAGE_LABELS[stage])
         say(ctx.run.stop_reason)

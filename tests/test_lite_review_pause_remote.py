@@ -19,9 +19,11 @@ from tests.test_lite_dfl_owner_review import (
     _design,
     _steps,
 )
+from tests.test_lite_dfl_owner_review import _author as _enterprise_author
 from tests.test_lite_personal_flow import FakeOps, checker
 from tests.test_lite_personal_review import (
     _advance,
+    _author,
     _bundle,
     _lines,
     _no_read,
@@ -72,11 +74,18 @@ def test_personal_pause_terminal_live_answer_clears_pending(tmp_path) -> None:
     assert pending.load(state.run_dir(run.run_id)) is None
 
 
-def test_personal_remarks_without_tty_keep_old_hint(tmp_path) -> None:
+def test_personal_remarks_without_tty_are_revised(tmp_path) -> None:
+    """Срез 2 (#766): недоигранное замечание без терминала правится автором
+    (прежде — стоп «замечания — dfl run в терминале»)."""
     run = _run(tmp_path, ("design",))
-    rp.record(state.run_dir(run.run_id), "design", "добавь логи")
-    assert _advance(run, FakeOps(run), read=_no_read, tty=False) == 0
-    assert "замечания — dfl run в терминале" in run.stop_reason
+    rd = state.run_dir(run.run_id)
+    rp.record(rd, "design", "добавь логи")
+    author = _author(DESIGN + "\nЛоги пишутся в stderr.\n")
+    assert _advance(run, FakeOps(run), read=_no_read, launch=author, tty=False) == 0
+    assert "замечания — dfl run в терминале" not in run.stop_reason
+    assert len(author.prompts) == 1  # type: ignore[attr-defined]
+    assert [(r.text, r.applied) for r in rp.all_remarks(rd)] == [("добавь логи", True)]
+    _waiting_line(run)  # перепроверен, пауза снова
 
 
 def test_pause_manual_edit_then_done_rechecks(tmp_path) -> None:
@@ -166,20 +175,28 @@ def test_enterprise_terminal_uses_recorded_reply(
     assert pending.load(rd) is None
 
 
-def test_enterprise_remarks_without_tty_keep_old_hint(
+def test_enterprise_remarks_without_tty_are_revised(
     env: Env,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
     capfd: pytest.CaptureFixture[str],
 ) -> None:
+    """Срез 2 (#766): недоигранное замечание без терминала правится автором
+    (прежде — стоп «замечания — dfl run в терминале»)."""
     _bind_streams(monkeypatch)
     _tty(monkeypatch, False)
     _steps(env, monkeypatch)
+    calls = _enterprise_author(monkeypatch, DESIGN + "\nуточнено\n")
     assert env.run("run", "--subject", "t") == 0
     rp.record(rs.run_dir(RUN_ID), "design", "уточнить D-01")
     _read(capfd)
     assert env.run("run", "--subject", "t") == 0
     out, _ = _read(capfd)
-    assert "замечания — dfl run в терминале" in out
+    assert "замечания — dfl run в терминале" not in out
+    assert len(calls) == 1
+    assert rs.load(RUN_ID).ops["review-pause-4"] == {
+        "status": "started",
+        "revised": True,
+    }
 
 
 def test_ask_remote_unit(tmp_path) -> None:

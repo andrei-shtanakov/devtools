@@ -1096,14 +1096,12 @@ def _owner_node(
     на экране паузы; правка принята — op помечен «правлено», затем
     замечания «применены». «Дальше» после ручной правки файла (хэш ≠
     снятому при показе) — тоже «правлено»: перепроверка и пауза снова.
-    `ask` — без терминала (#766): «дальше» через `dfl reply`, замечания
-    пока только в терминале. `None` — дальше; иначе код (0 — пауза)."""
+    `ask` — без терминала (#766): «дальше» и замечания через `dfl reply`;
+    вопрос об удалении ждёт ответа (`WAITING` — код 0), кандидат правки —
+    в каталоге прогона. `None` — дальше; иначе код (0 — пауза)."""
     rd = rs.run_dir(state.run_id)
     label = rp.STAGE_LABELS[stage]
     batch = rp.pending(rd, stage)
-    if batch and ask is not None:
-        say(orv.NO_TTY.format(label=label, links=orv.links([path])))
-        return 0
     if not batch:
         answer = _owner_answer(state, stage, label, path, ask)
         if answer is None:
@@ -1120,11 +1118,19 @@ def _owner_node(
         orv.decisions(batch),
         revise=functools.partial(_owner_revise, state, stage, path, calls),
         read=ic.stdin_read,
+        ask=ask,
+        store=rd,
+        stage=stage,
     )
     if outcome == orv.ACCEPTED:
         _write_pause_op(state, complete=False)  # до «применено»: правка не теряется
         rp.mark_applied(rd, stage, len(batch))
+        if ask is not None:
+            _ack(state, stage)  # узел этой паузы доигран: W4 — к следующему
         return None
+    if outcome == orv.WAITING:
+        say(detail)
+        return 0
     if outcome == orv.PAUSED:
         say(OWNER_REVIEW_PAUSED.format(label=label))
         return 0
@@ -1185,8 +1191,9 @@ def _owner_answer_remote(
     path: Path,
     ask: pending.Ask,
 ) -> str | None:
-    """«Дальше» узла без терминала: уже полученное запоминается в
-    `review-acked.json` — иначе второй узел W4 вернул бы первый на вопрос."""
+    """Ответ узла без терминала: `""` — «дальше», текст — замечания.
+    «Дальше» запоминается в `review-acked.json` — иначе второй узел W4
+    вернул бы первый на вопрос; замечания — нет (узел ещё правится)."""
     acked = _acked(state)
     if stage in acked:
         return ""
@@ -1194,11 +1201,20 @@ def _owner_answer_remote(
     if answer is None:
         say(pending.wait_text(rs.run_dir(state.run_id)))
         return None
+    if not answer:
+        _ack(state, stage)  # только «дальше»: узел с замечаниями ещё правится
+    return answer
+
+
+def _ack(state: rs.RunState, stage: str) -> None:
+    """Запомнить узел волны, пройденный на этой паузе (`review-acked.json`)."""
+    acked = _acked(state)
+    if stage in acked:
+        return
     _acked_path(state).write_text(
         json.dumps({"wave": state.wave, "stages": [*acked, stage]}) + "\n",
         encoding="utf-8",
     )
-    return answer
 
 
 def _owner_revise(

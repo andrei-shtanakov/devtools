@@ -98,10 +98,12 @@ def question(stage: str, stage_label: str, paths: list[Path]) -> pending_mod.Que
 def ask_remote(
     stage: str, stage_label: str, paths: list[Path], *, ask: pending_mod.Ask
 ) -> str | None:
-    """Пауза без терминала: `""` — «дальше»; `None` — ответа ещё нет
-    (вопрос записан, прогон ждёт)."""
+    """Пауза без терминала: `""` — «дальше»; текст — замечания (`dfl reply`);
+    `None` — ответа ещё нет (вопрос записан, прогон ждёт)."""
     answer = ask(question(stage, stage_label, paths))
-    return None if answer is None else ""
+    if answer is None:
+        return None
+    return "" if pending_mod.is_done(answer) else answer.strip()
 
 
 def confirm_removals(
