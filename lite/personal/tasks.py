@@ -14,6 +14,20 @@ _DRAFT_SENTENCE = "Draft: исполнение только после чело�
 _PERSONAL_SENTENCE = (
     "Личный путь: бриф одобрен владельцем в разговоре, задачи исполняются сразу."
 )
+# The same pair for an English run (devtools#769): the English header of
+# `task_bridge._TEXTS["en"]["header_note"]`.
+_DRAFT_SENTENCE_EN = "Draft: execution only after a human approve."
+_PERSONAL_SENTENCE_EN = (
+    "Personal path: the brief was approved by the owner in conversation, "
+    "tasks run right away."
+)
+
+
+def _sentences(lang: str) -> tuple[str, str]:
+    """Строка шапки про approve и её замена личного пути на языке `lang`."""
+    if lang == "en":
+        return _DRAFT_SENTENCE_EN, _PERSONAL_SENTENCE_EN
+    return _DRAFT_SENTENCE, _PERSONAL_SENTENCE
 
 
 def _strip_frontmatter(text: str) -> str:
@@ -30,7 +44,9 @@ def render_personal_tasks(
     design_text: str,
     generated_at: str,
 ) -> str:
-    """tasks.md для spec-runner: 1 DT = 1 задача, без frontmatter."""
+    """tasks.md для spec-runner: 1 DT = 1 задача, без frontmatter; все
+    человеческие строки — на языке прогона (`run.language`, #769)."""
+    lang = run.language
     _, whole = split_decomposition(decomposition_text)
     scenarios = task_bridge.parse_behaviour(whole)
     dt_tasks, _ = decomposition_guard.parse_dt_tasks(whole)
@@ -43,9 +59,11 @@ def render_personal_tasks(
         generated_at,
         anchor_blob=None,
         design_text=design_text,
+        lang=lang,
     )
-    if _DRAFT_SENTENCE not in text:
+    draft, personal = _sentences(lang)
+    if draft not in text:
         raise RuntimeError(
             "шапка task_bridge изменилась: строка про approve не найдена"
         )
-    return _strip_frontmatter(text.replace(_DRAFT_SENTENCE, _PERSONAL_SENTENCE))
+    return _strip_frontmatter(text.replace(draft, personal))

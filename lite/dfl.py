@@ -2228,25 +2228,29 @@ def _active_status(active: personal_state.PersonalRun) -> None:
     )
     say(f"{line} — {reason}" if reason else line)
     if verbosity() >= 1:
-        _manual_status(active.manual, active.repo_slug)
+        _manual_status(active.manual, active.repo_slug, _run_language(active))
 
 
 def _finished_status(done: personal_state.PersonalRun) -> None:
     """`dfl status`: законченный личный прогон — только с ответами на ручные
     проверки (или их список при `-v`)."""
-    tail = mc.summary(mc.checks_of(done.manual), done.manual.get("answers") or {})
+    lang = _run_language(done)
+    answers = done.manual.get("answers") or {}
+    tail = mc.summary(mc.checks_of(done.manual), answers, lang=lang)
     if not tail and not (verbosity() >= 1 and done.manual.get("checks")):
         return
     line = t("личный прогон {run_id}: закончен").format(run_id=done.run_id)
     say(f"{line}; {tail}" if tail else line)
     if verbosity() >= 1:
-        _manual_status(done.manual, done.repo_slug)
+        _manual_status(done.manual, done.repo_slug, lang)
 
 
-def _manual_status(record: dict, repo_slug: str) -> None:
+def _manual_status(record: dict, repo_slug: str, lang: str = "ru") -> None:
     """`dfl status -v`: строка на ручную проверку; состояние issue «не
-    выполнено» — вживую (закрыт = выполнено позже, журнал только растёт)."""
+    выполнено» — вживую (закрыт = выполнено позже, журнал только растёт).
+    Слова вердиктов — на языке `lang` прогона (#769)."""
     answers = record.get("answers") or {}
+    words = mc.verdict_words(lang)
     for check in mc.checks_of(record):
         answer = answers.get(check.beh_id)
         if answer is None:
@@ -2254,7 +2258,7 @@ def _manual_status(record: dict, repo_slug: str) -> None:
             say(f"  {check.beh_id} ({check.task_id}): {waits}", 1)
             continue
         line = f"  {check.beh_id} ({check.task_id}): "
-        line += mc.VERDICT_WORDS.get(str(answer.get("verdict")), "?")
+        line += words.get(str(answer.get("verdict")), "?")
         if answer.get("note"):
             line += f" — {answer['note']}"
         issue = answer.get("issue")

@@ -873,7 +873,9 @@ def _open_spec_pr(ctx: _Ctx) -> bool:
         save(run)  # write-ahead: ветка может нести коммит прогона
         # пустой индекс (уже закоммичено до падения) — commit_paths не коммитит
         ops.commit_paths(
-            target, [run.bundle_dir, tasks], f"spec({run.ws_id}): личный путь"
+            target,
+            [run.bundle_dir, tasks],
+            _PR_TEXTS[run.language]["commit"].format(ws_id=run.ws_id),
         )
         # ветка прогона могла получить чужой коммит (возобновление): push
         # и автомерж увезли бы его в базу под видом спеки (ревью #774)
@@ -937,24 +939,43 @@ def _enter_run_branch(ctx: _Ctx, branch: str) -> bool:
     return True
 
 
-def _pr_body(run: PersonalRun) -> str:
-    lines = [
-        (f"Личный путь `dfl`: бриф, дизайн, декомпозиция и задачи — «{run.subject}»."),
-        "",
-        (
+#: тексты spec-PR и коммита спеки по языку прогона (#769)
+_PR_TEXTS = {
+    "ru": {
+        "intro": "Личный путь `dfl`: бриф, дизайн, декомпозиция и задачи — «{subject}».",
+        "passed": (
             "Бриф одобрен владельцем в разговоре; дизайн и декомпозиция прошли "
             "edge-check своих рёбер."
         ),
-    ]
+        "accepted": "Принято вопреки замечаниям edge-check (журнал прогона):",
+        "commit": "spec({ws_id}): личный путь",
+    },
+    "en": {
+        "intro": (
+            'Personal `dfl` path: brief, design, decomposition and tasks — "{subject}".'
+        ),
+        "passed": (
+            "The brief was approved by the owner in conversation; design and "
+            "decomposition passed the edge-check of their edges."
+        ),
+        "accepted": "Accepted despite edge-check findings (run journal):",
+        "commit": "spec({ws_id}): personal path",
+    },
+}
+
+
+def _pr_body(run: PersonalRun) -> str:
+    texts = _PR_TEXTS[run.language]
+    lines = [texts["intro"].format(subject=run.subject), "", texts["passed"]]
     accepted = sorted(
         f"{node}/{edge} {rule}"
         for wave in WAVES.values()
         for node, edge, rule in (_accepted(run, wave) or set())
     )
     if accepted:
-        lines += ["", "Принято вопреки замечаниям edge-check (журнал прогона):"]
+        lines += ["", texts["accepted"]]
         lines += [f"- {key}" for key in accepted]
-    remarks = rp.pr_section(run_dir(run.run_id))
+    remarks = rp.pr_section(run_dir(run.run_id), lang=run.language)
     if remarks:
         lines += ["", remarks.rstrip("\n")]
     return "\n".join(lines) + "\n"
@@ -1205,6 +1226,7 @@ def _manual(ctx: _Ctx, pr: int) -> bool:
         save=lambda: save(run),
         run_dir=run_dir(run.run_id),
         workdir=Path(run.target_dir),
+        lang=run.language,
     )
     if reason is None:
         return True
@@ -1232,7 +1254,11 @@ def _step_code_pr(ctx: _Ctx) -> bool:
     if facts.get("state") == "MERGED":
         run.step = "done"
         done = f"integration-PR #{pr} вмержен — конвейер закончен"
-        tail = mc.summary(mc.checks_of(run.manual), run.manual.get("answers") or {})
+        tail = mc.summary(
+            mc.checks_of(run.manual),
+            run.manual.get("answers") or {},
+            lang=run.language,
+        )
         say(f"{done}; {tail}" if tail else done)
         return True
     # `pr_facts` не отдаёт url — ссылка строится из слага и номера

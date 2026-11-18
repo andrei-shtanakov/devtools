@@ -45,6 +45,32 @@ STAGE_LABELS = {
     "acceptance": "приёмка",
     "decomposition": "декомпозиция",
 }
+#: английские названия тех же этапов (английский прогон личного пути, #769)
+STAGE_LABELS_EN = {
+    "brief": "brief",
+    "charter": "charter",
+    "requirements": "requirements",
+    "behaviour-spec": "behaviour spec",
+    "design": "design",
+    "acceptance": "acceptance",
+    "decomposition": "decomposition",
+}
+#: заголовок раздела PR и строка отклонённых замечаний по языку
+_SECTION_TEXTS = {
+    "ru": (
+        "## Замечания владельца",
+        "не применены (правка удаляла или ослабляла пункты): ",
+    ),
+    "en": (
+        "## Owner's remarks",
+        "not applied (the revision removed or weakened items): ",
+    ),
+}
+
+
+def stage_labels(lang: str = "ru") -> dict[str, str]:
+    """Названия этапов на языке `lang` (умолчание — русские)."""
+    return STAGE_LABELS_EN if lang == "en" else STAGE_LABELS
 
 
 @dataclass(frozen=True)
@@ -168,23 +194,25 @@ def reset(run_dir: Path, stages: Collection[str]) -> None:
         _append(run_dir, {"kind": RESET, "stage": stage})
 
 
-def pr_section(run_dir: Path, stages: Collection[str] | None = None) -> str:
+def pr_section(
+    run_dir: Path, stages: Collection[str] | None = None, *, lang: str = "ru"
+) -> str:
     """Раздел описания PR: применённые замечания списком, отклонённые —
     отдельной строкой; нет ни тех, ни других — пустая строка. `stages` —
-    только эти этапы (candidate-PR волны — её узлы); `None` — все."""
+    только эти этапы (candidate-PR волны — её узлы); `None` — все. `lang` —
+    язык заголовка и названий этапов (текст замечаний — как записан)."""
+    title, not_applied = _SECTION_TEXTS[lang]
+    labels = stage_labels(lang)
     remarks = [r for r in all_remarks(run_dir) if stages is None or r.stage in stages]
-    lines = [f"- {_named(r)}" for r in remarks if r.status == APPLIED]
-    dropped = [_named(r) for r in remarks if r.status == DROPPED]
+    lines = [f"- {_named(r, labels)}" for r in remarks if r.status == APPLIED]
+    dropped = [_named(r, labels) for r in remarks if r.status == DROPPED]
     if dropped:
-        lines += [
-            "",
-            "не применены (правка удаляла или ослабляла пункты): " + "; ".join(dropped),
-        ]
+        lines += ["", not_applied + "; ".join(dropped)]
     if not lines:
         return ""
-    return "## Замечания владельца\n\n" + "\n".join(lines).lstrip("\n") + "\n"
+    return title + "\n\n" + "\n".join(lines).lstrip("\n") + "\n"
 
 
-def _named(remark: Remark) -> str:
-    """«<этап по-русски>: <текст>»."""
-    return f"{STAGE_LABELS.get(remark.stage, remark.stage)}: {remark.text}"
+def _named(remark: Remark, labels: dict[str, str]) -> str:
+    """«<название этапа>: <текст>»."""
+    return f"{labels.get(remark.stage, remark.stage)}: {remark.text}"

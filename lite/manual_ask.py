@@ -49,10 +49,11 @@ def is_wait(reason: str) -> bool:
     return reason in _PAUSED_FORMS or reason.startswith(_WAIT_HEADS)
 
 
-def ask_one(check: mc.ManualCheck, read: Read) -> dict | None:
-    """Ответ на одну проверку: `{"verdict", "note"}`; `None` — стоп/EOF."""
+def ask_one(check: mc.ManualCheck, read: Read, lang: str = "ru") -> dict | None:
+    """Ответ на одну проверку: `{"verdict", "note"}`; `None` — стоп/EOF.
+    Вопрос — на языке `lang` прогона."""
     while True:
-        notice(mc.question(check))
+        notice(mc.question(check, lang=lang))
         answer = read_answer(read, quick=lambda _s: True)
         if answer is None:
             return None
@@ -74,12 +75,12 @@ def ask_one(check: mc.ManualCheck, read: Read) -> dict | None:
                 return {"verdict": verdict, "note": note}
 
 
-def question_of(check: mc.ManualCheck, hint: str) -> pending.Question:
+def question_of(check: mc.ManualCheck, hint: str, lang: str = "ru") -> pending.Question:
     """Вопрос для `dfl pending`; подсказка, на каком коде проверять (#806), —
     в `links`: id вопроса считается от `text`, и подсказка (она зависит от
     состояния PR) не должна его менять — записанный `dfl reply` пропал бы."""
     return pending.Question(
-        pending.MANUAL, check.beh_id, mc.question(check), links=(hint,)
+        pending.MANUAL, check.beh_id, mc.question(check, lang=lang), links=(hint,)
     )
 
 
@@ -145,20 +146,25 @@ def _parsed(text: str | None) -> dict | None:
 
 
 def _answer(
-    check: mc.ManualCheck, read: Read, tty: bool, run_dir: Path | None, hint: str
+    check: mc.ManualCheck,
+    read: Read,
+    tty: bool,
+    run_dir: Path | None,
+    hint: str,
+    lang: str = "ru",
 ) -> dict | str | None:
     """Ответ на проверку: записанный `dfl reply`, из терминала или без него.
 
     Строка — стоп «ждёт ответа»; `None` — человек остановил ввод.
     """
-    q = question_of(check, hint)
+    q = question_of(check, hint, lang)
     if run_dir is None:
-        return ask_one(check, read) if tty else None
+        return ask_one(check, read, lang) if tty else None
     if tty:
         recorded = _parsed(pending.take(run_dir, q))
         if recorded:
             return recorded
-        live = ask_one(check, read)
+        live = ask_one(check, read, lang)
         if live is not None:
             pending.discard(run_dir)  # терминал побеждает: вопрос снят
         return live
@@ -185,6 +191,7 @@ def settle(
     save: Callable[[], None],
     run_dir: Path | None = None,
     workdir: Path | None = None,
+    lang: str = "ru",
 ) -> str | None:
     """Пройти ручные проверки прогона: `None` — пройдено (запись
     `completed`), строка — причина стопа (вызывающий печатает, код 0).
@@ -196,7 +203,10 @@ def settle(
 
     `workdir` — рабочий каталог проекта: в терминале перед вопросами
     печатается, как переключиться на код PR, и предупреждение, если кода PR
-    в нём нет (#806)."""
+    в нём нет (#806).
+
+    `lang` — язык вопросов, issue и комментария (личный путь — язык
+    прогона, #769); enterprise его не передаёт."""
     if "checks" not in record:
         try:
             checks = mc.collect(*load_texts())
@@ -223,7 +233,7 @@ def settle(
         if warning := stale_warning(facts, pr, workdir):
             notice(warning)
     for check in todo:
-        answer = _answer(check, read, tty, run_dir, hint)
+        answer = _answer(check, read, tty, run_dir, hint, lang)
         if isinstance(answer, str):
             return answer
         if answer is None:
@@ -240,6 +250,7 @@ def settle(
             pr_url=pr_url,
             run_id=run_id,
             save=save,
+            lang=lang,
         )
     except Exception as exc:  # noqa: BLE001 - любой сбой форджи — стоп с причиной
         return f"публикация ответов не удалась: {exc} — повторите dfl run"

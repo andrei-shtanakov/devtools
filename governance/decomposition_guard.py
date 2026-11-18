@@ -142,6 +142,28 @@ WAIVER_CONDITIONS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+#: Те же условия по-английски (devtools#769) — для `tasks.md` английского
+#: прогона. Рядом с русскими, а не в рендере: вторая редакция в мосту
+#: разошлась бы молча. Состав классов и число условий равны русским.
+WAIVER_CONDITIONS_EN: dict[str, tuple[str, ...]] = {
+    "characterisation": (
+        "the behaviour is already delivered by the task's dependencies",
+        "the task adds missing characterisation/acceptance coverage",
+        "an honest baseline RED is impossible",
+        (
+            "the new test has a negative control proving it turns red "
+            "when the property is violated"
+        ),
+        "the actual baseline-sha is recorded at the start of the task",
+    ),
+}
+
+
+def waiver_conditions(lang: str = "ru") -> dict[str, tuple[str, ...]]:
+    """Условия классов TDD-waiver на языке `lang` (умолчание — русские)."""
+    return WAIVER_CONDITIONS_EN if lang == "en" else WAIVER_CONDITIONS
+
+
 WAIVER_CLASSES = tuple(WAIVER_CONDITIONS)
 
 #: Объявление waiver'а: класс и санкция ОДНОЙ строкой, разделитель ` · `
