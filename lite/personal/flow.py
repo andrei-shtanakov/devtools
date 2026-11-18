@@ -1100,6 +1100,7 @@ def _manual(ctx: _Ctx, pr: int) -> bool:
         run_id=run.run_id,
         save=lambda: save(run),
         run_dir=run_dir(run.run_id),
+        workdir=Path(run.target_dir),
     )
     if reason is None:
         return True

@@ -152,3 +152,165 @@ def test_settle_publish_error_stops() -> None:
     reason = _settle({}, ["1", "1"], ops=_Ops(boom=True))
     assert reason is not None and reason.startswith("публикация ответов не удалась")
     assert "gh down" in reason
+
+
+# --- #806: на каком коде проверять ------------------------------------------
+
+
+def _git(repo, *args: str) -> str:
+    import subprocess
+
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+@pytest.fixture
+def repo(tmp_path):
+    """Репо с `main` на A и веткой PR на B (B — потомок A)."""
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "config", "user.email", "t@t")
+    _git(tmp_path, "config", "user.name", "t")
+    (tmp_path / "f").write_text("a\n")
+    _git(tmp_path, "add", "f")
+    _git(tmp_path, "commit", "-q", "-m", "A")
+    _git(tmp_path, "switch", "-q", "-c", "pr")
+    (tmp_path / "f").write_text("b\n")
+    _git(tmp_path, "commit", "-q", "-am", "B")
+    head = _git(tmp_path, "rev-parse", "HEAD")
+    _git(tmp_path, "switch", "-q", "main")
+    return tmp_path, head
+
+
+def _open(head: str | None) -> dict:
+    return {"state": "OPEN", "headRefOid": head}
+
+
+def _merged(head: str, merge: str | None) -> dict:
+    commit = {"oid": merge} if merge is not None else None
+    return {"state": "MERGED", "headRefOid": head, "mergeCommit": commit}
+
+
+class _FactsOps(_Ops):
+    def __init__(self, facts: dict | None) -> None:
+        super().__init__()
+        self.facts = facts
+
+    def pr_facts(self, repo_slug: str, pr: int) -> dict:
+        if self.facts is None:
+            raise RuntimeError("gh down")
+        return self.facts
+
+
+def test_question_id_does_not_depend_on_hint() -> None:
+    """Подсказка — в `links`: id прежний, записанный `dfl reply` не пропадёт."""
+    q = ma.question_of(C1, ma.code_hint(9, {}))
+    assert q.text == mc.question(C1)
+    assert q.links == (ma.CHECKOUT_HINT.format(pr=9),)
+    assert q.id == ma.question_of(C1, ma.code_hint(9, _merged("a", "b"))).id
+
+
+def test_code_hint_open_vs_merged() -> None:
+    assert "gh pr checkout 9" in ma.code_hint(9, _open("a"))
+    assert "gh pr checkout 9" in ma.code_hint(9, {})  # форджа молчит
+    merged = ma.code_hint(9, _merged("a", "b"))
+    assert "git pull" in merged and "checkout" not in merged
+
+
+def test_stale_warning_when_working_tree_lacks_pr_code(repo) -> None:
+    path, head = repo
+    assert ma.stale_warning(_open(head), 9, path) == ma.STALE_WARNING.format(pr=9)
+
+
+def test_no_warning_on_pr_branch(repo) -> None:
+    path, head = repo
+    _git(path, "switch", "-q", "pr")
+    assert ma.stale_warning(_open(head), 9, path) is None
+
+
+def test_no_warning_after_merge_commit(repo) -> None:
+    path, head = repo
+    _git(path, "merge", "-q", "--no-ff", "-m", "merge", "pr")
+    merge = _git(path, "rev-parse", "HEAD")
+    assert ma.stale_warning(_merged(head, merge), 9, path) is None
+
+
+def test_no_warning_after_squash_merge(repo) -> None:
+    """Squash: голова PR не предок базы — сверяется коммит мержа."""
+    path, head = repo
+    _git(path, "merge", "-q", "--squash", "pr")
+    _git(path, "commit", "-q", "-m", "squash")
+    squash = _git(path, "rev-parse", "HEAD")
+    assert ma.stale_warning(_merged(head, squash), 9, path) is None
+
+
+def test_merged_but_not_pulled_warns_pull(repo) -> None:
+    path, head = repo
+    warning = ma.stale_warning(_merged(head, "f" * 40), 9, path)
+    assert warning == ma.STALE_MERGED_WARNING.format(pr=9)
+    assert "git pull" in warning
+
+
+def test_warning_when_pr_head_not_fetched(repo) -> None:
+    path, _ = repo
+    assert ma.stale_warning(_open("f" * 40), 9, path) is not None
+
+
+def test_no_warning_when_unknowable(repo, tmp_path_factory) -> None:
+    path, head = repo
+    not_repo = tmp_path_factory.mktemp("plain")
+    assert ma.stale_warning(_open(head), 9, not_repo) is None
+    assert ma.stale_warning(_open(head), 9, None) is None
+    assert ma.stale_warning({}, 9, path) is None
+    assert ma.stale_warning(_open(None), 9, path) is None
+    assert ma.stale_warning(_merged(head, None), 9, path) is None
+
+
+def test_pr_state_swallows_forge_failure() -> None:
+    assert ma.pr_state(_FactsOps(None), "o/r", 9) == {}
+    assert ma.pr_state(_Ops(), "o/r", 9) == {}  # нет pr_facts
+    assert ma.pr_state(_FactsOps(_open("a")), "o/r", 9) == _open("a")
+
+
+def _settle_in(path, facts: dict | None) -> None:
+    reason = ma.settle(
+        {},
+        load_texts=lambda: (BEH, DT),
+        tty=True,
+        read=_reader(["1", "1"]),
+        ops=_FactsOps(facts),
+        repo_slug="o/r",
+        pr=9,
+        pr_url="https://github.com/o/r/pull/9",
+        run_id="R1",
+        save=lambda: None,
+        workdir=path,
+    )
+    assert reason is None
+
+
+def test_settle_prints_hint_once_and_stale_warning(repo, capsys) -> None:
+    path, head = repo
+    _settle_in(path, _open(head))
+    out = capsys.readouterr().out
+    hint = ma.CHECKOUT_HINT.format(pr=9)
+    assert out.count(hint) == 1
+    assert out.index(hint) < out.index("Ручная проверка BEH-01")
+    assert ma.STALE_WARNING.format(pr=9) in out
+
+
+def test_settle_no_warning_on_pr_code(repo, capsys) -> None:
+    path, head = repo
+    _git(path, "switch", "-q", "pr")
+    _settle_in(path, _open(head))
+    out = capsys.readouterr().out
+    assert ma.CHECKOUT_HINT.format(pr=9) in out
+    assert "⚠" not in out
+
+
+def test_settle_forge_down_hint_without_warning(repo, capsys) -> None:
+    path, _ = repo
+    _settle_in(path, None)
+    out = capsys.readouterr().out
+    assert ma.CHECKOUT_HINT.format(pr=9) in out
+    assert "⚠" not in out
