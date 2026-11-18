@@ -101,6 +101,21 @@ def next_question(
 
     Добор и починка — только после неполного конца интервью (`incomplete`),
     как в терминале; пункты с отметкой из `marks` пропускаются."""
+    found = _next(reply, view, marks, incomplete, upstream)
+    if found is None:
+        return None
+    q, data = found
+    return q, {**data, "coverage": coverage(view), "findings": findings(view)}
+
+
+def _next(
+    reply: iv.DiscoveryReply,
+    view: SessionView,
+    marks: Mapping[str, list[str]],
+    incomplete: bool,
+    upstream: str,
+) -> tuple[pending.Question, dict] | None:
+    """Вопрос и данные без покрытия: вопрос `discovery`, добор, починка."""
     q = current_question(reply)
     if q is not None:
         return _question(q, view)
@@ -108,10 +123,7 @@ def next_question(
         return None
     seen = {*marks.get("skipped", ()), *marks.get("done", ())}
     candidates = [*_top_ups(view), *_repairs(reply, view, upstream)]
-    for q_, data in candidates:
-        if q_.key not in seen:
-            return q_, {**data, "coverage": coverage(view), "findings": findings(view)}
-    return None
+    return next(((q_, d) for q_, d in candidates if q_.key not in seen), None)
 
 
 def _question(q: Asked, view: SessionView) -> tuple[pending.Question, dict]:

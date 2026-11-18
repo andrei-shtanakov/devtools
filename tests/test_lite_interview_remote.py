@@ -146,6 +146,8 @@ def test_question_from_code_20() -> None:
     assert ir.HUMAN_PLACEHOLDER in data["prompt"]
     assert "Правила полей" in data["prompt"]
     assert data["topic"] == "jobs"
+    assert data["coverage"] == ir.coverage(view)
+    assert data["findings"] == ir.findings(view)
     assert data["answer"].startswith(f"dfl answer --items <файл> --id {q.id}")
     assert "G-01" not in q.text
 
