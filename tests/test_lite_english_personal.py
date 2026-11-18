@@ -550,6 +550,38 @@ def test_s7_refusal_before_run_in_call_language(
     _clean(out, str(env.tmp))
 
 
+def test_no_unfinished_run_refusal_in_call_language(
+    env: Env,  # noqa: F811
+    world: World,
+    registered: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Голый `dfl run` без прогонов: отказ на языке вызова, а не на языке
+    enterprise-продолжения (живой прогон 18.11)."""
+    monkeypatch.setenv("DFL_LANG", "en")
+    assert env.run("run") == 2
+    out = _screen(capsys)
+    assert "dfl run: refusal (code 2)" in out
+    assert "no unfinished run" in out
+    assert "dfl run --subject '<subject>'" in out
+    _clean(out, str(env.tmp))
+
+
+def test_no_unfinished_run_refusal_ru_unchanged(
+    env: Env,  # noqa: F811
+    world: World,
+    registered: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("DFL_LANG", raising=False)
+    assert env.run("run") == 2
+    out = _screen(capsys)
+    assert "незаконченного прогона нет" in out
+    assert "первый запуск: dfl run --subject '<тема>'" in out
+
+
 def test_wait_line_en_starts_with_wait_prefix() -> None:
     """`manual_ask.is_wait` узнаёт английскую строку ожидания по префиксу."""
     from lite import manual_ask
