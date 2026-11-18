@@ -26,9 +26,24 @@ from lite.personal.state import PersonalRun, run_dir
 #: Волна записи: дизайн проверяется первой, декомпозиция второй.
 WAVES = {"personal-design": 1, "personal-decomposition": 2}
 
-_CRITERIA = re.compile(r"\*\*Критерии:\*\*\s*(.+)$", re.MULTILINE)
+#: Метки читаются в обоих языках: русская и английская пара.
+_CRITERIA = re.compile(r"\*\*(?:Критерии|Criteria):\*\*\s*(.+)$", re.MULTILINE)
 _REF = re.compile(r"FR-\d+/\d+")
-_CHECKS = re.compile(r"^## Проверки\s*$(.*?)(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+_CHECKS = re.compile(
+    r"^## (?:Проверки|Checks)\s*$(.*?)(?=^## |\Z)", re.MULTILINE | re.DOTALL
+)
+#: Каталог контрактов edge-check по языку прогона (`v1-en` — только рёбра
+#: личного пути).
+_CONTRACTS = {"ru": DEFAULT_CONTRACTS, "en": DEFAULT_CONTRACTS.parent / "v1-en"}
+_UNCOVERED = {
+    "ru": "критерий {ref} не покрыт ни одной проверкой BEH",
+    "en": "criterion {ref} is not covered by any BEH check",
+}
+
+
+def contracts_dir(lang: str) -> Path:
+    """Каталог правил edge-check личного пути для языка прогона."""
+    return _CONTRACTS[lang]
 
 
 @dataclass(frozen=True)
@@ -48,7 +63,9 @@ class NodeCheck:
 def check_node(
     run: PersonalRun, kind: str, *, check: Callable = run_check
 ) -> NodeCheck:
-    """Провести ребро узла `kind` и записать результат для журнала."""
+    """Провести ребро узла `kind` и записать результат для журнала.
+
+    Каталог правил и язык запроса — по `run.language`."""
     edge_id, bases = EDGES[kind]
     wave = WAVES[kind]
     bundle = Path(run.target_dir) / run.bundle_dir
@@ -62,8 +79,9 @@ def check_node(
             bundle,
             [bundle / FILENAMES[kind]],
             [(role, bundle / name) for role, name in bases],
-            contracts_dir=DEFAULT_CONTRACTS,
+            contracts_dir=contracts_dir(run.language),
             model=DEFAULT_MODEL,
+            lang=run.language,
         )
     except Exception as exc:  # noqa: BLE001 - прибор не роняет прогон
         return NodeCheck("ERROR", [], f"{type(exc).__name__}: {exc}")
@@ -103,8 +121,10 @@ def _cited(checks: str) -> set[str]:
     return {ref for m in _CRITERIA.finditer(checks) for ref in _REF.findall(m[1])}
 
 
-def decomposition_problems(text: str, brief: Brief) -> list[str]:
-    """Нарушения графа DT/BEH и критерии брифа, не покрытые ни одним BEH."""
+def decomposition_problems(text: str, brief: Brief, *, lang: str = "ru") -> list[str]:
+    """Нарушения графа DT/BEH и критерии брифа, не покрытые ни одним BEH.
+
+    `lang` — язык собственных текстов (уходят автору в промпт правки)."""
     checks, whole = split_decomposition(text)
     problems = list(graph_findings(checks, whole))
     cited = _cited(checks)
@@ -112,5 +132,5 @@ def decomposition_problems(text: str, brief: Brief) -> list[str]:
         for k in range(1, len(fn.criteria) + 1):
             ref = f"{fn.id}/{k}"
             if ref not in cited:
-                problems.append(f"критерий {ref} не покрыт ни одной проверкой BEH")
+                problems.append(_UNCOVERED[lang].format(ref=ref))
     return problems

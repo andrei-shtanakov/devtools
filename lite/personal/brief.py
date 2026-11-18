@@ -27,6 +27,77 @@ CONTEXT_LABELS: tuple[tuple[str, str], ...] = (
     ("platform", "Платформа"),
 )
 OTHER_LABEL = "Прочее"
+CONTEXT_LABELS_EN: tuple[tuple[str, str], ...] = (
+    ("users", "Users"),
+    ("auth", "Authorization"),
+    ("network", "Network"),
+    ("local", "Local system"),
+    ("platform", "Platform"),
+)
+OTHER_LABEL_EN = "Other"
+
+#: Заголовки и метки `render_brief` по языку прогона.
+_HEADINGS = {
+    "ru": {
+        "goals": "Цели",
+        "functions": "Функции",
+        "context": "Контекст",
+        "open": "Уточнить",
+        "fn_goals": "Цели",
+        "criteria": "Критерии приёмки",
+        "words": "Слова владельца",
+    },
+    "en": {
+        "goals": "Goals",
+        "functions": "Functions",
+        "context": "Context",
+        "open": "To clarify",
+        "fn_goals": "Goals",
+        "criteria": "Acceptance criteria",
+        "words": "Owner's words",
+    },
+}
+
+#: Тексты `brief_problems`/`demote_uncovered` по языку: уходят агенту
+#: (реплика `check`) и в раздел «Уточнить» брифа.
+_PROBLEMS = {
+    "ru": {
+        "no_goal": "бриф: нет ни одной цели (G-01)",
+        "no_function": "бриф: нет ни одной функции (FR-01)",
+        "not_unique": "{item}: id не уникален",
+        "out_of_order": "{item}: id не по порядку, ожидался {expected}",
+        "empty_goal_title": "{id}: пустое название цели",
+        "empty_goal_text": "{id}: пустой текст цели",
+        "no_criterion": "{id}: нет критерия приёмки",
+        "empty_fn_title": "{id}: пустое название функции",
+        "empty_criterion": "{id}: критерий {k} пуст",
+        "no_goal_ref": "{id}: нет ссылки на цель",
+        "unknown_goal": "{id}: цель {goal} не существует",
+        "empty_context": "контекст: пустое поле «{label}»",
+        "untitled": "функция без названия",
+        "demoted": "{title}: нет критерия приёмки",
+    },
+    "en": {
+        "no_goal": "brief: no goal at all (G-01)",
+        "no_function": "brief: no function at all (FR-01)",
+        "not_unique": "{item}: id is not unique",
+        "out_of_order": "{item}: id out of order, expected {expected}",
+        "empty_goal_title": "{id}: empty goal title",
+        "empty_goal_text": "{id}: empty goal text",
+        "no_criterion": "{id}: no acceptance criterion",
+        "empty_fn_title": "{id}: empty function title",
+        "empty_criterion": "{id}: criterion {k} is empty",
+        "no_goal_ref": "{id}: no reference to a goal",
+        "unknown_goal": "{id}: goal {goal} does not exist",
+        "empty_context": 'context: empty field "{label}"',
+        "untitled": "untitled function",
+        "demoted": "{title}: no acceptance criterion",
+    },
+}
+
+
+def _context_labels(lang: str) -> tuple[tuple[str, str], ...]:
+    return CONTEXT_LABELS_EN if lang == "en" else CONTEXT_LABELS
 
 
 @dataclass(frozen=True)
@@ -133,45 +204,49 @@ def _render_goal(g: Goal) -> str:
     return f"### {g.id}: {g.title}\n{g.text}\n"
 
 
-def _render_function(f: Function) -> str:
+def _render_function(f: Function, h: dict[str, str]) -> str:
     criteria = "\n".join(f"- {c}" for c in f.criteria)
     return (
         f"### {f.id}: {f.title}\n"
-        f"**Цели:** {', '.join(f.goals)}\n"
-        f"**Критерии приёмки:**\n{criteria}\n"
-        f"**Слова владельца:** {f.words}\n"
+        f"**{h['fn_goals']}:** {', '.join(f.goals)}\n"
+        f"**{h['criteria']}:**\n{criteria}\n"
+        f"**{h['words']}:** {f.words}\n"
     )
 
 
-def _render_context(c: Context) -> str:
-    lines = [f"- {label}: {getattr(c, key)}" for key, label in CONTEXT_LABELS]
+def _render_context(c: Context, lang: str) -> str:
+    lines = [f"- {label}: {getattr(c, key)}" for key, label in _context_labels(lang)]
     if c.other:
-        lines.append(f"- {OTHER_LABEL}: {c.other}")
+        other = OTHER_LABEL_EN if lang == "en" else OTHER_LABEL
+        lines.append(f"- {other}: {c.other}")
     return "\n".join(lines) + "\n"
 
 
-def render_brief(b: Brief) -> str:
-    """Render the brief in the exact Markdown format of spec §4.3."""
+def render_brief(b: Brief, *, lang: str = "ru") -> str:
+    """Render the brief in the exact Markdown format of spec §4.3.
+
+    `lang` — run language: headings and labels (`ru` by default)."""
+    h = _HEADINGS[lang]
+    functions = "\n".join(_render_function(f, h) for f in b.functions)
     parts = [
-        "## Цели\n\n" + "\n".join(_render_goal(g) for g in b.goals),
-        "## Функции\n\n" + "\n".join(_render_function(f) for f in b.functions),
-        "## Контекст\n\n" + _render_context(b.context),
+        f"## {h['goals']}\n\n" + "\n".join(_render_goal(g) for g in b.goals),
+        f"## {h['functions']}\n\n" + functions,
+        f"## {h['context']}\n\n" + _render_context(b.context, lang),
     ]
     if b.open_items:
-        parts.append(
-            "## Уточнить\n\n" + "\n".join(f"- {i}" for i in b.open_items) + "\n"
-        )
+        items = "\n".join(f"- {i}" for i in b.open_items)
+        parts.append(f"## {h['open']}\n\n" + items + "\n")
     return "\n".join(parts)
 
 
-def _id_problems(ids: list[str], prefix: str) -> list[str]:
+def _id_problems(ids: list[str], prefix: str, p: dict[str, str]) -> list[str]:
     problems = []
     for pos, item in enumerate(ids, start=1):
         expected = f"{prefix}-{pos:02d}"
         if ids.count(item) > 1:
-            problems.append(f"{item}: id не уникален")
+            problems.append(p["not_unique"].format(item=item))
         elif item != expected:
-            problems.append(f"{item}: id не по порядку, ожидался {expected}")
+            problems.append(p["out_of_order"].format(item=item, expected=expected))
     return problems
 
 
@@ -179,61 +254,64 @@ def _has_criteria(f: Function) -> bool:
     return any(c.strip() for c in f.criteria)
 
 
-def _function_problems(f: Function, goal_ids: set[str]) -> list[str]:
+def _function_problems(f: Function, goal_ids: set[str], p: dict[str, str]) -> list[str]:
     problems = []
     if not _has_criteria(f):
-        problems.append(f"{f.id}: нет критерия приёмки")
+        problems.append(p["no_criterion"].format(id=f.id))
     if not f.title.strip():
-        problems.append(f"{f.id}: пустое название функции")
+        problems.append(p["empty_fn_title"].format(id=f.id))
     problems += [
-        f"{f.id}: критерий {k} пуст"
+        p["empty_criterion"].format(id=f.id, k=k)
         for k, c in enumerate(f.criteria, start=1)
         if not c.strip()
     ]
     if not f.goals:
-        problems.append(f"{f.id}: нет ссылки на цель")
+        problems.append(p["no_goal_ref"].format(id=f.id))
     problems += [
-        f"{f.id}: цель {g} не существует" for g in f.goals if g not in goal_ids
+        p["unknown_goal"].format(id=f.id, goal=g) for g in f.goals if g not in goal_ids
     ]
     return problems
 
 
-def brief_problems(b: Brief) -> list[str]:
-    """Own check of spec §4.3; each problem text names the offending id."""
+def brief_problems(b: Brief, *, lang: str = "ru") -> list[str]:
+    """Own check of spec §4.3; each problem text names the offending id.
+
+    `lang` — run language of the texts (they go to the interviewer agent)."""
+    p = _PROBLEMS[lang]
     problems = []
     if not b.goals:
-        problems.append("бриф: нет ни одной цели (G-01)")
+        problems.append(p["no_goal"])
     if not b.functions:
-        problems.append("бриф: нет ни одной функции (FR-01)")
-    problems += _id_problems([g.id for g in b.goals], "G")
-    problems += _id_problems([f.id for f in b.functions], "FR")
+        problems.append(p["no_function"])
+    problems += _id_problems([g.id for g in b.goals], "G", p)
+    problems += _id_problems([f.id for f in b.functions], "FR", p)
     for g in b.goals:
         if not g.title.strip():
-            problems.append(f"{g.id}: пустое название цели")
+            problems.append(p["empty_goal_title"].format(id=g.id))
         if not g.text.strip():
-            problems.append(f"{g.id}: пустой текст цели")
+            problems.append(p["empty_goal_text"].format(id=g.id))
     goal_ids = {g.id for g in b.goals}
     for f in b.functions:
-        problems += _function_problems(f, goal_ids)
+        problems += _function_problems(f, goal_ids, p)
     problems += [
-        f"контекст: пустое поле «{label}»"
-        for key, label in CONTEXT_LABELS
+        p["empty_context"].format(label=label)
+        for key, label in _context_labels(lang)
         if not getattr(b.context, key).strip()
     ]
     return problems
 
 
-def demote_uncovered(b: Brief) -> Brief:
+def demote_uncovered(b: Brief, *, lang: str = "ru") -> Brief:
     """Move FRs without criteria into `open_items` (they stay for the owner).
 
     The note names the function by title only: kept FRs are renumbered, so
-    the old id may now denote another function."""
+    the old id may now denote another function. `lang` — language of the note."""
     bare = [f for f in b.functions if not _has_criteria(f)]
     if not bare:
         return b
+    p = _PROBLEMS[lang]
     notes = tuple(
-        f"{f.title.strip() or 'функция без названия'}: нет критерия приёмки"
-        for f in bare
+        p["demoted"].format(title=f.title.strip() or p["untitled"]) for f in bare
     )
     kept = [f for f in b.functions if _has_criteria(f)]
     return replace(

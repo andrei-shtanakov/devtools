@@ -78,6 +78,7 @@ def run_check(
     timeout: int = 600,
     call: Callable[[str], str] | None = None,
     lookup: Callable[[dict], dict | None] | None = None,
+    lang: str = "ru",
 ) -> dict:
     """Провести одну проверку ребра и вернуть запись результата (спека §4.3).
 
@@ -91,6 +92,9 @@ def run_check(
     когда вход ребра уже посчитан (subject, основания, отсутствия,
     `check_identity`), но модель ещё не вызвана. Вернул запись — она и есть
     результат, без нового вызова и без новой попытки.
+
+    `lang` — язык заголовков запроса (`prompt.build_prompt`); каталог правил
+    выбирает вызывающий (`contracts_dir`).
     """
     started = _now()
     attempt_id = uuid.uuid4().hex
@@ -159,7 +163,7 @@ def run_check(
         return finish("N/A", reason=f"основание отсутствует, разрешено правилом {ids}")
 
     try:
-        built = prompt_mod.build_prompt(ruleset, prepared)
+        built = prompt_mod.build_prompt(ruleset, prepared, lang=lang)
     except EdgeCheckError as exc:
         return finish("ERROR", code=exc.code, reason=str(exc))
 

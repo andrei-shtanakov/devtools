@@ -45,7 +45,9 @@ MAX_CHECKS_IN_ROW = 3
 MAX_FORM_ERRORS = 2
 TRANSCRIPT = "interview.jsonl"
 PROMPT_PATH = Path(__file__).parent / "prompts" / "interviewer.md"
+PROMPT_PATHS = {"ru": PROMPT_PATH, "en": PROMPT_PATH.parent / "en" / PROMPT_PATH.name}
 CAP_NOTE = "СЕЙЧАС: лимит вопросов исчерпан"
+CAP_NOTES = {"ru": CAP_NOTE, "en": "NOW: the question limit is reached"}
 CONFIRM = "Верно? 1. да · 2. поправить: <что>"
 #: префикс правки в журнале интервью по языку прогона
 FIX_PREFIXES = {"ru": "поправить: ", "en": "fix: "}
@@ -69,11 +71,46 @@ CORRUPT_LINE = "строка журнала интервью не прочита
 _FIX_PREFIX = re.compile(
     r"^\s*(?:2\s*[.):](?!\d)\s*)?(?:(?:поправить|fix)\s*:?\s*)?", re.IGNORECASE
 )
-_SPEAKERS = {"human": "Человек", "check": "Проверка брифа (человек её не видел)"}
+_SPEAKERS = {
+    "ru": {"human": "Человек", "check": "Проверка брифа (человек её не видел)"},
+    "en": {"human": "Person", "check": "Brief check (the person has not seen it)"},
+}
 _AGENT_SPEAKERS = {
-    "ask": "Интервьюер",
-    "brief": "Интервьюер (бриф)",
-    "summary": "Интервьюер (сводка человеку)",
+    "ru": {
+        "": "Интервьюер",
+        "ask": "Интервьюер",
+        "brief": "Интервьюер (бриф)",
+        "summary": "Интервьюер (сводка человеку)",
+    },
+    "en": {
+        "": "Interviewer",
+        "ask": "Interviewer",
+        "brief": "Interviewer (brief)",
+        "summary": "Interviewer (summary to the person)",
+    },
+}
+#: Прочие тексты промпта интервьюера по языку прогона.
+_PROMPT_TEXTS = {
+    "ru": {
+        "subject": "## Тема проекта (слова человека)\n\n{subject}",
+        "talk": "## Разговор\n\n{talk}",
+        "empty": "(разговор ещё не начат)",
+        "cap": '{note}: вопросов больше не задавай, ответь {{"brief": …}}.',
+        "error": (
+            "Прошлый ответ не по форме: {error}. "
+            "Ответь ровно одним JSON-объектом по формату выше."
+        ),
+    },
+    "en": {
+        "subject": "## Project topic (the person's words)\n\n{subject}",
+        "talk": "## Conversation\n\n{talk}",
+        "empty": "(the conversation has not started yet)",
+        "cap": '{note}: ask no more questions, answer {{"brief": …}}.',
+        "error": (
+            "The previous answer was not in the format: {error}. "
+            "Answer with exactly one JSON object in the format above."
+        ),
+    },
 }
 
 Entry = dict[str, Any]
@@ -146,13 +183,16 @@ def _parse_entry(line: str) -> Entry | None:
     return None
 
 
-def interview(run_dir: Path, subject: str, *, read: Read, agent: Agent) -> Brief | Halt:
+def interview(
+    run_dir: Path, subject: str, *, read: Read, agent: Agent, lang: str = "ru"
+) -> Brief | Halt:
     """Вести свободное интервью; подтверждённый человеком бриф или `Halt`.
 
     `Halt.PAUSED` — человек остановился (`/стоп`, EOF, Ctrl-C, «пропустить»
     на подтверждении); `Halt.FAILED` — агент дважды подряд ответил не по
     форме или недоступен (сообщение уже выведено). Разговор хранится в `run_dir / TRANSCRIPT` и продолжается с него.
-    Число платных вызовов агента печатается один раз в конце."""
+    Число платных вызовов агента печатается один раз в конце. `lang` — язык
+    прогона: промпт агента, проверки брифа и сводка."""
     calls = 0
 
     def counted(prompt: str) -> str:
@@ -161,7 +201,7 @@ def interview(run_dir: Path, subject: str, *, read: Read, agent: Agent) -> Brief
         return agent(prompt)
 
     try:
-        return _converse(_Log(run_dir / TRANSCRIPT), subject, read, counted)
+        return _converse(_Log(run_dir / TRANSCRIPT), subject, read, counted, lang)
     except _Stop:
         return Halt.PAUSED
     except _Failed:
@@ -190,25 +230,28 @@ def append_correction(run_dir: Path, text: str, *, lang: str = "ru") -> None:
     log.append({"role": "human", "text": fix})
 
 
-def _converse(log: _Log, subject: str, read: Read, agent: Agent) -> Brief:
+def _converse(
+    log: _Log, subject: str, read: Read, agent: Agent, lang: str = "ru"
+) -> Brief:
     """Цикл разговора до подтверждённого брифа (остановка — `_Stop`)."""
     while True:
         pending = _pending_ask(log.entries)
         if pending is not None:
             _answer(pending, log, read)
             continue
-        turn = _next_turn(log.entries, subject, agent)
+        turn = _next_turn(log.entries, subject, agent, lang)
         if isinstance(turn, AskTurn):
             log.append(_ask_entry(turn))
             continue
-        brief = _settle_brief(turn, log)
+        brief = _settle_brief(turn, log, lang)
         if brief is None:
             continue
         if not brief.goals or not brief.functions:
             _nothing_to_build(turn, log, read)
             continue
-        log.append({"role": "agent", "kind": "summary", "text": render_brief(brief)})
-        if _confirmed(brief, log, read):
+        summary = render_brief(brief, lang=lang)
+        log.append({"role": "agent", "kind": "summary", "text": summary})
+        if _confirmed(summary, log, read):
             return brief
 
 
@@ -265,12 +308,15 @@ def _resolve_option(text: str, options: tuple[str, ...]) -> str:
     return text
 
 
-def _next_turn(entries: list[Entry], subject: str, agent: Agent) -> AskTurn | BriefTurn:
+def _next_turn(
+    entries: list[Entry], subject: str, agent: Agent, lang: str = "ru"
+) -> AskTurn | BriefTurn:
     """Ход агента; ответ не по форме — один повтор с причиной, затем стоп."""
     at_cap = _questions(entries) >= MAX_QUESTIONS
     error = ""
     for _ in range(MAX_FORM_ERRORS):
-        raw = agent(build_prompt(entries, subject, at_cap=at_cap, error=error))
+        prompt = build_prompt(entries, subject, at_cap=at_cap, error=error, lang=lang)
+        raw = agent(prompt)
         try:
             return parse_turn(raw, allow_ask=not at_cap)
         except FormError as exc:
@@ -280,34 +326,40 @@ def _next_turn(entries: list[Entry], subject: str, agent: Agent) -> AskTurn | Br
 
 
 def build_prompt(
-    entries: list[Entry], subject: str, *, at_cap: bool = False, error: str = ""
+    entries: list[Entry],
+    subject: str,
+    *,
+    at_cap: bool = False,
+    error: str = "",
+    lang: str = "ru",
 ) -> str:
-    """Промпт интервьюера: инструкция, тема, разговор и (если есть) пометки."""
-    talk = "\n\n".join(_render_entry(e) for e in entries) or "(разговор ещё не начат)"
+    """Промпт интервьюера: инструкция, тема, разговор и (если есть) пометки.
+
+    `lang` — язык прогона: инструкция и все добавляемые кодом тексты."""
+    texts = _PROMPT_TEXTS[lang]
+    talk = "\n\n".join(_render_entry(e, lang) for e in entries) or texts["empty"]
     parts = [
-        PROMPT_PATH.read_text(encoding="utf-8"),
-        f"## Тема проекта (слова человека)\n\n{subject}",
-        f"## Разговор\n\n{talk}",
+        PROMPT_PATHS[lang].read_text(encoding="utf-8"),
+        texts["subject"].format(subject=subject),
+        texts["talk"].format(talk=talk),
     ]
     if at_cap:
-        parts.append(f'{CAP_NOTE}: вопросов больше не задавай, ответь {{"brief": …}}.')
+        parts.append(texts["cap"].format(note=CAP_NOTES[lang]))
     if error:
-        parts.append(
-            f"Прошлый ответ не по форме: {error}. "
-            "Ответь ровно одним JSON-объектом по формату выше."
-        )
+        parts.append(texts["error"].format(error=error))
     return "\n\n".join(parts)
 
 
-def _render_entry(entry: Entry) -> str:
+def _render_entry(entry: Entry, lang: str = "ru") -> str:
     role = entry.get("role")
     if role == "agent":
-        speaker = _AGENT_SPEAKERS.get(str(entry.get("kind")), "Интервьюер")
+        speakers = _AGENT_SPEAKERS[lang]
+        speaker = speakers.get(str(entry.get("kind")), speakers[""])
         options = entry.get("options") or []
         lines = [str(entry["text"])]
         lines += [f"{n}. {o}" for n, o in enumerate(options, start=1)]
         return f"{speaker}: " + "\n".join(lines)
-    return f"{_SPEAKERS.get(str(role), str(role))}: {entry['text']}"
+    return f"{_SPEAKERS[lang].get(str(role), str(role))}: {entry['text']}"
 
 
 def parse_turn(raw: str, *, allow_ask: bool = True) -> AskTurn | BriefTurn:
@@ -333,7 +385,7 @@ def _ask_turn(doc: dict[str, Any]) -> AskTurn:
     return AskTurn(question.strip(), tuple(o.strip() for o in options if o.strip()))
 
 
-def _settle_brief(turn: BriefTurn, log: _Log) -> Brief | None:
+def _settle_brief(turn: BriefTurn, log: _Log, lang: str = "ru") -> Brief | None:
     """Бриф к сводке или `None` (проблемы отправлены агенту репликой `check`).
 
     На лимите вопросов или после `MAX_CHECKS_IN_ROW` проверок подряд бриф
@@ -343,10 +395,10 @@ def _settle_brief(turn: BriefTurn, log: _Log) -> Brief | None:
         _questions(entries) >= MAX_QUESTIONS
         or _checks_in_row(entries) >= MAX_CHECKS_IN_ROW
     )
-    problems = brief_problems(turn.brief)
+    problems = brief_problems(turn.brief, lang=lang)
     if forced:
-        demoted = demote_uncovered(turn.brief)
-        rest = tuple(brief_problems(demoted))
+        demoted = demote_uncovered(turn.brief, lang=lang)
+        rest = tuple(brief_problems(demoted, lang=lang))
         return replace(demoted, open_items=demoted.open_items + rest)
     if not problems:
         return turn.brief
@@ -370,10 +422,10 @@ def _checks_in_row(entries: list[Entry]) -> int:
     return count
 
 
-def _confirmed(brief: Brief, log: _Log, read: Read) -> bool:
-    """Сводка и «верно?»: «1»/«да»/«верно»/«ок» — да; «пропустить», `/стоп`,
-    EOF — стоп; иное (и «не знаю») — поправка записывается, `False`."""
-    say(render_brief(brief))
+def _confirmed(summary: str, log: _Log, read: Read) -> bool:
+    """Сводка `summary` и «верно?»: «1»/«да»/«верно»/«ок» — да; «пропустить»,
+    `/стоп`, EOF — стоп; иное (и «не знаю») — поправка записывается, `False`."""
+    say(summary)
     while True:
         say(i18n.t(CONFIRM))
         text = read_answer(read, quick=str.isdigit)

@@ -1,0 +1,28 @@
+edge: personal-decomposition-vs-design-brief
+subject_role: personal-decomposition
+basis_roles: [design, brief]
+items:
+  - id: R1
+    text: >-
+      Every acceptance criterion of the brief (FR-NN/k; k is the item number in
+      the "Acceptance criteria" list of function FR-NN, starting from one) is
+      covered by at least one `#### BEH-NN` check of the decomposition (the
+      `**Criteria:**` line).
+  - id: R2
+    text: >-
+      Every DT task relies on the design decision it implements.
+  - id: R3
+    text: >-
+      Every check has a `**checked_by**` line with `kind` and `target`.
+  - id: R4
+    text: >-
+      The decomposition references only existing FR-NN/k of the brief and D-NN
+      of the design.
+  - id: R5
+    text: >-
+      A DT task introduces no obligations that are not in the design and the
+      brief.
+severity:
+  blocking: [blocker, major]
+  advisory: [minor]
+applicability: []

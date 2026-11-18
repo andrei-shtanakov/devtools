@@ -51,13 +51,14 @@ def triage(
     agent: Agent,
     *,
     cache_dir: Path | None = None,
+    lang: str = "ru",
 ) -> list[Item]:
     """Отсортировать находки на `fix`/`decision`.
 
     `nodes`/`bases` — имя файла → текст. `cache_dir` — каталог прогона:
     результат кладётся в `edge-triage/<sha256>.json` и при том же хэше входа
     читается вместо вызова агента. Ответ не по схеме — `FormError`,
-    агент недоступен — `AgentUnavailable`.
+    агент недоступен — `AgentUnavailable`. `lang` — язык промпта агента.
     """
     cache = _cache_path(cache_dir, findings, nodes, bases, prior)
     cached = _read_cache(cache)
@@ -66,7 +67,8 @@ def triage(
             return _from_json(findings, cached)
         except FormError:
             pass  # кэш не по схеме — спросим агента заново
-    raw = first_json_object(agent(_prompt(findings, nodes, bases, prior)))
+    prompt = build_prompt(findings, nodes, bases, prior, lang=lang)
+    raw = first_json_object(agent(prompt))
     decided = {k for k, r in recall(prior, findings).items() if r.decided}
     items = _parse(findings, raw, decided)
     if cache is not None:
@@ -207,23 +209,17 @@ def _from_json(findings: list[Finding], raw: dict[str, Any]) -> list[Item]:
     return _parse(findings, raw, set())
 
 
-def _prompt(
-    findings: list[Finding],
-    nodes: dict[str, str],
-    bases: dict[str, str],
-    prior: list[Decision],
-) -> str:
-    """Промпт агента: пронумерованные находки, тексты, прошлые решения."""
-    listed = "\n".join(
-        f"{n}. [{f.cls}] узел {f.node}, ребро {f.edge}, правило {f.rule_id}, "
-        f"{f.path or '-'}:{f.lines}\n   {f.statement}"
-        for n, f in enumerate(findings, 1)
-    )
-    decided = "\n".join(
-        f"- {' / '.join(d.key)}: вопрос «{d.question}», ответ «{d.answer}»"
-        for d in prior
-    )
-    return f"""\
+_LINE = {
+    "ru": "{n}. [{cls}] узел {node}, ребро {edge}, правило {rule}, {where}\n   {text}",
+    "en": "{n}. [{cls}] node {node}, edge {edge}, rule {rule}, {where}\n   {text}",
+}
+_DECIDED = {
+    "ru": "- {key}: вопрос «{question}», ответ «{answer}»",
+    "en": '- {key}: question "{question}", answer "{answer}"',
+}
+_NONE = {"ru": "нет", "en": "none"}
+_TEMPLATES = {
+    "ru": """\
 Ты сортируешь замечания смыслового ревью (edge-check) к узлу спецификации.
 Каждое замечание — ровно один пункт: `fix` или `decision`.
 
@@ -251,14 +247,91 @@ def _prompt(
 {listed}
 
 Прошлые решения человека:
-{decided or "нет"}
+{decided}
 
 Тексты узлов:
-{_files(nodes)}
+{nodes}
 
 Тексты оснований:
-{_files(bases)}
-"""
+{bases}
+""",
+    "en": """\
+You sort the findings of a semantic review (edge-check) of a specification node.
+Every finding is exactly one item: `fix` or `decision`.
+
+- `fix` — the correction is obvious from the text and the bases; the agent
+  fixes it itself without asking the person. `question` is empty, `options`
+  is empty.
+- `decision` — the person's choice is needed: a question and 2–3 options,
+  exactly one of them `recommended: true`. An option's `removes` — ids of
+  removed requirements, `downgrades` — ids of requirements whose Must is
+  lowered.
+
+Rules:
+1. Removing a requirement, lowering Must and dropping a scenario are allowed
+   only as a `decision` whose option declares it in `removes`/`downgrades`.
+   Never as a `fix`.
+2. If the cause of the finding lies in an approved node higher up the chain
+   (a foreign id, a goal outside the basis), it must not be changed: this is
+   a `decision` with options inside the current node.
+3. A finding with a past decision of the person needs no question — `fix`.
+
+Write the questions and options in English.
+Answer with one JSON object without prose:
+{{"items": [{{"finding": <number>, "kind": "fix"|"decision",
+"question": "...", "options": [{{"label": "...", "recommended": true,
+"removes": [], "downgrades": []}}]}}]}}
+
+Findings:
+{listed}
+
+Past decisions of the person:
+{decided}
+
+Node texts:
+{nodes}
+
+Basis texts:
+{bases}
+""",
+}
+
+
+def build_prompt(
+    findings: list[Finding],
+    nodes: dict[str, str],
+    bases: dict[str, str],
+    prior: list[Decision],
+    *,
+    lang: str = "ru",
+) -> str:
+    """Промпт агента: пронумерованные находки, тексты, прошлые решения.
+
+    `lang` — язык прогона: инструкция и подписи (`ru` по умолчанию)."""
+    listed = "\n".join(
+        _LINE[lang].format(
+            n=n,
+            cls=f.cls,
+            node=f.node,
+            edge=f.edge,
+            rule=f.rule_id,
+            where=f"{f.path or '-'}:{f.lines}",
+            text=f.statement,
+        )
+        for n, f in enumerate(findings, 1)
+    )
+    decided = "\n".join(
+        _DECIDED[lang].format(
+            key=" / ".join(d.key), question=d.question, answer=d.answer
+        )
+        for d in prior
+    )
+    return _TEMPLATES[lang].format(
+        listed=listed,
+        decided=decided or _NONE[lang],
+        nodes=_files(nodes),
+        bases=_files(bases),
+    )
 
 
 def _files(files: dict[str, str]) -> str:

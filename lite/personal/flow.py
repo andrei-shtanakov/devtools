@@ -54,6 +54,12 @@ INTERVIEW_PAUSED = f"интервью прервано — {RETRY}"
 #: хвост стопов, после которых прогон может быть проще начать заново
 ABANDON = "бросить прогон и начать заново — dfl abandon"
 _RECHECK = (Outcome.REVISED, Outcome.OVERRIDDEN)
+#: строки промпта правки автора по языку прогона (`run.language`)
+_INVARIANT = {
+    "ru": "- инвариант декомпозиции: {p}",
+    "en": "- decomposition invariant: {p}",
+}
+_NONE = {"ru": "нет", "en": "none"}
 _GIT_ERRORS = (RuntimeError, subprocess.CalledProcessError, OSError)
 #: шаги до spec-PR: впереди платные интервью и авторинг — дерево и ветка
 #: проверяются до них (`_guard` без git-эффектов)
@@ -183,7 +189,10 @@ def _step_interview(ctx: _Ctx) -> bool:
 
 def _interview(ctx: _Ctx, rd: Path) -> bool:
     """Интервью до подтверждённого брифа и его запись; `False` — пауза/стоп."""
-    brief = interview(rd, ctx.run.subject, read=ctx.read, agent=ctx.agent)
+    # `lang` — только не по умолчанию: русский вызов прежний (подмены
+    # `interview` в тестах держат прежнюю сигнатуру)
+    lang = {"lang": ctx.run.language} if ctx.run.language != "ru" else {}
+    brief = interview(rd, ctx.run.subject, read=ctx.read, agent=ctx.agent, **lang)
     if brief is Halt.PAUSED:  # человек прервал — пауза, не сбой (код 0)
         ctx.run.stop_reason = INTERVIEW_PAUSED
         say(INTERVIEW_PAUSED)
@@ -200,7 +209,8 @@ def _write_brief(ctx: _Ctx, rd: Path, brief: Brief) -> None:
         encoding="utf-8",
     )
     ctx.bundle.mkdir(parents=True, exist_ok=True)
-    (ctx.bundle / FILENAMES["brief"]).write_text(render_brief(brief), encoding="utf-8")
+    text = render_brief(brief, lang=ctx.run.language)
+    (ctx.bundle / FILENAMES["brief"]).write_text(text, encoding="utf-8")
     _approve_brief(rd / APPROVALS)
 
 
@@ -263,7 +273,7 @@ def _decomposition_ready(ctx: _Ctx) -> bool:
     path = ctx.bundle / FILENAMES[kind]
     for round_no in range(1, MAX_ROUNDS + 2):
         text = path.read_text(encoding="utf-8")
-        problems = decomposition_problems(text, brief)
+        problems = decomposition_problems(text, brief, lang=ctx.run.language)
         if not problems:
             return True
         if round_no > MAX_ROUNDS:
@@ -292,9 +302,10 @@ def _fix_invariants(ctx: _Ctx, kind: str, before: str, problems: list[str]) -> b
             kind,
             run.subject,
             before,
-            "\n".join(f"- инвариант декомпозиции: {p}" for p in problems),
-            "нет",
+            "\n".join(_INVARIANT[run.language].format(p=p) for p in problems),
+            _NONE[run.language],
             launch=ctx.launch,
+            lang=run.language,
         )
         reason = None
         if outcome.code != 0:
@@ -344,7 +355,7 @@ def _node(ctx: _Ctx, kind: str) -> bool:
     name = FILENAMES[kind]
     if not (ctx.bundle / name).exists():
         ctx.calls.author += 1
-        outcome = author_node(ctx.run, kind, launch=ctx.launch)
+        outcome = author_node(ctx.run, kind, launch=ctx.launch, lang=ctx.run.language)
         if outcome.code != 0:
             return ctx.stop(
                 f"автор {name} не написал узел: {outcome.reason or outcome.code}"
@@ -421,7 +432,9 @@ def _node_rounds(ctx: _Ctx, kind: str, saved: dict | None) -> bool | None:
             result.findings,
             read=ctx.read,
             agent=ctx.agent,
-            revise=functools.partial(revise_node, launch=ctx.launch),
+            revise=functools.partial(
+                revise_node, launch=ctx.launch, lang=ctx.run.language
+            ),
             round_no=round_no,
             calls=ctx.calls,
         )
@@ -490,6 +503,7 @@ def _scope(ctx: _Ctx, kind: str, waiting: er.Waiting) -> Scope:
         subject=run.subject,
         ask=None if ctx.tty() else pending.asker(rd),
         waiting=waiting,
+        lang=run.language,
     )
 
 
@@ -674,12 +688,13 @@ def _revise_by_owner(ctx: _Ctx, stage: str, batch: list[rp.Remark]) -> bool:
     rd = run_dir(ctx.run.run_id)
     outcome, detail = orv.revise_by_owner(
         ctx.bundle / FILENAMES[kind],
-        orv.decisions(batch),
+        orv.decisions(batch, lang=ctx.run.language),
         revise=functools.partial(_owner_revise, ctx, kind),
         read=ctx.read,
         ask=None if ctx.tty() else pending.asker(rd),
         store=rd,
         stage=stage,
+        lang=ctx.run.language,
     )
     if outcome == orv.ACCEPTED:
         return True
@@ -704,9 +719,10 @@ def _owner_revise(ctx: _Ctx, kind: str, before: str, decisions: str) -> str | No
         kind,
         ctx.run.subject,
         before,
-        "нет",
+        _NONE[ctx.run.language],
         decisions,
         launch=ctx.launch,
+        lang=ctx.run.language,
     )
     if outcome.code != 0:
         return f"правка {name} не состоялась: {outcome.reason or outcome.code}"
@@ -744,7 +760,7 @@ def _restore_brief(ctx: _Ctx, agreed: Brief) -> bool:
     """`00-brief.md` разошёлся с рендером согласованного `brief.json` —
     переписать рендером; `True` — файл отличался и возвращён."""
     path = ctx.bundle / FILENAMES["brief"]
-    text = render_brief(agreed)
+    text = render_brief(agreed, lang=ctx.run.language)
     try:
         if path.read_text(encoding="utf-8") == text:
             return False

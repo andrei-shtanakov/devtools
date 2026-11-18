@@ -34,7 +34,6 @@ from governance import run_state as rs
 from governance import safe_io
 from governance.author_launch import NODE_LIMIT, AuthorCall, LaunchOutcome
 from governance.edge_check import override
-from governance.edge_check.author_rules import DEFAULT_CONTRACTS
 from governance.edge_check.rules import EdgeCheckError, load_rules
 from governance.ops import _AUTHOR_FILENAMES
 from lite import edge_journal as ej
@@ -44,6 +43,7 @@ from lite import stop_findings as sf
 from lite.edge_triage import Item, Option, triage
 from lite.interview_chat import Read, is_skip, read_answer
 from lite.output import say
+from lite.personal.check import contracts_dir
 from lite.structure import Agent, AgentUnavailable, FormError
 
 MAX_ROUNDS = 2
@@ -77,6 +77,12 @@ KIND_LABELS = {
     "disagree": DISAGREE_PREFIX + " ",
     "override": "",
 }
+#: подписи решений в промпте переписывания по языку прогона
+_KIND_LABELS = {
+    "ru": KIND_LABELS,
+    "en": {"option": "", "own": "own: ", "disagree": "disagree: ", "override": ""},
+}
+_NO_DECISIONS = {"ru": "нет", "en": "none"}
 # `error EDGE-CHECK(<узел>/<ребро>): R1 major: …` — ключ находки файла стопа
 _STOP_KEY_RE = re.compile(r"^error EDGE-CHECK\(([^/)]+)/([^)]+)\): (R\d+) ")
 
@@ -129,7 +135,9 @@ class Scope:
     переписываются в рабочем дереве; `wave` — ключ журнала; `can_override`
     — можно ли предлагать «принять вопреки» (`test`); `filenames` — вид узла
     → имя файла (узлы находок и основания рёбер); `subject` — тема для
-    промпта переписывания.
+    промпта переписывания; `lang` — язык прогона: каталог правил
+    (`lite.personal.check.contracts_dir`), промпт сортировки и подписи
+    решений в промпте переписывания.
     """
 
     run_dir: Path
@@ -143,6 +151,7 @@ class Scope:
     ask: pending.Ask | None = None
     #: партия ожидающего круга и записанный вопрос (`Waiting`)
     waiting: Waiting | None = None
+    lang: str = "ru"
 
 
 @dataclass
@@ -295,7 +304,13 @@ def resolve_scope(
     refusal = override.non_overridable_reason(records)
     try:
         items = triage(
-            findings, nodes, bases, prior, _counted(agent, calls), cache_dir=run_dir
+            findings,
+            nodes,
+            bases,
+            prior,
+            _counted(agent, calls),
+            cache_dir=run_dir,
+            lang=scope.lang,
         )
     except (FormError, AgentUnavailable) as exc:
         say(f"разбор замечаний не состоялся: {exc}")
@@ -418,7 +433,7 @@ def _bases(scope: Scope, findings: list[ej.Finding]) -> dict[str, str]:
     out: dict[str, str] = {}
     for edge in dict.fromkeys(f.edge for f in findings):
         try:
-            roles = load_rules(edge, DEFAULT_CONTRACTS).basis_roles
+            roles = load_rules(edge, contracts_dir(scope.lang)).basis_roles
         except EdgeCheckError:
             continue
         for role in roles:
@@ -803,23 +818,25 @@ def _revise_file(
         filename=name,
     )
     keys = {f.key for f in findings}
-    decisions = "\n".join(_decision_line(d) for d in journal if d.key in keys)
+    decisions = "\n".join(
+        _decision_line(d, scope.lang) for d in journal if d.key in keys
+    )
     outcome = revise(
         call,
         findings[0].node,
         scope.subject,
         current,
         "\n".join(f"- {_where(f)}: {f.statement}" for f in findings),
-        decisions or "нет",
+        decisions or _NO_DECISIONS[scope.lang],
     )
     if outcome.code != 0:
         return f"переписывание {name} не состоялось: {outcome.reason or outcome.code}"
     return None
 
 
-def _decision_line(d: ej.Decision) -> str:
+def _decision_line(d: ej.Decision, lang: str = "ru") -> str:
     """Решение дословно: «вопрос → ответ»."""
-    return f"- {d.question} → {KIND_LABELS.get(d.kind, '')}{d.answer}"
+    return f"- {d.question} → {_KIND_LABELS[lang].get(d.kind, '')}{d.answer}"
 
 
 def _weakened(
