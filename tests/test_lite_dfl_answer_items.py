@@ -624,3 +624,96 @@ def test_items_repair_criterion_new_research_q_to_holder(
     assert question == "q.a"
     assert [e["id"] for e in payload["entries"]] == ["FR-01", "IF-01", "Q-01"]
     assert payload["entries"][0]["Acceptance"] == "отчёт быстрее, чем Q-01"
+
+
+def test_items_repair_criterion_agreement_takes_hypothesis(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Согласие с гипотезой скила — ветка «да» терминала: `Preference` не
+    трогается, заметка «Критерий для …» с текстом гипотезы (id Q — текстом)."""
+    view = _repair_view()
+    fakes = _fakes(env, monkeypatch, view)
+    _stopped("status вернул 11: findings в /r/interview-findings.json")
+    rec = _post(ir._criterion("FR-01", view))
+    _items(
+        env,
+        "Да, так",
+        [
+            {
+                "prefix": "FR",
+                "id": "FR-01",
+                "body": "Отчёт",
+                "acceptance": "отчёт быстрее, чем q-1",
+            },
+            {
+                "prefix": "Q",
+                "ref": "q-1",
+                "body": "Сколько ждут сейчас?",
+                "owner_role": "analyst",
+            },
+        ],
+    )
+    assert env.run("answer", "--items", ITEMS, "--id", rec["id"]) == 0
+    [(question, _sup, payload)] = fakes.sent.calls
+    assert question == "q.a"
+    assert payload["text"] == (
+        "ответ а\n\nКритерий для «Отчёт»: отчёт быстрее, чем «Сколько ждут сейчас?»"
+    )
+    assert [e["id"] for e in payload["entries"]] == ["FR-01", "IF-01", "Q-01"]
+    assert "Preference" not in payload["entries"][0]
+    assert ir.load_marks(_rd())["done"] == ["criterion:FR-01"]
+
+
+def test_items_repair_traces_only_traces_taken(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Из пункта связей берутся только `traces`: body и прочее — из записи."""
+    view = _repair_view()
+    fakes = _fakes(env, monkeypatch, view)
+    _stopped("status вернул 11: findings в /r/interview-findings.json")
+    rec = _post(ir._traces(["IF-01", "AP-01"], view))
+    item = {
+        "prefix": "IF",
+        "id": "IF-01",
+        "body": "Совсем другое",
+        "priority": "Must",
+        "traces": ["S-01", "S-01"],
+    }
+    _items(env, "API про склад", [item])
+    assert env.run("answer", "--items", ITEMS, "--id", rec["id"]) == 0
+    [(question, _sup, payload)] = fakes.sent.calls
+    assert question == "q.a"
+    assert [e["id"] for e in payload["entries"]] == ["FR-01", "IF-01"]
+    assert payload["entries"][1] == {
+        "id": "IF-01",
+        "body": "API склада",
+        "traces": ["S-01"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("traces", "bad"),
+    [(["CON-01"], "CON-01"), (["S-09"], "S-09"), ([], "—")],
+)
+def test_items_repair_traces_invalid_target_refused(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    traces: list[str],
+    bad: str,
+) -> None:
+    """IF связывается только с S (`gate_repair._TRACE_TARGETS`), цель —
+    действующий пункт; иное — отказ с причиной, а не тихий пропуск."""
+    view = _repair_view()
+    fakes = _fakes(env, monkeypatch, view)
+    _stopped("status вернул 11: findings в /r/interview-findings.json")
+    rec = _post(ir._traces(["IF-01", "AP-01"], view))
+    item = {"prefix": "IF", "id": "IF-01", "body": "API склада", "traces": traces}
+    _items(env, "ответ", [item, _traces_items()[1]])
+    assert env.run("answer", "--items", ITEMS, "--id", rec["id"]) == 2
+    err = capsys.readouterr().err
+    assert "раскладка не принята" in err and f"не годится: {bad}" in err
+    assert fakes.sent.calls == []
+    assert ir.load_marks(_rd())["done"] == []

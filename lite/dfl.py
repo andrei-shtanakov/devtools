@@ -119,6 +119,10 @@ ITEMS_NOT_CONTENT = (
     "ждущий вопрос — не вопрос интервью с раскладкой: ответ через dfl reply"
 )
 REPAIR_IDS = "нужны обновления пунктов из {ids}, без новых и чужих пунктов"
+TRACES_TARGETS = (
+    "пункт {n}: связи {eid} — непустой список действующих пунктов {allowed} "
+    "(не годится: {bad})"
+)
 NO_INTERVIEW_REFUSAL = "интервью не идёт — начните: dfl run --subject '<тема>'"
 CHAT_STOPPED = "интервью прервано — продолжить: dfl run"
 INTERRUPTED = "прервано"
@@ -2695,7 +2699,7 @@ def _send_items(
         elif key.startswith("criterion:"):
             parts = [_criterion_part(key.split(":", 1)[1], text, raw, view)]
         else:
-            parts = _traces_parts(key, text, raw, view)
+            parts = _traces_parts(key, raw, view)
     except st.FormError as exc:
         raise DflError(ITEMS_REFUSAL.format(errors=exc)) from exc
     return _resend_parts(state, parts, view)
@@ -2710,32 +2714,63 @@ def _items_entries(text: str, raw: str, view: SessionView) -> list[dict]:
 def _criterion_part(
     eid: str, text: str, raw: str, view: SessionView
 ) -> tuple[str, str, list[dict]]:
-    """GC-08 как `gate_repair._fill_criterion` со словами человека: слова —
-    в `Preference`, пункты — `gate_repair._criterion_items` (только критерий
-    пункта и новые `Q`, на которые он ссылается), заметка «Уточнение к …»."""
+    """GC-08 как `gate_repair._fill_criterion`: пункты — по правилам
+    `gate_repair._criterion_items` (только критерий пункта и новые `Q`, на
+    которые он ссылается). Согласие с гипотезой скила (`gate_repair._agrees`)
+    — заметка «Критерий для …: <гипотеза>»; иные слова — в `Preference`,
+    заметка «Уточнение к …»."""
     record = view.entry_record(eid)
-    research = {e.id: e.body for e in view.entries if e.id.startswith("Q-")}
-    words = gr._without_ids(text, research)
-    record["Preference"] = gr._preference(record, words)
+    agreed = gr._agrees(text)
+    if not agreed:
+        research = {e.id: e.body for e in view.entries if e.id.startswith("Q-")}
+        words = gr._without_ids(text, research)
+        record["Preference"] = gr._preference(record, words)
     items = gr._criterion_items(eid, record, view, raw)
     entries = yaml.safe_load(st.to_payload("", items, view))["entries"]
-    note = f"Уточнение к «{record['body']}»: {words}"
+    if agreed:
+        shown, _research = gr.shown_hypothesis(entries[0], entries[1:], view)
+        note = f"Критерий для «{record['body']}»: {shown}"
+    else:
+        note = f"Уточнение к «{record['body']}»: {words}"
     return view.holders[eid], note, entries
 
 
 def _traces_parts(
-    key: str, text: str, raw: str, view: SessionView
+    key: str, raw: str, view: SessionView
 ) -> list[tuple[str, str, list[dict]]]:
-    """GC-13: обновления непустого подмножества пунктов ключа (остальные —
-    находки следующего прохода, как в терминале), по держателям
-    (`view.holders`, как `gate_repair._by_holder`), заметка терминала."""
+    """GC-13 как `gate_repair._fill_traces`: из пункта берутся только
+    `traces` (прочее — из записи), цели — действующие пункты допустимых
+    префиксов (`gate_repair._TRACE_TARGETS`); обновляется непустое
+    подмножество пунктов ключа (остальные — находки следующего прохода).
+    Группы — по держателям (`view.holders`), заметка терминала."""
     wanted = key.split(":", 1)[1].split(",")
-    entries = _items_entries(text, raw, view)
-    if not entries or any(e["id"] not in wanted for e in entries):
-        raise st.FormError(REPAIR_IDS.format(ids=", ".join(wanted)))
+    items, _ask = st.parse_items(raw)
+    known = {e.id for e in view.entries}
+    errors = [] if items else [REPAIR_IDS.format(ids=", ".join(wanted))]
     groups: dict[str, list[dict]] = {}
-    for entry in entries:
-        groups.setdefault(view.holders[entry["id"]], []).append(entry)
+    for n, item in enumerate(items, 1):
+        eid = str(item.get("id", ""))
+        if eid not in wanted:
+            errors.append(REPAIR_IDS.format(ids=", ".join(wanted)))
+            continue
+        allowed = gr._TRACE_TARGETS[gr._prefix(eid)]
+        bad = [
+            t for t in item["traces"] if t not in known or gr._prefix(t) not in allowed
+        ]
+        if bad or not item["traces"]:
+            errors.append(
+                TRACES_TARGETS.format(
+                    n=n, eid=eid, bad=", ".join(bad) or "—", allowed=", ".join(allowed)
+                )
+            )
+            continue
+        entry = {
+            **view.entry_record(eid),
+            "traces": list(dict.fromkeys(item["traces"])),
+        }
+        groups.setdefault(view.holders[eid], []).append(entry)
+    if errors:
+        raise st.FormError("; ".join(dict.fromkeys(errors)))
     return [(qid, gr.TRACES_NOTE, group) for qid, group in groups.items()]
 
 

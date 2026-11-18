@@ -273,16 +273,25 @@ def _proposed_criterion(
         say(f"критерий для «{record['body']}» не предложен: {exc}")
         return None
     own, *fresh = yaml.safe_load(to_payload("", items, view))["entries"]
+    for q in fresh:
+        say(f"  найти: {q['body']}")
+    shown, research = shown_hypothesis(own, fresh, view)
+    return [own, *fresh], shown, research
+
+
+def shown_hypothesis(
+    own: dict[str, Any], fresh: list[dict[str, Any]], view: SessionView
+) -> tuple[str, dict[str, str]]:
+    """Гипотеза записи `own` для человека — id `Q` заменены их текстом — и
+    {id: текст} исследований (прежних и новых `fresh`)."""
     research = {e.id: e.body for e in view.entries if _prefix(e.id) == "Q"}
     research.update((q["id"], q["body"]) for q in fresh)
     hypothesis = "; ".join(own[k] for k in ("Acceptance", "Target") if own.get(k))
-    for q in fresh:
-        say(f"  найти: {q['body']}")
     shown = Q_ID_RE.sub(
         lambda m: f"«{research.get(m.group(0), 'значение исследования')}»",
         hypothesis,
     )
-    return [own, *fresh], shown, research
+    return shown, research
 
 
 def _criterion_items(
