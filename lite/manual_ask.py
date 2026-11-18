@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Callable
 from datetime import date
 from pathlib import Path
@@ -21,6 +22,12 @@ PAUSED = "ответы на ручные проверки — потом: dfl ru
 NOTE_PROMPT = "что видно на деле (Enter — без комментария):"
 CAVEAT_PROMPT = "текст оговорки:"
 WAIT_PREFIX = "ждёт ответа: "
+#: код PR живёт в ветке прогона, рабочий каталог dfl не трогает (#806)
+CHECKOUT_HINT = "проверяйте код из PR #{pr}: gh pr checkout {pr} (назад: git switch -)"
+STALE_WARNING = (
+    "⚠ в рабочем каталоге нет кода PR #{pr} — проверка пройдёт на старом коде; "
+    "сначала: gh pr checkout {pr}"
+)
 
 
 def is_wait(reason: str) -> bool:
@@ -57,8 +64,44 @@ def ask_one(check: mc.ManualCheck, read: Read) -> dict | None:
                 return {"verdict": verdict, "note": note}
 
 
-def _question(check: mc.ManualCheck) -> pending.Question:
-    return pending.Question(pending.MANUAL, check.beh_id, mc.question(check))
+def question_of(check: mc.ManualCheck, pr: int) -> pending.Question:
+    """Вопрос для `dfl pending`: проверка и перед вариантами ответа —
+    на каком коде проверять (#806); первая строка — сама проверка."""
+    head, options = mc.question(check).rsplit("\n", 1)
+    text = f"{head}\n{CHECKOUT_HINT.format(pr=pr)}\n{options}"
+    return pending.Question(pending.MANUAL, check.beh_id, text)
+
+
+def _git_ok(workdir: Path, *args: str) -> bool:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(workdir), *args], capture_output=True, check=False
+        )
+    except OSError:
+        return False
+    return proc.returncode == 0
+
+
+def _pr_head(ops, repo_slug: str, pr: int) -> str | None:
+    try:
+        head = ops.pr_facts(repo_slug, pr).get("headRefOid")
+    except Exception:  # noqa: BLE001 - предупреждение необязательное
+        return None
+    return head if isinstance(head, str) and head else None
+
+
+def stale_warning(ops, repo_slug: str, pr: int, workdir: Path | None) -> str | None:
+    """Предупреждение, если голова PR не входит в историю `HEAD` рабочего
+    каталога (#806); не узнать (не репо, форджа молчит) — `None`.
+
+    Предок, а не равенство: после мержа `HEAD` — merge-коммит, код PR в нём
+    есть. Объекта головы локально нет — кода тоже нет, предупреждение."""
+    if workdir is None or not _git_ok(workdir, "rev-parse", "--verify", "-q", "HEAD"):
+        return None
+    head = _pr_head(ops, repo_slug, pr)
+    if head is None or _git_ok(workdir, "merge-base", "--is-ancestor", head, "HEAD"):
+        return None
+    return STALE_WARNING.format(pr=pr)
 
 
 def _parsed(text: str | None) -> dict | None:
@@ -69,13 +112,13 @@ def _parsed(text: str | None) -> dict | None:
 
 
 def _answer(
-    check: mc.ManualCheck, read: Read, tty: bool, run_dir: Path | None
+    check: mc.ManualCheck, read: Read, tty: bool, run_dir: Path | None, pr: int
 ) -> dict | str | None:
     """Ответ на проверку: записанный `dfl reply`, из терминала или без него.
 
     Строка — стоп «ждёт ответа»; `None` — человек остановил ввод.
     """
-    q = _question(check)
+    q = question_of(check, pr)
     if run_dir is None:
         return ask_one(check, read) if tty else None
     if tty:
@@ -108,6 +151,7 @@ def settle(
     run_id: str,
     save: Callable[[], None],
     run_dir: Path | None = None,
+    workdir: Path | None = None,
 ) -> str | None:
     """Пройти ручные проверки прогона: `None` — пройдено (запись
     `completed`), строка — причина стопа (вызывающий печатает, код 0).
@@ -115,7 +159,11 @@ def settle(
     `run_dir` — каталог прогона для `dfl reply` (#766): в терминале ответ,
     записанный заранее, берётся вместо чтения; без терминала вопрос
     записывается в `pending.json` и прогон ждёт ответа. Без `run_dir` —
-    прежнее поведение (без терминала — `NO_TTY`)."""
+    прежнее поведение (без терминала — `NO_TTY`).
+
+    `workdir` — рабочий каталог проекта: в терминале перед вопросами
+    печатается, как переключиться на код PR, и предупреждение, если кода PR
+    в нём нет (#806)."""
     if "checks" not in record:
         try:
             checks = mc.collect(*load_texts())
@@ -135,8 +183,12 @@ def settle(
     todo = mc.unanswered(record)
     if todo and not tty and run_dir is None:
         return NO_TTY.format(n=len(todo))
+    if todo and tty:
+        notice(CHECKOUT_HINT.format(pr=pr))
+        if warning := stale_warning(ops, repo_slug, pr, workdir):
+            notice(warning)
     for check in todo:
-        answer = _answer(check, read, tty, run_dir)
+        answer = _answer(check, read, tty, run_dir, pr)
         if isinstance(answer, str):
             return answer
         if answer is None:

@@ -1759,6 +1759,7 @@ def _manual_step(state: rs.RunState, url: str) -> int | None:
         run_id=state.run_id,
         save=lambda: _manual_save(state),
         run_dir=rs.run_dir(state.run_id),
+        workdir=Path(state.target_dir),
     )
     if reason is None:
         return None

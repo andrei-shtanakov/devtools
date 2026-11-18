@@ -61,7 +61,7 @@ def _settle(record: dict, run_dir: Path, *, tty: bool = False, read=None):
 
 def _q(record: dict, i: int) -> pending.Question:
     check = mc.checks_of(record)[i]
-    return pending.Question(pending.MANUAL, check.beh_id, mc.question(check))
+    return ma.question_of(check, 1)
 
 
 def test_remote_first_call_writes_question_and_waits(tmp_path: Path) -> None:
