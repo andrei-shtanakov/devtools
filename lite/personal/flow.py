@@ -615,7 +615,7 @@ def _revise_by_owner(ctx: _Ctx, stage: str, batch: list[rp.Remark]) -> bool:
         say(ctx.run.stop_reason)
         return False
     if outcome == orv.UNCLEAR:
-        rp.mark_dropped(run_dir(ctx.run.run_id), stage, len(batch))
+        rp.mark_dropped(rd, stage, len(batch))
         return ctx.stop(UNCLEAR_REMARK.format(ids=detail))
     return ctx.stop(f"{detail} — {RETRY}")
 

@@ -34,6 +34,8 @@ PERSONAL_STAGES = ("brief", "design", "decomposition")
 DONE_WORDS = pending_mod.REVIEW_DONE_WORDS
 _YES_WORDS = frozenset({"1", "да"})
 _NO_WORDS = frozenset({"2", "нет", "оставить", "оставить как было"})
+#: что принимает `dfl reply` на паузе этапа, кроме брифа (#766 срез 2)
+REMOTE_ACCEPTS = "«дальше» или замечания своими словами"
 UNCLEAR_ANSWER = "не понял ответ — номер или слово варианта"
 #: вид правки → (вопрос, слово согласия): слово чужого вопроса — не согласие
 REMOVE, DOWNGRADE, CHANGE = "remove", "downgrade", "change"
@@ -91,7 +93,7 @@ def question(stage: str, stage_label: str, paths: list[Path]) -> pending_mod.Que
         stage,
         f"этап «{stage_label}» готов и прошёл проверку — посмотрите",
         links=tuple(f"file://{p.resolve()}" for p in paths),
-        accepts="«дальше»",
+        accepts="«дальше»" if stage == "brief" else REMOTE_ACCEPTS,
     )
 
 

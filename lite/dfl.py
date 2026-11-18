@@ -1015,8 +1015,9 @@ def _owner_review_rounds(
     (стоп проверки — разбор `_resolve_rounds`), и пауза показывается снова.
     `/стоп` — код 0, стоп правки — 1; число платных вызовов печатается.
 
-    `remote` — без терминала (#766): «дальше» приходит через `dfl reply`
-    (`pending.asker` каталога прогона), вопрос ждёт — код 0."""
+    `remote` — без терминала (#766): «дальше», замечания и ответы на вопрос
+    об удалении приходят через `dfl reply` (`pending.asker` каталога
+    прогона), вопрос ждёт — код 0."""
     calls = er.PaidCalls()
     while (state := _owner_review_run(target.repo, subject)) is not None:
         ask = pending.asker(rs.run_dir(state.run_id)) if remote else None

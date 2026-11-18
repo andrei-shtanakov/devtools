@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -87,6 +88,7 @@ def test_remarks_by_reply_revise_and_continue(tmp_path, capsys) -> None:
         return _advance(run, ops, read=_no_read, launch=author, check=check, tty=False)
 
     assert go() == 0  # пауза: вопрос этапа ждёт reply
+    assert pending.load(rd)["accepts"] == rp.REMOTE_ACCEPTS  # type: ignore[index]
     _reply(run, REMARK)
 
     assert go() == 0  # правка: автор зван, вопрос об удалении записан
@@ -135,10 +137,12 @@ def test_review_reply_consumed_before_revise(tmp_path) -> None:
     author = _author(NO_D02)
     rd = state.run_dir(run.run_id)
     seen: list[dict | None] = []
+    passed: list[dict[str, object]] = []
     real = orv.revise_by_owner
 
-    def spy(*args, **kwargs):
+    def spy(*args: Any, **kwargs: Any) -> tuple[str, str]:
         seen.append(pending.load(rd))
+        passed.append(kwargs)
         return real(*args, **kwargs)
 
     assert _advance(run, ops, read=_no_read, launch=author, tty=False) == 0
@@ -147,6 +151,9 @@ def test_review_reply_consumed_before_revise(tmp_path) -> None:
         mp.setattr(orv, "revise_by_owner", spy)
         assert _advance(run, ops, read=_no_read, launch=author, tty=False) == 0
     assert seen == [None]
+    [kwargs] = passed
+    assert kwargs["store"] == rd and kwargs["stage"] == "design"
+    assert kwargs["ask"] is not None
     rec = pending.load(rd)
     assert rec is not None and rec["kind"] == pending.REMARKS_CONFIRM
     assert rec["id"] != review["id"]
@@ -159,6 +166,7 @@ def test_brief_remarks_by_reply_refused(tmp_path) -> None:
     rd = state.run_dir(run.run_id)
     rec = pending.load(rd)
     assert rec is not None and rec["key"] == "brief"
+    assert rec["accepts"] == "«дальше»"  # замечания к брифу — только в терминале
     with pytest.raises(pending.PendingError) as exc:
         pending.record(rd, str(rec["id"]), "цель шире")
     assert str(exc.value) == pending.REVIEW_REFUSAL

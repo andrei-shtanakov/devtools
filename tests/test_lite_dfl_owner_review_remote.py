@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Any
 
 import pytest
 
@@ -120,6 +121,7 @@ def test_remarks_by_reply_revise_and_continue(
     assert rs.load(RUN_ID).ops[PAUSE_KEY] == {"status": "started", "revised": True}
     assert [(r.text, r.applied) for r in rp.all_remarks(rd)] == [(REMARK, True)]
     assert not (rd / orv.CANDIDATE_FILE).exists()
+    assert _acked() == ["design"]  # доигранный узел W4 не спрашивается снова
     rec = pending.load(rd)
     assert rec is not None and rec["kind"] == pending.REVIEW
     assert rec["key"] == "acceptance"
@@ -142,12 +144,12 @@ def test_review_reply_consumed_before_revise(
     _author(monkeypatch, NO_D02)
     rd = rs.run_dir(RUN_ID)
     seen: list[dict | None] = []
+    passed: list[dict[str, object]] = []
     real = orv.revise_by_owner
 
-    def spy(*args, **kwargs):
+    def spy(*args: Any, **kwargs: Any) -> tuple[str, str]:
         seen.append(pending.load(rd))
-        assert kwargs["store"] == rd and kwargs["stage"] == "design"
-        assert kwargs["ask"] is not None
+        passed.append(kwargs)
         return real(*args, **kwargs)
 
     assert env.run("run", "--subject", "t") == 0
@@ -155,6 +157,9 @@ def test_review_reply_consumed_before_revise(
     monkeypatch.setattr(orv, "revise_by_owner", spy)
     assert env.run("run", "--subject", "t") == 0
     assert seen == [None]
+    [kwargs] = passed
+    assert kwargs["store"] == rd and kwargs["stage"] == "design"
+    assert kwargs["ask"] is not None
     rec = pending.load(rd)
     assert rec is not None and rec["kind"] == pending.REMARKS_CONFIRM
     assert rec["id"] != review["id"]

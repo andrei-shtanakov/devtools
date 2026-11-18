@@ -205,7 +205,7 @@ def test_ask_remote_unit(tmp_path) -> None:
     ask = pending.asker(tmp_path)
     assert rp.ask_remote("design", "дизайн", [path], ask=ask) is None
     q = rp.question("design", "дизайн", [path])
-    assert q.accepts == "«дальше»" and q.links == (f"file://{path.resolve()}",)
+    assert q.accepts == rp.REMOTE_ACCEPTS and q.links == (f"file://{path.resolve()}",)
     pending.record(tmp_path, q.id, "ок")
     assert rp.ask_remote("design", "дизайн", [path], ask=ask) == ""
 
