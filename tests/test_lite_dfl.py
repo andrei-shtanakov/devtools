@@ -78,6 +78,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Env:
     monkeypatch.setattr(rs, "RUNS_ROOT", tmp_path / "runs")
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.delenv(VERBOSITY_ENV, raising=False)
+    monkeypatch.delenv("DFL_LANG", raising=False)  # экспорт владельца — не ru
     (tmp_path / "target").mkdir()
     for rel in dfl.INIT_FILES:
         (tmp_path / "target" / rel).parent.mkdir(parents=True, exist_ok=True)

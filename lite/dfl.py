@@ -747,6 +747,7 @@ def run(
     code = _personal(target, subject, track, review)
     if code is not None:
         return code
+    _enterprise_language()
     chatting = chat and _is_tty()
     if chatting and _author_is_claude():
         return _run_chatting(target, subject, role, review)
@@ -768,6 +769,20 @@ def run(
 
 
 NO_UNFINISHED = "незаконченного прогона нет"
+
+
+def _enterprise_language() -> None:
+    """Enterprise-путь — всегда по-русски, без оглядки на `--lang`/`DFL_LANG`:
+    у его прогонов нет сохранённого языка, а id вопроса — хэш текста, и ответ
+    `dfl reply` из другого окружения иначе потерялся бы (ревью #769 I1).
+    Отказы до прогона уже напечатаны на языке вызова."""
+    i18n.set_language(i18n.DEFAULT_LANG)
+
+
+def _pin_enterprise_dir(run_dir: Path) -> None:
+    """Каталог не личного прогона — язык enterprise (`_enterprise_language`)."""
+    if run_dir.parent != personal_state.personal_root():
+        _enterprise_language()
 
 
 def _pending_dir(cwd: Path, subject: str | None, *, register: bool) -> Path | None:
@@ -812,6 +827,8 @@ def _pending_lines(rec: dict, *, answered: bool = False) -> list[str]:
 def pending_cmd(cwd: Path, subject: str | None, *, as_json: bool) -> int:
     """`dfl pending`: вопрос, на котором прогон ждёт человека (код 0)."""
     run_dir = _pending_dir(cwd, subject, register=False)
+    if run_dir is not None:
+        _pin_enterprise_dir(run_dir)
     rec = pending.load(run_dir) if run_dir is not None else None
     done = run_dir is not None and pending.answered(run_dir)
     if as_json:
@@ -831,6 +848,7 @@ def reply_cmd(cwd: Path, subject: str | None, qid: str, text: str) -> int:
     run_dir = _pending_dir(cwd, subject, register=True)
     if run_dir is None:
         raise DflError(t(pending.NO_PENDING))
+    _pin_enterprise_dir(run_dir)
     try:
         with run_lock.run_lock(run_dir.name):
             pending.record(run_dir, qid, text)
@@ -2359,6 +2377,7 @@ def answer(
     if file is None and not _author_is_claude():
         raise DflError(CHAT_HARNESS_REFUSAL)
     target = user_targets.register(cwd)
+    _enterprise_language()
     runs = _readable_runs(target.repo)
     cust = _existing_customer(runs, subject)
     eng = _engineer_of(cust, runs)
@@ -2444,6 +2463,7 @@ def interview(cwd: Path, subject: str | None) -> int:
 
     Агент и терминал не нужны; работает в любом статусе прогона с сессией."""
     state = _interview_run(cwd, subject)
+    _enterprise_language()
     session_id = str((state.interview or {}).get("session_id"))
     try:
         view = load_session(session_id)
@@ -2471,6 +2491,7 @@ def correct(cwd: Path, text: str, subject: str | None) -> int:
     if not _author_is_claude():
         raise DflError(CHAT_HARNESS_REFUSAL)
     state = _interview_run(cwd, subject)
+    _enterprise_language()
     if (state.interview or {}).get("completed_at"):
         raise DflError(INTERVIEW_COMPLETED_REFUSAL)
     agent = st.claude_agent(df_config.load().author_model)
@@ -2535,6 +2556,7 @@ def abandon(cwd: Path, subject: str | None) -> int:
             elif left:
                 print(t(ABANDON_ENTERPRISE_LEFT))
         return rc
+    _enterprise_language()
     runs = _readable_runs(target.repo)
     cust = _existing_customer(runs, subject)
     wss = {cust.ws_id, cust.ws_id + ENGINEER_SUFFIX}
