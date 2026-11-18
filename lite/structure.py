@@ -164,7 +164,15 @@ def _ask_agent(
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Один вызов агента с проверкой формы; нарушение — `FormError`, только
     нет критерия — `CriterionMissing`."""
-    items, ask = parse_items(agent(prompt))
+    return checked_items(agent(prompt), view)
+
+
+def checked_items(
+    raw: str, view: SessionView
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Разбор и проверка раскладки `raw`: нарушение формы — `FormError`,
+    только нет критерия — `CriterionMissing`."""
+    items, ask = parse_items(raw)
     errors = form_errors(items, view)
     if errors:
         raise FormError("; ".join(errors))
@@ -172,6 +180,15 @@ def _ask_agent(
     if missing:
         raise CriterionMissing("; ".join(missing), items, ask)
     return items, ask
+
+
+def payload_from_items(text: str, raw: str, view: SessionView) -> str:
+    """YAML ответа по готовой раскладке `raw` (JSON в схеме ответа агента):
+    скриптовая половина `structure_answer` без вызова агента (#766, R1).
+    Нарушение формы или нет критерия — `FormError` с текстом ошибок."""
+    items, _ask = checked_items(raw, view)
+    items = [_merged(item, view) if "id" in item else item for item in items]
+    return to_payload(text, items, view)
 
 
 def retry_note(error: str) -> str:

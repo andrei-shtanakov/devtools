@@ -80,6 +80,7 @@ TRACES_INTRO = (
     "бриф не прошёл проверку: интерфейсы и архитектурные предпочтения должны "
     "быть связаны с системами (или ограничениями); предлагаю связи:"
 )
+TRACES_NOTE = "Связи с системами уточнены."
 TRACES_CONFIRM = "Записать так? («да» — записать, «пропустить» — оставить)"
 VERDICT_INTRO = (
     "бриф не прошёл проверку: по каждой обязательной функции из брифа "
@@ -272,16 +273,25 @@ def _proposed_criterion(
         say(f"критерий для «{record['body']}» не предложен: {exc}")
         return None
     own, *fresh = yaml.safe_load(to_payload("", items, view))["entries"]
+    for q in fresh:
+        say(f"  найти: {q['body']}")
+    shown, research = shown_hypothesis(own, fresh, view)
+    return [own, *fresh], shown, research
+
+
+def shown_hypothesis(
+    own: dict[str, Any], fresh: list[dict[str, Any]], view: SessionView
+) -> tuple[str, dict[str, str]]:
+    """Гипотеза записи `own` для человека — id `Q` заменены их текстом — и
+    {id: текст} исследований (прежних и новых `fresh`)."""
     research = {e.id: e.body for e in view.entries if _prefix(e.id) == "Q"}
     research.update((q["id"], q["body"]) for q in fresh)
     hypothesis = "; ".join(own[k] for k in ("Acceptance", "Target") if own.get(k))
-    for q in fresh:
-        say(f"  найти: {q['body']}")
     shown = Q_ID_RE.sub(
         lambda m: f"«{research.get(m.group(0), 'значение исследования')}»",
         hypothesis,
     )
-    return [own, *fresh], shown, research
+    return shown, research
 
 
 def _criterion_items(
@@ -397,7 +407,7 @@ def _fill_traces(
     for qid, group in _by_holder(proposed, view).items():
         fresh = load(session)
         entries = [{**fresh.entry_record(e), "traces": proposed[e]} for e in group]
-        if not _resent(qid, "Связи с системами уточнены.", entries, fresh, resend):
+        if not _resent(qid, TRACES_NOTE, entries, fresh, resend):
             left += len(group)
     return left
 
@@ -491,21 +501,28 @@ def _fill_verdicts(
         text = ask(f"{fr} «{label}» — {VERDICT_HINT}")
         if text is None:
             continue
-        ok = _agrees(text)
-        verdict = "реализуемо как есть" if ok else text
-        entries.append({
-            "id": f"X-{number:02d}",
-            "body": f"{fr}: {verdict}",
-            "target": fr,
-            "status": "resolved" if ok else "open",
-        })  # fmt: skip
-        notes.append(f"{fr}: {verdict}")
+        entry = verdict_entry(fr, text, number)
+        entries.append(entry)
+        notes.append(entry["body"])
         number += 1
     if not entries:
         return len(frs)
     if not _resent(qid, "\n".join(notes), entries, view, resend):
         return len(frs)
     return len(frs) - len(entries)
+
+
+def verdict_entry(fr: str, text: str, number: int) -> dict[str, Any]:
+    """Запись `X-NN` вердикта по `fr`: согласие — `resolved` «реализуемо как
+    есть», иначе — `open` со словами инженера."""
+    ok = _agrees(text)
+    verdict = "реализуемо как есть" if ok else text
+    return {
+        "id": f"X-{number:02d}",
+        "body": f"{fr}: {verdict}",
+        "target": fr,
+        "status": "resolved" if ok else "open",
+    }
 
 
 def _feasibility_holder(view: SessionView) -> str | None:

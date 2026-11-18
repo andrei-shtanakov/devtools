@@ -34,6 +34,8 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import cast
 
+import yaml
+
 from governance import brief_tools as bt
 from governance import df_config, run_lock, runner, spec_loop, user_targets
 from governance import interview as iv
@@ -45,8 +47,10 @@ from governance.facts import Outcome
 from governance.ops import Ops, RealOps
 from lite import edge_resolve as er
 from lite import failure_log as fl
+from lite import gate_repair as gr
 from lite import i18n, pending, runlog
 from lite import interview_chat as ic
+from lite import interview_remote as ir
 from lite import interview_view as iview
 from lite import manual_ask as ma
 from lite import owner_review as orv
@@ -55,7 +59,7 @@ from lite import stop_findings as sf
 from lite import structure as st
 from lite.i18n import t
 from lite.init_repo import DEVTOOLS, InitError, init_repo, real_gh
-from lite.interview_state import InterviewStateError, load_session
+from lite.interview_state import InterviewStateError, SessionView, load_session
 from lite.output import (
     refusal,
     say,
@@ -101,6 +105,33 @@ CHAT_HARNESS_REFUSAL = (
     "dfl answer --file answer.yaml"
 )
 NO_TTY_REFUSAL = "без терминала: dfl answer --file answer.yaml"
+ITEMS_FORM = (
+    'файл раскладки — JSON {"text": "<слова человека>", "items": [...]}; '
+    "пункты — в схеме промпта из dfl pending --json"
+)
+ITEMS_PAIR = (
+    "--items и --id — только вместе: dfl answer --items <файл> --id <id вопроса "
+    "из dfl pending>"
+)
+ITEMS_ALONE = "--items несовместим с --file, --question и --supersede"
+ITEMS_REFUSAL = "раскладка не принята: {errors}"
+ITEMS_NOT_CONTENT = (
+    "ждущий вопрос — не вопрос интервью с раскладкой: ответ через dfl reply"
+)
+ITEMS_STALE = (
+    "интервью прогона {run_id} уже не ждёт ответа (статус {status}) — "
+    "устаревший вопрос снят; dfl status покажет, что дальше"
+)
+CRITERION_WORDS = (
+    "ответ без слов (голое «нет», «не так») не записывается: "
+    "скажите своими словами, что имелось в виду, или пропустите — "
+    "dfl reply --id {qid} --text пропустить"
+)
+REPAIR_IDS = "нужны обновления пунктов из {ids}, без новых и чужих пунктов"
+TRACES_TARGETS = (
+    "пункт {n}: связи {eid} — непустой список действующих пунктов {allowed} "
+    "(не годится: {bad})"
+)
 NO_INTERVIEW_REFUSAL = "интервью не идёт — начните: dfl run --subject '<тема>'"
 CHAT_STOPPED = "интервью прервано — продолжить: dfl run"
 INTERRUPTED = "прервано"
@@ -449,9 +480,10 @@ def _public_argv(raw: list[str]) -> list[str]:
             continue
         if arg.startswith("--cwd="):
             continue
-        if arg.startswith("--file="):
-            arg = "--file=" + Path(arg.removeprefix("--file=")).name  # noqa: PLW2901
-        elif i > 0 and raw[i - 1] == "--file":
+        if arg.startswith(("--file=", "--items=")):
+            flag, _, value = arg.partition("=")
+            arg = f"{flag}={Path(value).name}"  # noqa: PLW2901
+        elif i > 0 and raw[i - 1] in ("--file", "--items"):
             arg = Path(arg).name  # noqa: PLW2901
         elif arg.startswith("--text="):
             arg = "--text=" + HIDDEN_TEXT  # noqa: PLW2901
@@ -490,7 +522,7 @@ def _dispatch(
         i18n.set_language(_call_language(args, cwd))
         _require_test_mode(
             status_header=args.command == "status",
-            quiet=args.command == "pending" and args.json,
+            quiet=args.command in ("pending", "interview") and args.json,
         )
         _open_log(args, cwd, raw)
         if args.command == "status":
@@ -505,12 +537,14 @@ def _dispatch(
                 args.stakeholder,
                 question=args.question,
                 supersede=args.supersede,
+                items=Path(args.items) if args.items else None,
+                item_id=args.id,
             )
             return code, None
         if args.command == "abandon":
             return abandon(cwd, args.subject), None
         if args.command == "interview":
-            return interview(cwd, args.subject), None
+            return interview(cwd, args.subject, as_json=args.json), None
         if args.command == "pending":
             return pending_cmd(cwd, args.subject, as_json=args.json), None
         if args.command == "reply":
@@ -636,12 +670,19 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="заменить уже данный ответ на вопрос --question",
     )
+    p_ans.add_argument(
+        "--items",
+        help="JSON-раскладка ответа скила (text и items) на ждущий вопрос "
+        "интервью; только с --id",
+    )
+    p_ans.add_argument("--id", help="id ждущего вопроса из dfl pending (с --items)")
     p_ans.add_argument("--subject", help="тема конвейера, если их несколько")
     p_ans.add_argument("--stakeholder", default="customer")
     p_ab = add("abandon", help="бросить незаконченный конвейер")
     p_ab.add_argument("--subject", help="тема конвейера, если их несколько")
     p_iv = add("interview", help="что собрано в интервью")
     p_iv.add_argument("--subject", help="тема конвейера, если их несколько")
+    p_iv.add_argument("--json", action="store_true", help="состояние как JSON")
     p_cor = add("correct", help="поправить собранное текстом")
     p_cor.add_argument("text", help="поправка, например: не раз в неделю, а в месяц")
     p_cor.add_argument("--subject", help="тема конвейера, если их несколько")
@@ -762,6 +803,8 @@ def run(
         )
         if remote:
             code = _resolve_rounds(target, subject, role, code, remote=True)
+    if not _is_tty():  # `answer --file` в терминале — прежний терминальный путь
+        code = _remote_interview(target, subject, role, code)
     if not _is_tty() and _owner_review_run(target.repo, subject) is not None:
         return _owner_review_rounds(target, subject, role, code, remote=True)
     if chatting and _waiting_run(target.repo, subject) is not None:
@@ -1630,9 +1673,18 @@ def _stopped_incomplete(state: rs.RunState) -> bool:
 
 
 def _converse(state: rs.RunState) -> ic.ChatResult:
-    """Интервью разговором; сбой агента или состояния сессии — отказ `dfl`."""
+    """Интервью разговором; сбой агента или состояния сессии — отказ `dfl`.
+
+    Терминал побеждает (спека §5.1): разговор идёт под замком прогона —
+    `dfl run` без терминала в это время получает отказ «прогон занят»; вопрос,
+    ответы и отметки прохода без терминала снимаются. Внутри `_chat` замок
+    прогона никто не берёт (discovery и агент — внешние процессы)."""
     try:
-        return _chat(state)
+        with run_lock.run_lock(state.run_id):
+            _drop_remote_files(rs.run_dir(state.run_id))
+            return _chat(state)
+    except run_lock.LockBusy as exc:
+        raise DflError(_lock_busy(exc)) from exc
     except (ic.ChatError, InterviewStateError) as exc:
         raise DflError(str(exc)) from exc
 
@@ -1650,6 +1702,180 @@ def _chat(state: rs.RunState) -> ic.ChatResult:
         load=load_session,
         upstream=lambda: _upstream_text(state),
     )
+
+
+def _remote_interview(
+    target: user_targets.UserTarget, subject: str | None, role: str, code: int
+) -> int:
+    """Интервью без терминала (#766 срез 3): после шага — вопрос в pending.
+
+    Записанные ответы (`dfl reply`) применяются по одному, пока есть ответ на
+    текущий вопрос; ответа нет — вопрос ставится в `pending.json` (вопрос
+    discovery молча: его уже показал шаг; добор и починка — строкой «ждёт
+    ответа», код 0). Вопросов нет, а ответ применён (прогон ждёт ответа) или
+    проход по неполному стопу исчерпан — отметки стираются, шаг ещё раз (один).
+    После применённого ответа шаг, остановивший интервью неполным, начинает
+    свежий проход — его первый пункт ставится со строкой «ждёт ответа»; после
+    исчерпанного прохода снова неполный — прежний вывод стопа. Прогона, ждущего
+    интервью, нет — устаревшие вопрос интервью и отметки снимаются
+    (`_drop_stale_interview`); сессия не читается — `code` без изменений
+    (отметки целы, лишнего шага нет)."""
+    state = _waiting_run(target.repo, subject, incomplete=True)
+    if state is None:
+        _drop_stale_interview(target.repo, subject)
+        return code
+    try:
+        posted, applied = _locked_pass(state)
+    except _SessionUnreadable:
+        return code  # как `_say_question`: шаг уже сказал своё
+    if posted is not None:
+        if posted.kind != pending.INTERVIEW_QUESTION or applied:
+            say(pending.wait_line(posted, _reply_subject(state)))
+            return 0
+        return code
+    stopped = _stopped_incomplete(state)
+    if not stopped and not (applied and state.status == WAITING):
+        return code
+    ir.clear_marks(rs.run_dir(state.run_id))
+    code = _step(target, subject, role, chatting=False)
+    waiting = _waiting_run(target.repo, subject, incomplete=not stopped)
+    if waiting is None:
+        _drop_stale_interview(target.repo, subject)
+        return code
+    try:
+        posted, _ = _locked_pass(waiting)  # ответов нет (сняты выше): постановка
+    except _SessionUnreadable:
+        return code
+    if posted is not None and posted.kind != pending.INTERVIEW_QUESTION:
+        say(pending.wait_line(posted, _reply_subject(waiting)))
+        return 0
+    return code
+
+
+def _interview_live(state: rs.RunState) -> bool:
+    """Интервью прогона ещё идёт: ждёт ответа или остановлено неполным."""
+    return state.status == WAITING or _stopped_incomplete(state)
+
+
+def _drop_stale_interview(repo: str, subject: str | None) -> None:
+    """Интервью конвейера кончилось (вне `dfl run` без терминала — например,
+    `dfl correct`): снять в каталогах его прогонов вопрос интервью, ответы на
+    него и отметки прохода — `dfl pending` не покажет законченное интервью.
+    Вопросы других видов не трогаются; прогон занят — снимет следующий вызов."""
+    runs, _ = _repo_runs(repo)
+    try:
+        cust = _select_customer(runs, subject)
+    except DflError:
+        return
+    if cust is None:
+        return
+    for state in (cust, _engineer_of(cust, runs)):
+        if state is None or _interview_live(state):
+            continue
+        try:
+            with run_lock.run_lock(state.run_id):
+                _drop_interview_files(rs.run_dir(state.run_id))
+        except run_lock.LockBusy:
+            continue
+
+
+def _drop_interview_files(rd: Path) -> None:
+    """Снять вопрос интервью с ответами и отметки прохода (замок держит
+    вызывающий); вопрос другого вида остаётся."""
+    rec = pending.load(rd)
+    if rec is not None and rec.get("kind") in pending.INTERVIEW_KINDS:
+        pending.discard(rd)
+    ir.clear_marks(rd)
+
+
+class _SessionUnreadable(Exception):
+    """Статус или сессия discovery не прочитались — не «вопросов нет»."""
+
+
+def _locked_pass(state: rs.RunState) -> tuple[pending.Question | None, bool]:
+    """`_remote_pass` под замком прогона; занят (разговор в терминале) —
+    отказ «прогон занят»."""
+    try:
+        with run_lock.run_lock(state.run_id):
+            return _remote_pass(state)
+    except run_lock.LockBusy as exc:
+        raise DflError(_lock_busy(exc)) from exc
+
+
+def _remote_pass(state: rs.RunState) -> tuple[pending.Question | None, bool]:
+    """Применить записанные ответы и поставить следующий вопрос (замок держит
+    вызывающий). Итог — поставленный вопрос (`None` — вопросов нет) и был ли
+    применён хоть один ответ; сессия не читается — `_SessionUnreadable`."""
+    rd = rs.run_dir(state.run_id)
+    session_id = str((state.interview or {}).get("session_id"))
+    applied = False
+    while True:
+        try:
+            reply = _discovery_status(session_id, rd)
+            view = load_session(session_id)
+        except (InterviewStateError, OSError, df_config.ConfigError) as exc:
+            raise _SessionUnreadable(str(exc)) from exc
+        found = ir.next_question(
+            reply,
+            view,
+            ir.load_marks(rd),
+            incomplete=_stopped_incomplete(state),
+            upstream=_upstream_text(state),
+        )
+        if found is None:
+            rec = pending.load(rd)  # вопрос, которого проход больше не ставит
+            if rec is not None and rec.get("kind") in pending.INTERVIEW_KINDS:
+                pending.discard(rd)
+            return None, applied
+        q, data = found
+        text = pending.take(rd, q)
+        if text is None:
+            pending.post(rd, q, data)
+            return q, applied
+        _apply_remote(state, q, data, text, view)
+        applied = True
+
+
+def _apply_remote(
+    state: rs.RunState, q: pending.Question, data: dict, text: str, view: SessionView
+) -> None:
+    """Применить ответ `dfl reply` на вопрос `q`; пункт добора или починки —
+    отметка прохода. Отказ discovery или ответ не того вида — вопрос снова в
+    `pending.json` (с данными `data`) и `DflError`."""
+    rd = rs.run_dir(state.run_id)
+    try:
+        reason = ir.apply_reply(
+            pending.as_dict(q),
+            text,
+            view,
+            send=_sender(state),
+            resend=_sender(state, supersede=True),
+        )
+    except ValueError as exc:
+        pending.post(rd, q, data)
+        raise DflError(str(exc)) from exc
+    if reason is not None:
+        pending.post(rd, q, data)
+        raise DflError(f"discovery не принял ответ ({reason}) — dfl pending")
+    if q.kind != pending.INTERVIEW_QUESTION:
+        how = "skipped" if ic.is_skip(text) else "done"
+        ir.mark(rd, q.key, how)
+
+
+def _drop_remote(state: rs.RunState) -> None:
+    """Терминал победил: под замком снять устаревшие вопрос, ответы и отметки
+    прохода без терминала (следующий `dfl run` поставит вопрос заново)."""
+    try:
+        with run_lock.run_lock(state.run_id):
+            _drop_remote_files(rs.run_dir(state.run_id))
+    except run_lock.LockBusy as exc:
+        raise DflError(_lock_busy(exc)) from exc
+
+
+def _drop_remote_files(rd: Path) -> None:
+    """Снять вопрос, ответы и отметки прохода (замок держит вызывающий)."""
+    pending.discard(rd)
+    ir.clear_marks(rd)
 
 
 def _upstream_text(state: rs.RunState) -> str:
@@ -2383,12 +2609,21 @@ def answer(
     *,
     question: str | None = None,
     supersede: bool = False,
+    items: Path | None = None,
+    item_id: str | None = None,
 ) -> int:
     """Ответ на вопрос интервью конвейера, затем шаг `dfl run`.
 
     Без `question` — текущий вопрос; `supersede` заменяет уже данный ответ
     на вопрос `question` (discovery требует их вместе). Без `file` —
-    интервью разговором (только в терминале, `harness.author = claude`)."""
+    интервью разговором (только в терминале, `harness.author = claude`).
+    `items` с `item_id` — раскладка скила на ждущий вопрос (`answer_items`)."""
+    if items is not None or item_id is not None:
+        if file is not None or question or supersede:
+            raise DflError(ITEMS_ALONE)
+        if items is None or item_id is None:
+            raise DflError(ITEMS_PAIR)
+        return answer_items(cwd, items, item_id, subject, role)
     if file is None and (question or supersede):
         raise DflError(
             "--question и --supersede — только вместе с --file: "
@@ -2436,7 +2671,198 @@ def answer(
             f"discovery не принял ответ ({reason}) — исправьте {path} "
             "и повторите dfl answer"
         )
+    _drop_remote(state)
     return run(cwd, cust.subject, role, chat=False)
+
+
+def answer_items(
+    cwd: Path, file: Path, qid: str, subject: str | None, role: str
+) -> int:
+    """`dfl answer --items`: раскладку скила (#766 срез 3, R1) проверяет и
+    собирает `dfl` (`structure.payload_from_items`) и отправляет в discovery
+    под замком прогона; затем шаг `dfl run` (уже без замка)."""
+    target = user_targets.register(cwd)
+    _enterprise_language()
+    runs = _readable_runs(target.repo)
+    cust = _existing_customer(runs, subject)
+    state = _engineer_of(cust, runs) or cust
+    path = file if file.is_absolute() else cwd / file
+    try:
+        with run_lock.run_lock(state.run_id):
+            _apply_items(state, path, qid)
+    except run_lock.LockBusy as exc:
+        raise DflError(_lock_busy(exc)) from exc
+    return run(cwd, cust.subject, role, chat=False)
+
+
+def _apply_items(state: rs.RunState, path: Path, qid: str) -> None:
+    """Применить раскладку `path` к ждущему вопросу `qid` (замок держит
+    вызывающий). Успех — вопрос снят, пункт добора или починки отмечен
+    сделанным; любой отказ — `DflError`, `pending.json` цел."""
+    rd = rs.run_dir(state.run_id)
+    rec = pending.load(rd)
+    if rec is None:
+        raise DflError(t(pending.NO_PENDING))
+    kind, key = str(rec.get("kind", "")), str(rec.get("key", ""))
+    if kind in pending.INTERVIEW_KINDS and not _interview_live(state):
+        _drop_interview_files(rd)
+        raise DflError(ITEMS_STALE.format(run_id=state.run_id, status=state.status))
+    if rec.get("id") != qid:
+        raise DflError(t(pending.STALE))
+    if kind not in pending.INTERVIEW_KINDS or key.startswith("verdict:"):
+        raise DflError(ITEMS_NOT_CONTENT)
+    text, raw = _read_items(path)
+    session_id = str((state.interview or {}).get("session_id"))
+    try:
+        view = load_session(session_id)
+    except InterviewStateError as exc:
+        raise DflError(f"сессия интервью не читается: {exc}") from exc
+    reason = _send_items(state, rec, text, raw, view)
+    if reason is not None:
+        raise DflError(f"discovery не принял ответ ({reason})")
+    pending.clear(rd)
+    if kind != pending.INTERVIEW_QUESTION:
+        ir.mark(rd, key, "done")
+
+
+def _read_items(path: Path) -> tuple[str, str]:
+    """Файл раскладки → (слова человека, JSON как есть); не тот — `DflError`."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+        doc = json.loads(raw)
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise DflError(f"файл {path} не прочитан как JSON\n{ITEMS_FORM}") from exc
+    text = doc.get("text") if isinstance(doc, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        raise DflError(f'в {path} нет непустого "text"\n{ITEMS_FORM}')
+    return text, raw
+
+
+def _send_items(
+    state: rs.RunState, rec: dict, text: str, raw: str, view: SessionView
+) -> str | None:
+    """Проверить раскладку и отправить: вопрос discovery — ответом на него;
+    добор — дописать держателю; починка — по правилам терминала
+    (`gate_repair`). Нарушение — отказ «раскладка не принята»; итог —
+    причина отказа discovery или `None`."""
+    kind, key = str(rec.get("kind", "")), str(rec.get("key", ""))
+    try:
+        if kind == pending.INTERVIEW_QUESTION:
+            payload = st.payload_from_items(text, raw, view)
+            return ir.discovery_refusal(_sender(state)(key, payload))
+        holder = str((rec.get("data") or {}).get("holder") or "")
+        if not holder:
+            raise DflError(
+                "у вопроса нет ответа-держателя — dfl run поставит его заново"
+            )
+        if kind == pending.INTERVIEW_TOPUP:
+            parts = [(holder, text, _items_entries(text, raw, view))]
+        elif key.startswith("criterion:"):
+            eid = key.split(":", 1)[1]
+            parts = [_criterion_part(eid, text, raw, view, str(rec.get("id", "")))]
+        else:
+            parts = _traces_parts(key, raw, view)
+    except st.FormError as exc:
+        raise DflError(ITEMS_REFUSAL.format(errors=exc)) from exc
+    return _resend_parts(state, parts, view)
+
+
+def _items_entries(text: str, raw: str, view: SessionView) -> list[dict]:
+    """Записи ответа по раскладке (`structure.payload_from_items`)."""
+    doc = yaml.safe_load(st.payload_from_items(text, raw, view))
+    return list(doc.get("entries") or [])
+
+
+def _criterion_part(
+    eid: str, text: str, raw: str, view: SessionView, qid: str
+) -> tuple[str, str, list[dict]]:
+    """GC-08 как `gate_repair._fill_criterion`: пункты — по правилам
+    `gate_repair._criterion_items` (только критерий пункта и новые `Q`, на
+    которые он ссылается). Согласие с гипотезой скила (`gate_repair._agrees`)
+    — заметка «Критерий для …: <гипотеза>»; иные слова — в `Preference`,
+    заметка «Уточнение к …». Слов нет (голое «нет», «не так», только id) —
+    отказ с просьбой сказать словами (`qid` — вопрос в подсказке пропуска)."""
+    record = view.entry_record(eid)
+    agreed = gr._agrees(text)
+    if not agreed:
+        research = {e.id: e.body for e in view.entries if e.id.startswith("Q-")}
+        words = gr._without_ids(text, research)
+        if _bare_no(words):
+            raise DflError(CRITERION_WORDS.format(qid=qid))
+        record["Preference"] = gr._preference(record, words)
+    items = gr._criterion_items(eid, record, view, raw)
+    entries = yaml.safe_load(st.to_payload("", items, view))["entries"]
+    if agreed:
+        shown, _research = gr.shown_hypothesis(entries[0], entries[1:], view)
+        note = f"Критерий для «{record['body']}»: {shown}"
+    else:
+        note = f"Уточнение к «{record['body']}»: {words}"
+    return view.holders[eid], note, entries
+
+
+def _bare_no(words: str) -> bool:
+    """Слов нет или только несогласие («нет», «не так») — как
+    `gate_repair._confirmation`: такой ответ в `Preference` не пишется."""
+    tokens = gr._tokens(words)
+    return not tokens or (tokens[0] in gr.NO_WORDS and set(tokens) <= gr.NO_TAIL)
+
+
+def _traces_parts(
+    key: str, raw: str, view: SessionView
+) -> list[tuple[str, str, list[dict]]]:
+    """GC-13 как `gate_repair._fill_traces`: из пункта берутся только
+    `traces` (прочее — из записи), цели — действующие пункты допустимых
+    префиксов (`gate_repair._TRACE_TARGETS`); обновляется непустое
+    подмножество пунктов ключа (остальные — находки следующего прохода).
+    Группы — по держателям (`view.holders`), заметка терминала."""
+    wanted = key.split(":", 1)[1].split(",")
+    items, _ask = st.parse_items(raw)
+    known = {e.id for e in view.entries}
+    errors = [] if items else [REPAIR_IDS.format(ids=", ".join(wanted))]
+    groups: dict[str, list[dict]] = {}
+    for n, item in enumerate(items, 1):
+        eid = str(item.get("id", ""))
+        if eid not in wanted:
+            errors.append(REPAIR_IDS.format(ids=", ".join(wanted)))
+            continue
+        allowed = gr._TRACE_TARGETS[gr._prefix(eid)]
+        bad = [
+            t for t in item["traces"] if t not in known or gr._prefix(t) not in allowed
+        ]
+        if bad or not item["traces"]:
+            errors.append(
+                TRACES_TARGETS.format(
+                    n=n, eid=eid, bad=", ".join(bad) or "—", allowed=", ".join(allowed)
+                )
+            )
+            continue
+        entry = {
+            **view.entry_record(eid),
+            "traces": list(dict.fromkeys(item["traces"])),
+        }
+        groups.setdefault(view.holders[eid], []).append(entry)
+    if errors:
+        raise st.FormError("; ".join(dict.fromkeys(errors)))
+    return [(qid, gr.TRACES_NOTE, group) for qid, group in groups.items()]
+
+
+def _resend_parts(
+    state: rs.RunState, parts: list[tuple[str, str, list[dict]]], view: SessionView
+) -> str | None:
+    """Дописать каждому держателю его записи (замена по id) и заметку; текст,
+    которым ответ держателя уже кончается (повтор после частичного отказа),
+    не дублируется. Первый отказ discovery — его причина."""
+    resend = _sender(state, supersede=True)
+    for qid, note, entries in parts:
+        held = view.held_answer(qid)
+        said = "" if str(held.get("text") or "").endswith(note) else note
+        part = yaml.safe_dump(
+            {"text": said, "entries": entries}, allow_unicode=True, sort_keys=False
+        )
+        reason = ir.discovery_refusal(resend(qid, gr.appended(held, part)))
+        if reason is not None:
+            return reason
+    return None
 
 
 def _existing_customer(runs: list[rs.RunState], subject: str | None) -> rs.RunState:
@@ -2482,10 +2908,11 @@ def _discovery(args: list[str], cwd: Path) -> iv.DiscoveryReply:
     return iv.parse_reply(done.returncode, done.stdout, done.stderr)
 
 
-def interview(cwd: Path, subject: str | None) -> int:
+def interview(cwd: Path, subject: str | None, *, as_json: bool = False) -> int:
     """Состояние интервью текстом: вопрос, темы, пункты, что мешает готовности.
 
-    Агент и терминал не нужны; работает в любом статусе прогона с сессией."""
+    Агент и терминал не нужны; работает в любом статусе прогона с сессией.
+    `as_json` — то же данными для скила (`_interview_data`, #766 срез 3)."""
     state = _interview_run(cwd, subject)
     _enterprise_language()
     session_id = str((state.interview or {}).get("session_id"))
@@ -2494,10 +2921,41 @@ def interview(cwd: Path, subject: str | None) -> int:
     except InterviewStateError as exc:
         raise DflError(str(exc)) from exc
     reply = _discovery_status(session_id, rs.run_dir(state.run_id))
+    if as_json:
+        data = _interview_data(state, view, reply)
+        say(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
     print(f"Тема: {state.subject}")
     failure = _status_failure(reply)
     print(iview.render_view(view, ic.current_question(reply), failure))
     return 0
+
+
+def _interview_data(
+    state: rs.RunState, view: SessionView, reply: iv.DiscoveryReply
+) -> dict:
+    """`dfl interview --json`: вопрос, покрытие тем, находки, готовность и
+    причина сбоя `discovery status` (`unavailable`)."""
+    q = ic.current_question(reply)
+    question = (
+        None
+        if q is None
+        else {
+            "id": q.id,
+            "topic": q.coverage_key,
+            "label": st.TOPIC_LABELS.get(q.coverage_key, q.coverage_key),
+            "text": q.text,
+        }
+    )
+    return {
+        "run_id": state.run_id,
+        "subject": state.subject,
+        "question": question,
+        "coverage": ir.coverage(view),
+        "findings": ir.findings(view),
+        "readiness": view.readiness,
+        "unavailable": _status_failure(reply),
+    }
 
 
 def _status_failure(reply: iv.DiscoveryReply) -> str | None:
