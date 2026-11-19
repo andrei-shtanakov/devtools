@@ -23,12 +23,11 @@ from __future__ import annotations
 
 import enum
 import json
-import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from lite import i18n
+from lite import i18n, pending
 from lite.interview_chat import Read, read_answer
 from lite.output import say
 from lite.personal.brief import (
@@ -68,9 +67,6 @@ NOTHING_TO_BUILD = (
     "расскажите, что должно работать (или /стоп)"
 )
 CORRUPT_LINE = "строка журнала интервью не прочитана — пропущена"
-_FIX_PREFIX = re.compile(
-    r"^\s*(?:2\s*[.):](?!\d)\s*)?(?:(?:поправить|fix)\s*:?\s*)?", re.IGNORECASE
-)
 _SPEAKERS = {
     "ru": {"human": "Человек", "check": "Проверка брифа (человек её не видел)"},
     "en": {"human": "Person", "check": "Brief check (the person has not seen it)"},
@@ -493,4 +489,4 @@ def _correction(text: str, read: Read) -> str:
 def fix_text(text: str) -> str:
     """Текст поправки без префикса «поправить:»/«2.» (пустой остаток — весь
     текст: «поправить» без продолжения — тоже слова человека)."""
-    return _FIX_PREFIX.sub("", text, count=1).strip() or text.strip()
+    return pending.fix_rest(text) or text.strip()

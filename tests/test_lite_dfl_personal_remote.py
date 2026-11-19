@@ -132,6 +132,58 @@ def test_interview_json_personal(
     assert "Тема" in capsys.readouterr().out
 
 
+def test_pending_text_personal_invites_note_not_reply(
+    env: Env,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Minor 2: `dfl pending` на «нужен бриф» не зовёт в `dfl reply`."""
+    run_dir = _personal()
+    capsys.readouterr()
+    assert env.run("pending") == 0
+    out = capsys.readouterr().out
+    assert "dfl reply" not in out
+    assert f"dfl note --id {_qid(run_dir)}" in out and "dfl brief" in out
+
+
+def test_interview_json_quiet_on_broken_foreign_run(
+    env: Env,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Minor 7: предупреждение о битом чужом прогоне — не в stdout `--json`."""
+    _personal()
+    broken = ps.personal_root() / "broken-run"
+    broken.mkdir(parents=True)
+    (broken / "run.json").write_text("{oops", encoding="utf-8")
+    capsys.readouterr()
+    assert env.run("interview", "--json") == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["track"] == "personal"
+    assert "broken-run" in captured.err
+
+
+def test_note_brief_use_run_language(
+    env: Env,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Minor 6: сводка и «Верно?» — на языке прогона, не окружения."""
+    run_dir = _personal("en")
+    with i18n.language("ru"):
+        assert (
+            dfl.brief_cmd(
+                env.tmp / "target",
+                None,
+                _qid(run_dir),
+                Path(_file(env, BRIEF)),
+                accept_uncovered=False,
+            )
+            == 0
+        )
+    rec = pending.load(run_dir)
+    assert rec is not None
+    assert rec["text"].endswith(i18n.EN[interviewer.CONFIRM])
+    assert render_brief(brief_from_json(BRIEF), lang="en") in rec["text"]
+
+
 def test_note_brief_in_english_run(
     env: Env,  # noqa: F811
     capsys: pytest.CaptureFixture[str],

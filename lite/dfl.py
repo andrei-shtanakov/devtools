@@ -924,9 +924,12 @@ def _pending_lines(rec: dict, *, answered: bool = False) -> list[str]:
         lines.append(t("принимается: {accepts}").format(accepts=rec["accepts"]))
     if answered:
         lines.append(t(pending.ANSWERED))
+        return lines
+    if rec.get("kind") == pending.INTERVIEW_PERSONAL:
+        reply = t(pending.PERSONAL_ANSWER_HINT)
     else:
         reply = t("ответ: dfl reply --id {qid} --text '…'")
-        lines.append(reply.format(qid=rec.get("id", "")))
+    lines.append(reply.format(qid=rec.get("id", "")))
     return lines
 
 
@@ -990,7 +993,7 @@ def note_cmd(
     try:
         with run_lock.run_lock(run_dir.name):
             remote_interview.note(
-                run_dir, qid, role, text, options, lang=i18n.current()
+                run_dir, qid, role, text, options, lang=_run_language(run)
             )
     except run_lock.LockBusy as exc:
         raise DflError(_lock_busy(exc)) from exc
@@ -1028,7 +1031,7 @@ def brief_cmd(
                 data,
                 subject=run.subject,
                 accept_uncovered=accept_uncovered,
-                lang=i18n.current(),
+                lang=_run_language(run),
             )
     except run_lock.LockBusy as exc:
         raise DflError(_lock_busy(exc)) from exc
@@ -3083,7 +3086,7 @@ def interview(cwd: Path, subject: str | None, *, as_json: bool = False) -> int:
 
     Агент и терминал не нужны; работает в любом статусе прогона с сессией.
     `as_json` — то же данными для скила (`_interview_data`, #766 срез 3)."""
-    personal = _personal_interview(cwd, subject)
+    personal = _personal_interview(cwd, subject, as_json=as_json)
     if personal is not None:
         return _personal_interview_out(personal, as_json)
     state = _interview_run(cwd, subject)
@@ -3105,13 +3108,18 @@ def interview(cwd: Path, subject: str | None, *, as_json: bool = False) -> int:
 
 
 def _personal_interview(
-    cwd: Path, subject: str | None
+    cwd: Path, subject: str | None, *, as_json: bool = False
 ) -> personal_state.PersonalRun | None:
-    """Активный личный прогон для `dfl interview` (R7); иначе `None`."""
-    try:
-        return _personal_run(cwd, subject)
-    except DflError:
-        return None
+    """Активный личный прогон для `dfl interview` (R7); иначе `None`. С
+    `as_json` предупреждения `active_for` о битых прогонах уходят в stderr:
+    stdout — только JSON."""
+    with ExitStack() as stack:
+        if as_json:
+            stack.enter_context(redirect_stdout(sys.stderr))
+        try:
+            return _personal_run(cwd, subject)
+        except DflError:
+            return None
 
 
 def _personal_interview_out(run: personal_state.PersonalRun, as_json: bool) -> int:

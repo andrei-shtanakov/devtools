@@ -247,6 +247,58 @@ def test_confirm_yes_returns_brief(tmp_path: Path, word: str) -> None:
     assert pending.load(tmp_path) is None
 
 
+@pytest.mark.parametrize("word", ["1.", "да.", "Да!", "ок.", " ДА ", "верно…"])
+def test_confirm_yes_with_punctuation(tmp_path: Path, word: str) -> None:
+    """Minor 1: «да.»/«Да!»/«1.» — согласие, не поправка."""
+    qid = _confirm_posted(tmp_path)
+    pending.record(tmp_path, qid, word)
+    assert ri.step(tmp_path, "заметки") == brief_from_json(BRIEF)
+
+
+def test_confirm_yes_phrase_stays_correction(tmp_path: Path) -> None:
+    """Нечёткого сравнения нет: «Да, всё верно» — поправка словами."""
+    qid = _confirm_posted(tmp_path)
+    pending.record(tmp_path, qid, "Да, всё верно")
+    assert ri.step(tmp_path, "заметки") is None
+    assert _entries(tmp_path)[-1]["text"] == "поправить: Да, всё верно"
+
+
+def test_confirm_yes_on_changed_draft_asks_again(tmp_path: Path) -> None:
+    """Important 1: черновик не тот, что видел человек, — брифа нет,
+    снова «нужен бриф»."""
+    qid = _confirm_posted(tmp_path)
+    pending.record(tmp_path, qid, "да")
+    draft = json.loads((tmp_path / ri.DRAFT).read_text(encoding="utf-8"))
+    draft["goals"][0]["text"] = "ТЕКСТ, КОТОРОГО ЧЕЛОВЕК НЕ ВИДЕЛ"
+    (tmp_path / ri.DRAFT).write_text(json.dumps(draft, ensure_ascii=False))
+    assert ri.step(tmp_path, "заметки") is None
+    assert not (tmp_path / ri.DRAFT).exists()
+    assert not (tmp_path / "brief.json").exists()
+    rec = pending.load(tmp_path)
+    assert rec is not None and rec["kind"] == pending.INTERVIEW_PERSONAL
+
+
+def test_confirm_yes_on_broken_draft_asks_again(tmp_path: Path) -> None:
+    qid = _confirm_posted(tmp_path)
+    pending.record(tmp_path, qid, "да")
+    (tmp_path / ri.DRAFT).write_text(json.dumps({"goals": "x"}))
+    assert ri.step(tmp_path, "заметки") is None
+    rec = pending.load(tmp_path)
+    assert rec is not None and rec["kind"] == pending.INTERVIEW_PERSONAL
+
+
+def test_confirm_text_independent_of_ambient_language(tmp_path: Path) -> None:
+    """Сводку английского прогона подтверждают и при русском окружении."""
+    ri.step(tmp_path, "notes", lang="en")
+    with i18n.language("ru"):
+        assert ri.submit(tmp_path, _qid(tmp_path), BRIEF, subject="notes", lang="en").ok
+    pending.record(tmp_path, _qid(tmp_path), "yes")
+    with i18n.language("en"):
+        assert ri.step(tmp_path, "notes", lang="en") == brief_from_json(
+            BRIEF, lang="en"
+        )
+
+
 def test_confirm_fix_appends_correction(tmp_path: Path) -> None:
     qid = _confirm_posted(tmp_path)
     pending.record(tmp_path, qid, "поправить: раз в месяц")
@@ -288,7 +340,8 @@ def test_resubmit_drops_old_yes(tmp_path: Path) -> None:
 
 def test_reply_bare_two_refused(tmp_path: Path) -> None:
     qid = _confirm_posted(tmp_path)
-    for text in ("2", " 2 ", "", "  "):
+    wordless = ("2", " 2 ", "", "  ", "2.", "2)", "2:", "поправить", "Поправить:")
+    for text in (*wordless, "fix", "fix:", "FIX: ", "2. поправить:"):
         with pytest.raises(pending.PendingError) as exc:
             pending.record(tmp_path, qid, text)
         assert str(exc.value) == pending.CONFIRM_FIX_REFUSAL

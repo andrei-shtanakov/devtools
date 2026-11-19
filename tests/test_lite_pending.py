@@ -7,7 +7,7 @@ import json
 import pytest
 
 from governance import manual_checks as mc
-from lite import pending
+from lite import i18n, pending
 
 
 def test_question_id_stable_and_content_bound():
@@ -88,6 +88,20 @@ def test_wait_text(tmp_path):
     assert pending.wait_text(tmp_path) == pending.wait_line(q)
     assert pending.wait_line(q).startswith("ждёт ответа: первая — вопрос: dfl pending")
     assert f"--id {q.id}" in pending.wait_line(q)
+
+
+def test_wait_line_personal_not_reply(tmp_path):
+    """Minor 2: «нужен бриф» отвечают `dfl note`/`dfl brief`, не `dfl reply`."""
+    q = pending.Question(pending.INTERVIEW_PERSONAL, "brief", "нужен бриф")
+    pending.asker(tmp_path)(q)
+    line = pending.wait_text(tmp_path, "заметки")
+    assert line == pending.wait_line(q, "заметки")
+    assert "dfl reply" not in line and "dfl note" in line and "dfl brief" in line
+    assert line.startswith("ждёт ответа: нужен бриф") and f"--id {q.id}" in line
+    with i18n.language("en"):
+        en = pending.wait_line(q)
+    assert en.startswith("awaiting an answer:") and "dfl note" in en
+    assert "dfl reply" not in en
 
 
 def test_load_broken_file_is_none(tmp_path):

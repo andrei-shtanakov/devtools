@@ -20,6 +20,7 @@ from pathlib import Path
 from lite import i18n, pending
 from lite.personal import interviewer
 from lite.personal.brief import Brief, brief_from_json, render_brief
+from lite.structure import FormError
 
 DRAFT = "brief-draft.json"
 NEED_BRIEF = (
@@ -37,6 +38,8 @@ HUMAN_OPTIONS_REFUSAL = "у реплики человека вариантов �
 #: ключ вопросов удалённого интервью
 KEY = "brief"
 _ROLES = ("agent", "human")
+#: хвост ответа «да.»/«Да!»/«1.», который не делает его поправкой
+_TRAILING = " \t\n.,!?;:…"
 
 
 @dataclass(frozen=True)
@@ -57,7 +60,7 @@ def step(run_dir: Path, subject: str, *, lang: str = "ru") -> Brief | None:
         reply = pending.take(run_dir, q)
         if reply is None:
             return None
-        brief = _confirmed(run_dir, reply, lang)
+        brief = _confirmed(run_dir, reply, str(rec.get("text", "")), lang)
         if brief is not None:
             return brief
     _post_need_brief(run_dir, subject, lang)
@@ -126,7 +129,7 @@ def submit(
     _write_draft(run_dir, settled)
     summary = render_brief(settled, lang=lang)
     log.append({"role": "agent", "kind": "summary", "text": summary})
-    text = f"{summary}\n\n{i18n.t(interviewer.CONFIRM)}"
+    text = _confirm_text(summary, lang)
     pending.post(run_dir, pending.Question(pending.BRIEF_CONFIRM, KEY, text))
     return Submitted(True, [], summary)
 
@@ -166,16 +169,36 @@ def _covered(function: dict) -> bool:
     return any(isinstance(c, str) and c.strip() for c in criteria)
 
 
-def _confirmed(run_dir: Path, reply: str, lang: str) -> Brief | None:
-    """Ответ на «Верно?»: «1»/слово согласия — бриф из черновика; иное —
-    поправка человека в журнал (`None`). Черновик снимается в обоих случаях."""
+def _confirm_text(summary: str, lang: str) -> str:
+    """Текст вопроса «Верно?» по сводке: id вопроса — хэш этого текста."""
+    with i18n.language(lang):
+        return f"{summary}\n\n{i18n.t(interviewer.CONFIRM)}"
+
+
+def _is_yes(reply: str) -> bool:
+    """Согласие на «Верно?» без терминала: «1»/слово согласия, регистр и
+    хвостовая пунктуация не важны («Да!», «1.», «ок.»); иное — поправка."""
+    word = reply.strip().casefold().rstrip(_TRAILING)
+    return word == "1" or word in interviewer.YES_WORDS
+
+
+def _confirmed(run_dir: Path, reply: str, shown: str, lang: str) -> Brief | None:
+    """Ответ на «Верно?» (`shown` — текст вопроса, который видел человек):
+    согласие — бриф из черновика, только если его сводка и есть `shown`
+    (иначе бриф заново: в бандл не идёт текст, которого человек не видел);
+    иное — поправка человека в журнал (`None`). Черновик снимается всегда."""
     draft = _read_draft(run_dir)
     (run_dir / DRAFT).unlink(missing_ok=True)
-    word = reply.strip().casefold()
-    if word == "1" or word in interviewer.YES_WORDS:
+    if _is_yes(reply):
         if draft is None:
             return None  # черновик пропал — бриф заново
-        return brief_from_json(draft, lang=lang)
+        try:
+            brief = brief_from_json(draft, lang=lang)
+        except FormError:
+            return None  # черновик испорчен — бриф заново
+        if _confirm_text(render_brief(brief, lang=lang), lang) != shown:
+            return None  # черновик не тот, что подтверждали, — бриф заново
+        return brief
     fix = interviewer.fix_text(reply)
     _log(run_dir).append(
         {"role": "human", "text": interviewer.FIX_PREFIXES[lang] + fix}

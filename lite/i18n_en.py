@@ -232,6 +232,20 @@ EN: dict[str, str] = {
         "answer: dfl reply{pick} --id {qid} --text '…'"
     ),
     # личный путь без терминала (lite/personal/remote_interview.py, #766 срез 4)
+    (
+        "ждёт ответа: {first} — вопрос: dfl pending{pick}; "
+        "ответ: dfl note{pick} --id {qid}, затем dfl brief{pick} --id {qid}"
+    ): (
+        "awaiting an answer: {first} — question: dfl pending{pick}; "
+        "answer: dfl note{pick} --id {qid}, then dfl brief{pick} --id {qid}"
+    ),
+    (
+        "ответ: dfl note --id {qid} --role … --text '…', затем dfl brief --id {qid} "
+        "--file <бриф.json>"
+    ): (
+        "answer: dfl note --id {qid} --role … --text '…', then dfl brief --id {qid} "
+        "--file <brief.json>"
+    ),
     "ответ на этот вопрос — dfl note и dfl brief (бриф собирает скил)": (
         "the answer to this question is dfl note and dfl brief "
         "(the skill builds the brief)"
