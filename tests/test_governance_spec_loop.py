@@ -176,6 +176,13 @@ def test_slug_from_subject_other_script_hashed() -> None:
     assert slug != spec_loop.slug_from_subject("中文")
 
 
+@pytest.mark.parametrize("subject", ["", "   ", "«»", "—!?"])
+def test_slug_from_subject_without_letters_fails_closed(subject: str) -> None:
+    """Пустая тема или из одних знаков — отказ, а не слаг из хэша (#817)."""
+    with pytest.raises(spec_loop.SpecLoopError, match="--ws-id"):
+        spec_loop.slug_from_subject(subject)
+
+
 def test_ws_id_carries_date_only_at_creation() -> None:
     assert (
         spec_loop.ws_id_for("Fleet Inbox", date(2026, 9, 7)) == "fleet-inbox-20260907"

@@ -184,6 +184,9 @@ EN: dict[str, str] = {
     "Верно? 1. да · 2. поправить: <что>": "Correct? 1. yes · 2. fix: <what>",
     # экран личного пути (Task 6): отказ, ошибки до прогона, подсказки
     "{command}: отказ (код {code})": "{command}: refusal (code {code})",
+    "в теме нет ни букв, ни цифр — назовите тему: dfl run --subject '<тема>'": (
+        "the subject has no letters or digits — name it: dfl run --subject '<subject>'"
+    ),
     "незаконченного прогона нет — первый запуск: dfl run --subject '<тема>'": (
         "no unfinished run — first launch: dfl run --subject '<subject>'"
     ),

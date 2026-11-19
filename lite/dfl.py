@@ -784,6 +784,8 @@ def run(
     отказывает сразу (RF-a)."""
     if _review_selected(review, track) and not _author_is_claude():
         raise DflError(t(REVIEW_NEEDS_CLAUDE))  # RF-a: до регистрации и эффектов
+    if subject is not None and not any(ch.isalnum() for ch in subject):
+        raise DflError(t(EMPTY_SUBJECT))  # до регистрации и эффектов
     target = user_targets.register(cwd)
     code = _personal(target, subject, track, review)
     if code is not None:
@@ -814,6 +816,9 @@ def run(
 
 
 NO_UNFINISHED = "незаконченного прогона нет"
+EMPTY_SUBJECT = (
+    "в теме нет ни букв, ни цифр — назовите тему: dfl run --subject '<тема>'"
+)
 NO_RUN_REFUSAL = (
     "незаконченного прогона нет — первый запуск: dfl run --subject '<тема>'"
 )
@@ -1748,7 +1753,7 @@ def _remote_interview(
     except _SessionUnreadable:
         return _say_unread(waiting, code)
     if posted is None:
-        return code
+        return _say_unread(waiting, code)  # ждёт, а вопроса discovery не дал
     say(pending.wait_line(posted, _reply_subject(waiting)))
     return 0 if posted.kind != pending.INTERVIEW_QUESTION else code
 
