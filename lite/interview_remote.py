@@ -303,7 +303,7 @@ def _assumptions(view: SessionView) -> tuple[pending.Question, dict] | None:
     if not found:
         return None
     rows = [
-        {k: row.get(k) for k in ("words", "constraint", "assumption")}
+        {k: row.get(k) for k in ("words", "category", "constraint", "assumption")}
         for _qid, row in found
     ]
     shown = "; ".join(f"«{r['words']}» → {r['assumption']}" for r in rows)

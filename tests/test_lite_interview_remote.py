@@ -13,6 +13,7 @@ import yaml
 from governance import interview as iv
 from lite import brief_v13 as bv
 from lite import gate_repair as gr
+from lite import gate_repair_v13 as gv
 from lite import interview_chat as ic
 from lite import interview_remote as ir
 from lite import pending
@@ -426,7 +427,8 @@ def test_v13_keys_order() -> None:
     last = ir.next_question(reply, view, done, incomplete=True, upstream="")
     assert last is not None and last[0].key == "assumptions"
     assert last[1]["rows"] == [
-        {"words": "запуск одной командой", "constraint": ["FR-01"],
+        {"words": "запуск одной командой", "category": "делать",
+         "constraint": ["FR-01"],
          "assumption": "одна команда"},
     ]  # fmt: skip
     assert "одна команда" in last[0].text
@@ -435,3 +437,23 @@ def test_v13_keys_order() -> None:
 def test_v13_skipped_for_engineer() -> None:
     view = _v13_view("engineer")
     assert _keys(_status(11, V13_LIVE), view, EMPTY) == []
+
+
+def test_category_refusal_hint_words_all_parse() -> None:
+    """Каждое слово подсказки отказа `category:*` разбирается в свою
+    категорию; непонятное слово — отказ с этой подсказкой."""
+    view = _v13_view()
+    rec = {"kind": pending.INTERVIEW_REPAIR, "key": "category:NFR-01"}
+    for category, word in gv.CATEGORY_LABELS.items():
+        assert bv.parse_categories(word, []) == [category], word
+    try:
+        ir.apply_reply(rec, "фиолетовая", view, send=_no_send, resend=_no_send)
+    except ValueError as exc:
+        hint = str(exc)
+    else:
+        raise AssertionError("отказа нет")
+    assert all(word in hint for word in gv.CATEGORY_LABELS.values())
+
+
+def _no_send(qid: str, payload: str) -> iv.DiscoveryReply:
+    raise AssertionError("отправки быть не должно")

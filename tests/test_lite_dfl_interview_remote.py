@@ -1011,7 +1011,7 @@ def test_assumptions_reply_bad_date_refused_question_kept(
     for bad in ("владелец продукта, до конца месяца", "владелец, 01.01.2020"):
         rec = _reply(env, "assumptions", bad)
         assert rec["data"]["rows"] == [
-            {"words": "слова делать", "constraint": ["FR-01"],
+            {"words": "слова делать", "category": "делать", "constraint": ["FR-01"],
              "assumption": "одна команда"},
         ]  # fmt: skip
         capsys.readouterr()

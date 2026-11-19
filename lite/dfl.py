@@ -2784,7 +2784,7 @@ def _send_items(
                 "у вопроса нет ответа-держателя — dfl run поставит его заново"
             )
         if kind == pending.INTERVIEW_TOPUP:
-            parts = [(holder, text, _items_entries(text, raw, view), [])]
+            parts = [(holder, text, *_items_parts(text, raw, view))]
         elif key.startswith(("nfr:", "table:")):
             parts = [_v13_part(key, holder, text, raw, view)]
         elif key.startswith("criterion:"):
@@ -2814,10 +2814,13 @@ def _v13_part(
     return holder, text, entries, list(doc.get("translations") or [])
 
 
-def _items_entries(text: str, raw: str, view: SessionView) -> list[dict]:
-    """Записи ответа по раскладке (`structure.payload_from_items`)."""
+def _items_parts(
+    text: str, raw: str, view: SessionView
+) -> tuple[list[dict], list[dict]]:
+    """Записи и строки таблицы `translations` ответа по раскладке
+    (`structure.payload_from_items`; `ref` строк уже заменены id)."""
     doc = yaml.safe_load(st.payload_from_items(text, raw, view))
-    return list(doc.get("entries") or [])
+    return list(doc.get("entries") or []), list(doc.get("translations") or [])
 
 
 def _criterion_part(
