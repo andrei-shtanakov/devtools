@@ -88,6 +88,8 @@ ABANDON_HINT = "dfl abandon бросит его"
 NEXT_SUBJECT_HINT = "новая тема: dfl run --subject '<тема>'"
 WAITING = "waiting_interview"
 REPORT_HINT = "отчёт разработчикам: dfl report"
+# Ненулевой код как штатный шаг протокола, а не сбой: `dfl brief` с проблемами.
+EXPECTED_EXITS: frozenset[tuple[str, int]] = frozenset({("brief", 1)})
 ANSWER_HINT = "ответьте: dfl answer --file answer.yaml"
 ANSWER_FORMAT = """\
 файл ответа — YAML: text (ответ своими словами) и entries (пункты темы —
@@ -342,7 +344,7 @@ def main(
         except Exception as exc:
             record(1, exc)
             raise
-        if code != 0:
+        if code != 0 and (args.command, code) not in EXPECTED_EXITS:
             record(code, refused)
             _failure_hint()
         return code
@@ -734,7 +736,10 @@ def _parser() -> argparse.ArgumentParser:
     p_brief.add_argument(
         "--accept-uncovered",
         action="store_true",
-        help="принять бриф с функциями без критерия (уйдут в «Уточнить»)",
+        help=(
+            "принять бриф как есть: функции без критерия и все замечания "
+            "проверки уйдут в «Уточнить»"
+        ),
     )
     p_brief.add_argument("--subject", help="тема конвейера, если их несколько")
     add("status", help="прогоны репо и что дальше")
@@ -3138,8 +3143,6 @@ def _personal_interview_out(run: personal_state.PersonalRun, as_json: bool) -> i
         say(t("черновика брифа нет"))
         return 0
     say(t("черновик брифа есть"))
-    for fid in data["uncovered"]:
-        say(t("функция без критерия: {fid}").format(fid=fid))
     return 0
 
 

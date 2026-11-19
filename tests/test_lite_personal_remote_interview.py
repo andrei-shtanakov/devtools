@@ -378,7 +378,6 @@ def test_status(tmp_path: Path) -> None:
         "max_questions": interviewer.MAX_QUESTIONS,
         "checks_in_row": 1,
         "draft": None,
-        "uncovered": [],
     }
     ri.submit(tmp_path, qid, BRIEF, subject="заметки")
     got = ri.status(tmp_path, "заметки")
@@ -386,9 +385,26 @@ def test_status(tmp_path: Path) -> None:
     assert got["checks_in_row"] == 1
 
 
-def test_status_uncovered_lists_bare_functions(tmp_path: Path) -> None:
+def test_status_has_no_uncovered(tmp_path: Path) -> None:
     (tmp_path / ri.DRAFT).write_text(json.dumps(_bare()), encoding="utf-8")
-    assert ri.status(tmp_path, "заметки")["uncovered"] == ["FR-02"]
+    assert "uncovered" not in ri.status(tmp_path, "заметки")
+
+
+def test_need_brief_text_uses_run_language(tmp_path: Path) -> None:
+    qid = _posted(tmp_path)
+    with i18n.language("ru"):
+        ri.submit(tmp_path, qid, _bare(), subject="notes", lang="en")
+    rec = pending.load(tmp_path)
+    assert rec is not None
+    other = tmp_path / "other"
+    other.mkdir()
+    qid2 = _posted(other)
+    with i18n.language("en"):
+        ri.submit(other, qid2, _bare(), subject="notes", lang="en")
+    again = pending.load(other)
+    assert again is not None
+    assert rec["text"] == again["text"]
+    assert rec["text"] == i18n.EN[ri.NEED_BRIEF].format(subject="notes")
 
 
 def test_no_agent_called(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

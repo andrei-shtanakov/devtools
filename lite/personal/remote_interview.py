@@ -145,12 +145,6 @@ def status(run_dir: Path, subject: str) -> dict:
     """Состояние интервью для `dfl interview --json` (R7)."""
     entries = _log(run_dir).entries
     draft = _read_draft(run_dir)
-    functions = (draft or {}).get("functions")
-    uncovered = [
-        str(f.get("id", ""))
-        for f in (functions if isinstance(functions, list) else [])
-        if isinstance(f, dict) and not _covered(f)
-    ]
     return {
         "track": "personal",
         "subject": subject,
@@ -158,15 +152,7 @@ def status(run_dir: Path, subject: str) -> dict:
         "max_questions": interviewer.MAX_QUESTIONS,
         "checks_in_row": interviewer._checks_in_row(entries),
         "draft": draft,
-        "uncovered": uncovered,
     }
-
-
-def _covered(function: dict) -> bool:
-    criteria = function.get("criteria")
-    if not isinstance(criteria, list):
-        return False
-    return any(isinstance(c, str) and c.strip() for c in criteria)
 
 
 def _confirm_text(summary: str, lang: str) -> str:
@@ -208,7 +194,8 @@ def _confirmed(run_dir: Path, reply: str, shown: str, lang: str) -> Brief | None
 
 def _post_need_brief(run_dir: Path, subject: str, lang: str) -> None:
     entries = _log(run_dir).entries
-    text = i18n.t(NEED_BRIEF).format(subject=subject)
+    with i18n.language(lang):
+        text = i18n.t(NEED_BRIEF).format(subject=subject)
     data = {
         "subject": subject,
         "transcript": str(run_dir / interviewer.TRANSCRIPT),
