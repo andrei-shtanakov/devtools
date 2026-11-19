@@ -65,3 +65,25 @@ def test_verdict_reply_accepts_text():
     assert pending.check(kind, "да", rec) is None
     assert pending.check(kind, "нужен кэш", rec) is None
     assert pending.check(kind, "  ", rec) is not None
+
+
+def test_owner_and_assumptions_accept_text():
+    kind = pending.INTERVIEW_REPAIR
+    for key in ("owner:process", "assumptions", "category:NFR-01"):
+        rec = {"id": f"interview-repair:{key}:x", "key": key}
+        assert pending.check(kind, "Иван, владелец продукта", rec) is None
+        assert pending.check(kind, "пропустить", rec) is None
+        assert pending.check(kind, "  ", rec) is not None
+
+
+def test_nfr_key_refuses_text_accepts_unknown():
+    kind = pending.INTERVIEW_REPAIR
+    for key in ("nfr:perf", "nfr:cost"):
+        rec = {"id": f"interview-repair:{key}:x", "key": key}
+        assert pending.check(kind, "неизвестно", rec) is None
+        assert pending.check(kind, "Пока не решили.", rec) is None
+        assert pending.check(kind, "пропустить", rec) is None
+        reason = pending.check(kind, "ответ за 2 секунды", rec)
+        assert reason is not None and "dfl answer --items" in reason
+    table = {"id": "interview-repair:table:стоить:x", "key": "table:стоить"}
+    assert pending.check(kind, "неизвестно", table) is not None

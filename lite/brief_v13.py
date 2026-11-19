@@ -132,7 +132,7 @@ def _is_open(entry: Any) -> bool:
     return prefix == "Q" and not closed
 
 
-def _has_owner(domain: str, view: SessionView) -> bool:
+def has_owner(domain: str, view: SessionView) -> bool:
     """В сессии есть P или открытый Q с этим `owns`."""
     return any(
         _is_open(e) and domain in (e.fields.get("owns") or []) for e in view.entries
@@ -142,7 +142,7 @@ def _has_owner(domain: str, view: SessionView) -> bool:
 def owner_entries(domain: str, text: str, view: SessionView) -> list[dict[str, Any]]:
     """Записи ответа о владельце домена: имя — `P`, «никто» — открытый `Q`;
     владелец уже назван — `[]`."""
-    if _has_owner(domain, view):
+    if has_owner(domain, view):
         return []
     label = DOMAIN_LABELS[domain]
     if is_unknown(text):
@@ -170,7 +170,7 @@ def _row_category(prefix: str, categories: list[str]) -> str | None:
     return None
 
 
-def _cell(text: str) -> str:
+def cell(text: str) -> str:
     """Ячейка таблицы: без `|` и переводов строк."""
     return re.sub(r"[|\r\n]", " ", text)
 
@@ -189,7 +189,7 @@ def derived_rows(view: SessionView) -> list[tuple[str, dict[str, Any]]]:
     out: list[tuple[str, dict[str, Any]]] = []
     for entry in view.entries:
         record = view.entry_record(entry.id)
-        words = _cell(str(record.get("Preference") or ""))
+        words = cell(str(record.get("Preference") or ""))
         holder = view.holders.get(entry.id)
         if not words or holder is None:
             continue
@@ -198,7 +198,7 @@ def derived_rows(view: SessionView) -> list[tuple[str, dict[str, Any]]]:
         )
         if category is None or _has_row(view.answers.get(holder, {}), words, entry.id):
             continue
-        assumption = _cell(str(record.get("Acceptance") or record.get("Target") or ""))
+        assumption = cell(str(record.get("Acceptance") or record.get("Target") or ""))
         out.append(
             (
                 holder,

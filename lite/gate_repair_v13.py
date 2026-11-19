@@ -49,6 +49,7 @@ TABLE_TOPICS = {
 CATEGORY_UNKNOWN = "категория не узнана — пункт не исправлен"
 TABLE_DERIVED = "таблица перевода: строки из записанных предпочтений"
 NO_CONSTRAINT = "в ответе нет пункта-ограничения — строка «{category}» не записана"
+NO_REQUIREMENT = "в ответе нет требования — «{label}» не записано"
 
 
 def repair_v13(
@@ -107,7 +108,7 @@ def _fill_category(
     record = view.entry_record(eid)
     if record.get("category"):
         return True
-    hypothesis = bv.category_hypothesis(_record_text(record))
+    hypothesis = record_hypothesis(record)
     answer = ask(category_question(record["body"], hypothesis))
     if answer is None:
         return False
@@ -115,9 +116,18 @@ def _fill_category(
     if categories is None:
         say(CATEGORY_UNKNOWN)
         return False
+    return _send(qid, category_doc(record, categories), view, resend)
+
+
+def record_hypothesis(record: dict[str, Any]) -> list[str]:
+    """Гипотеза категории пункта по его формулировке, словам и цели."""
+    return bv.category_hypothesis(_record_text(record))
+
+
+def category_doc(record: dict[str, Any], categories: list[str]) -> dict[str, Any]:
+    """Ответ-дополнение: пункт `record` с категориями и заметка словами."""
     note = f"Категория «{record['body']}»: {_shown(categories)}"
-    doc = {"text": note, "entries": [{**record, "category": categories}]}
-    return _send(qid, doc, view, resend)
+    return {"text": note, "entries": [{**record, "category": categories}]}
 
 
 def category_question(body: str, hypothesis: list[str]) -> str:
@@ -153,32 +163,43 @@ def _fill_numeric(
     «неизвестно» — `NFR` с целью из нового `Q` исследования. 1 — не
     исправлено."""
     view = load(session)
-    if _has_category(view, kind):
+    if has_category(view, kind):
         return 0
     qid = gr.topic_holder(view, "nfr")
     if qid is None:
         return 1
-    question = bv.NUMERIC_QUESTIONS[kind]
-    answer = ask(gr.NUMERIC_ASK.format(question=question))
+    answer = ask(numeric_question(kind))
     if answer is None:
         return 1
     if bv.is_unknown(answer):
-        doc = {"text": f"{question} — {answer.strip()}"}
-        doc["entries"] = unknown_numeric_entries(kind, view)
+        doc = unknown_numeric_doc(kind, answer, view)
         return 0 if _send(qid, doc, view, resend) else 1
-    q = Question(qid, "nfr", question)
+    q = Question(qid, "nfr", bv.NUMERIC_QUESTIONS[kind])
     done = structure_answer(q, answer, view, agent, may_ask=False)
     if isinstance(done, Failed):
         say(done.message)
         return 1
     doc = yaml.safe_load(done.payload) if isinstance(done, Ready) else {}
-    if not _with_category(doc, kind):
-        say(f"в ответе нет требования — «{NUMERIC_LABELS[kind]}» не записано")
+    if not with_category(doc, kind):
+        say(NO_REQUIREMENT.format(label=NUMERIC_LABELS[kind]))
         return 1
     return 0 if _send(qid, doc, view, resend) else 1
 
 
-def _has_category(view: SessionView, kind: str) -> bool:
+def numeric_question(kind: str) -> str:
+    """Вопрос человеку об ожиданиях `kind` (`perf`/`cost`)."""
+    return gr.NUMERIC_ASK.format(question=bv.NUMERIC_QUESTIONS[kind])
+
+
+def unknown_numeric_doc(kind: str, answer: str, view: SessionView) -> dict[str, Any]:
+    """Ответ-дополнение на «неизвестно» по `kind`: заметка и `NFR` + `Q`."""
+    return {
+        "text": f"{bv.NUMERIC_QUESTIONS[kind]} — {answer.strip()}",
+        "entries": unknown_numeric_entries(kind, view),
+    }
+
+
+def has_category(view: SessionView, kind: str) -> bool:
     """В сессии есть `NFR` категории `kind`."""
     return any(
         e.id.startswith("NFR-") and kind in (e.fields.get("category") or [])
@@ -186,7 +207,7 @@ def _has_category(view: SessionView, kind: str) -> bool:
     )
 
 
-def _with_category(doc: dict[str, Any], kind: str) -> bool:
+def with_category(doc: dict[str, Any], kind: str) -> bool:
     """Есть `NFR` категории `kind` (агент не поставил — первому `NFR`
     ответа она дописывается); нет ни одного `NFR` — `False`."""
     nfrs = [e for e in doc.get("entries") or [] if str(e["id"]).startswith("NFR-")]
@@ -226,20 +247,28 @@ def _fill_owner(
     """Владелец домена: имя/роль — `P`, «неизвестно» — открытый `Q`. 1 —
     не исправлено."""
     view = load(session)
-    if bv._has_owner(domain, view):
+    if bv.has_owner(domain, view):
         return 0
     qid = gr.topic_holder(view, "personas")
     if qid is None:
         return 1
-    label = bv.DOMAIN_LABELS[domain]
-    answer = ask(gr.OWNER_ASK.format(label=label))
+    answer = ask(owner_question(domain))
     if answer is None:
         return 1
-    doc = {
-        "text": f"Кто отвечает за {label}: {answer.strip()}",
+    return 0 if _send(qid, owner_doc(domain, answer, view), view, resend) else 1
+
+
+def owner_question(domain: str) -> str:
+    """Вопрос человеку о владельце домена."""
+    return gr.OWNER_ASK.format(label=bv.DOMAIN_LABELS[domain])
+
+
+def owner_doc(domain: str, answer: str, view: SessionView) -> dict[str, Any]:
+    """Ответ-дополнение о владельце: заметка и `P`/`Q` с `owns`."""
+    return {
+        "text": f"Кто отвечает за {bv.DOMAIN_LABELS[domain]}: {answer.strip()}",
         "entries": bv.owner_entries(domain, answer, view),
     }
-    return 0 if _send(qid, doc, view, resend) else 1
 
 
 # --- GC-18/GC-19: строки таблицы перевода ---
@@ -257,13 +286,13 @@ def _fill_table(
     всё ещё нет, — вопрос. Число недостающих категорий после шага."""
     if not categories:
         return 0
-    _send_derived(session, resend, load)
+    send_derived(session, resend, load)
     for category in missing_categories(load(session)):
         _fill_table_category(category, session, ask, agent, resend, load)
     return len(missing_categories(load(session)))
 
 
-def _send_derived(session: str, resend: gr.Send, load: gr.Load) -> None:
+def send_derived(session: str, resend: gr.Send, load: gr.Load) -> None:
     """Выведенные строки — держателям их пунктов (каждому — одной
     пересылкой, сессия перечитана)."""
     groups: dict[str, list[dict[str, Any]]] = {}
@@ -302,7 +331,7 @@ def _fill_table_category(
     qid = gr.topic_holder(view, topic)
     if qid is None:
         return
-    question = gr.TABLE_ASK.format(category=category)
+    question = table_question(category)
     answer = ask(question)
     if answer is None:
         return
@@ -316,6 +345,11 @@ def _fill_table_category(
         say(NO_CONSTRAINT.format(category=category))
         return
     _send(qid, doc, view, resend)
+
+
+def table_question(category: str) -> str:
+    """Вопрос человеку по обязательной категории таблицы."""
+    return gr.TABLE_ASK.format(category=category)
 
 
 def with_row(doc: dict[str, Any], category: str, words: str) -> bool:
@@ -333,10 +367,10 @@ def with_row(doc: dict[str, Any], category: str, words: str) -> bool:
         return False
     target = own[0].get("Acceptance") or own[0].get("Target") or ""
     row = {
-        "words": bv._cell(words.strip()),
+        "words": bv.cell(words.strip()),
         "category": category,
         "constraint": [own[0]["id"]],
-        "assumption": bv._cell(str(target)),
+        "assumption": bv.cell(str(target)),
     }
     doc["translations"] = [*rows, row]
     return True
@@ -363,11 +397,16 @@ def _fill_confirmation(
     sent = True
     for qid in dict.fromkeys(q for q, _row in pending):
         view = load(session)
-        held = view.held_answer(qid)
-        rows = bv.confirmed_rows(list(held.get("translations") or []), who, due)
-        doc = {"text": f"Допущения подтвердит: {who}, срок {due}", "translations": rows}
+        doc = confirmation_doc(view, qid, who, due)
         sent = _send(qid, doc, view, resend) and sent
     return 0 if sent else 1
+
+
+def confirmation_doc(view: SessionView, qid: str, who: str, due: str) -> dict[str, Any]:
+    """Ответ-дополнение держателю `qid`: его строки с подтверждающим и сроком."""
+    held = view.held_answer(qid)
+    rows = bv.confirmed_rows(list(held.get("translations") or []), who, due)
+    return {"text": f"Допущения подтвердит: {who}, срок {due}", "translations": rows}
 
 
 def unconfirmed(view: SessionView) -> list[tuple[str, dict[str, Any]]]:

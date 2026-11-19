@@ -11,6 +11,7 @@ from typing import Any
 import yaml
 
 from governance import interview as iv
+from lite import brief_v13 as bv
 from lite import gate_repair as gr
 from lite import interview_chat as ic
 from lite import interview_remote as ir
@@ -331,3 +332,106 @@ def test_findings_render_plain_text() -> None:
         {"raw": "required topic 'jobs' is not covered",
          "text": "не раскрыта тема: задачи пользователей"}
     ]  # fmt: skip
+
+
+# --- контракт брифа v1.3: починка GC-18…GC-21 без терминала (#813) ---
+
+V13_LIVE = [
+    "GC-18 error [Translation table] секции нет или в ней нет строк",
+    "GC-20 error [Category: cost] нет ни одной NFR категории cost",
+    "GC-20 error [Category: perf] нет ни одной NFR категории perf",
+    "GC-20 error [NFR-01] нет **Category**: без неё perf/cost-цель не проверить",
+    "GC-20 error [NFR-02] нет **Category**: без неё perf/cost-цель не проверить",
+    "GC-21 error [owns: process] владелец не назван: нет P или открытого Q с этим owns",
+    "GC-21 error [owns: data] владелец не назван: нет P или открытого Q с этим owns",
+    "GC-21 error [owns: quality] владелец не назван: нет P или открытого Q с этим owns",
+    "GC-21 error [owns: operations] владелец не назван: нет P или открытого Q с этим owns",
+]  # fmt: skip
+V13_ROW = {
+    "words": "запуск одной командой",
+    "category": "делать",
+    "constraint": ["FR-01"],
+    "assumption": "одна команда",
+}
+
+
+def _v13_view(frame: str = "customer") -> SessionView:
+    """customer: цель, персона без owns, FR с таблицей, NFR без категории."""
+    records = {
+        "customer.goals.01": [{"id": "G-01", "body": "Цель"}],
+        "customer.personas.01": [{"id": "P-01", "body": "Аналитик"}],
+        "customer.functions.01": [
+            {"id": "FR-01", "body": "Запуск", "Acceptance": "одна команда"}
+        ],
+        "customer.nfr.01": [{"id": "NFR-01", "body": "Ответ быстро, за секунды"}],
+    }
+    answers: dict[str, dict[str, Any]] = {
+        q: {"text": q, "entries": [dict(r) for r in rs_]} for q, rs_ in records.items()
+    }
+    answers["customer.functions.01"]["translations"] = [dict(V13_ROW)]
+    entries = [
+        Entry(
+            r["id"], r["body"], {k: v for k, v in r.items() if k not in ("id", "body")}
+        )
+        for rs_ in records.values()
+        for r in rs_
+    ]
+    return SessionView(
+        frame=frame,
+        required={},
+        optional={},
+        entries=entries,
+        declared=[],
+        holders={r["id"]: q for q, rs_ in records.items() for r in rs_},
+        answers=answers,
+        answered_keys=[],
+        readiness="incomplete",
+        asked={q: q.split(".")[1] for q in records},
+    )
+
+
+def test_v13_keys_order() -> None:
+    """Находки живого прогона: категория NFR (NFR-02 без держателя — нет),
+    perf, cost, владельцы, недостающие категории таблицы, допущения."""
+    view = _v13_view()
+    reply = _status(11, V13_LIVE)
+    first = ir.next_question(reply, view, EMPTY, incomplete=True, upstream="")
+    assert first is not None
+    q, data = first
+    assert (q.kind, q.key) == (pending.INTERVIEW_REPAIR, "category:NFR-01")
+    assert data["hypothesis"] == ["perf"] and data["holder"] == "customer.nfr.01"
+    assert "Ответ быстро, за секунды" in q.text and "скорость" in q.text
+    assert _keys(reply, view, EMPTY) == [
+        "category:NFR-01",
+        "nfr:perf",
+        "nfr:cost",
+        "owner:process",
+        "owner:data",
+        "owner:quality",
+        "owner:operations",
+        "table:не делать",
+        "table:стоить",
+        "table:доказывать",
+        "assumptions",
+    ]
+    marks = {"skipped": [], "done": ["category:NFR-01", "nfr:perf"]}
+    got = ir.next_question(reply, view, marks, incomplete=True, upstream="")
+    assert got is not None and got[0].key == "nfr:cost"
+    question = bv.NUMERIC_QUESTIONS["cost"]
+    assert got[0].text == gr.NUMERIC_ASK.format(question=question)
+    assert got[1]["holder"] == "customer.nfr.01"
+    assert ir.HUMAN_PLACEHOLDER in got[1]["prompt"]
+    assert "стоимости" in got[1]["prompt"]
+    done = {"skipped": [], "done": _keys(reply, view, EMPTY)[:-1]}
+    last = ir.next_question(reply, view, done, incomplete=True, upstream="")
+    assert last is not None and last[0].key == "assumptions"
+    assert last[1]["rows"] == [
+        {"words": "запуск одной командой", "constraint": ["FR-01"],
+         "assumption": "одна команда"},
+    ]  # fmt: skip
+    assert "одна команда" in last[0].text
+
+
+def test_v13_skipped_for_engineer() -> None:
+    view = _v13_view("engineer")
+    assert _keys(_status(11, V13_LIVE), view, EMPTY) == []
