@@ -1,7 +1,8 @@
 """Лёгкая установка DarkFactory (режим test): комплектация, конфиг, `dfl`.
 
 Запускается из `install.sh`: клонирует закреплённые соседние репо рядом с
-devtools, пишет конфиг режима test и кладёт обёртку `dfl` в `~/.local/bin`.
+devtools, пишет конфиг режима test, кладёт обёртку `dfl` в `~/.local/bin` и
+ставит скил `darkfactory` для Claude Code в `~/.claude/skills`.
 Каталог `lite/` лежит вне `governance/`, поэтому может звать `uv`.
 """
 
@@ -26,6 +27,12 @@ from lite.pipeline import chain_open
 HERE = Path(__file__).resolve().parent
 COMPONENTS = HERE / "components.toml"
 TEMPLATE = HERE.parent / "templates" / "darkfactory" / "config.test.example.toml"
+SKILL_SOURCE = HERE.parent / "skills" / "darkfactory"
+SKILL_MARKER = ".installed-by-darkfactory"
+SKILL_MARKER_TEXT = (
+    "Установлено install.sh DarkFactory; повторный install.sh перезапишет "
+    "этот каталог целиком.\n"
+)
 SCHEMA = "darkfactory-components/v1"
 TERMINAL = ("completed", "merged_unverified", "brief_ready")
 NET_HINT = "проверьте сеть и доступ к репо, затем повторите install.sh"
@@ -192,6 +199,30 @@ def write_launcher(bin_dir: Path, devtools: Path) -> Path:
     return out
 
 
+def check_skill_target(dest: Path) -> None:
+    """Отказ, если `dest` уже есть и не поставлен install.sh (нет метки)."""
+    if not (dest.exists() or dest.is_symlink()):
+        return
+    if dest.is_dir() and not dest.is_symlink() and (dest / SKILL_MARKER).is_file():
+        return
+    raise InstallError(
+        f"{dest} уже есть и не установлен install.sh — "
+        "переименуйте или удалите его и повторите"
+    )
+
+
+def write_skill(skills_dir: Path, source: Path = SKILL_SOURCE) -> Path:
+    """Заменить `skills_dir/darkfactory` копией `source`, дописав метку."""
+    dest = skills_dir / source.name
+    check_skill_target(dest)
+    if dest.exists():
+        shutil.rmtree(dest)
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, dest)
+    (dest / SKILL_MARKER).write_text(SKILL_MARKER_TEXT, encoding="utf-8")
+    return dest
+
+
 def _login_hint(run: Runner) -> str:
     try:
         res = run(
@@ -255,6 +286,7 @@ def main(
     components: Path = COMPONENTS,
     config_path: Path | None = None,
     bin_dir: Path | None = None,
+    skills_dir: Path | None = None,
     run: Runner = subprocess.run,
 ) -> int:
     """Точка входа install.sh. Коды: 0 — готово, 1 — ошибка, 2 — есть прогоны."""
@@ -275,7 +307,7 @@ def main(
         return 2
     dt = HERE.parent if devtools is None else devtools
     try:
-        return _install(args, run, dt, components, config_path, bin_dir)
+        return _install(args, run, dt, components, config_path, bin_dir, skills_dir)
     except (InstallError, df_config.ConfigError) as exc:
         print(f"Ошибка установки: {exc}", file=sys.stderr)
         return 1
@@ -300,8 +332,11 @@ def _install(
     components: Path,
     config_path: Path | None,
     bin_dir: Path | None,
+    skills_dir: Path | None = None,
 ) -> int:
     root = devtools.parent
+    skills = Path.home() / ".claude" / "skills" if skills_dir is None else skills_dir
+    check_skill_target(skills / SKILL_SOURCE.name)
     comps = load_components(components)
     check_components(root, comps, run)
     for comp in comps:
@@ -316,6 +351,7 @@ def _install(
     target = Path.home() / ".local" / "bin" if bin_dir is None else bin_dir
     launcher = write_launcher(target, devtools)
     print(f"Обёртка: {launcher}")
+    print(f"Скил: {write_skill(skills)}")
     if str(target) not in os.environ.get("PATH", "").split(os.pathsep):
         print(f'Добавьте в PATH: export PATH="{target}:$PATH"')
     return 0
