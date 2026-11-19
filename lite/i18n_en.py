@@ -5,6 +5,17 @@
 from __future__ import annotations
 
 EN: dict[str, str] = {
+    "нет личного прогона, ждущего бриф — dfl status": (
+        "no personal run is waiting for a brief — dfl status"
+    ),
+    "не прочитать бриф из {path}: {error}": "cannot read the brief from {path}: {error}",
+    "реплика записана": "note recorded",
+    "Тема: {subject}": "Subject: {subject}",
+    "вопросов задано: {n} из {m}": "questions asked: {n} of {m}",
+    "проверок брифа подряд: {n}": "brief checks in a row: {n}",
+    "черновика брифа нет": "no brief draft",
+    "черновик брифа есть": "a brief draft exists",
+    "функция без критерия: {fid}": "function without a criterion: {fid}",
     # баннер режима test (факты — `governance.df_config`, Task 2)
     "режим test: по сравнению со strict выключено": (
         "test mode: compared with strict, disabled:"
