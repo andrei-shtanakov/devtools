@@ -33,11 +33,13 @@ NUMERIC_QUESTIONS = {
 CATEGORY_STEMS = {
     "perf": ("скорост", "быстр", "секунд", "задержк", "ожидан", "объём", "нагрузк"),
     "cost": ("стоим", "бюджет", "цен", "расход", "денег", "дорог", "дороже", "₽"),
-    "security": ("доступ", "парол", "шифр", "утечк"),
+    "security": ("безопасн", "доступ", "парол", "шифр", "утечк"),
     "compliance": ("регламент", "закон", "аудит", "соответств"),
     "safety": ("вред", "опасн"),
     "availability": ("доступност", "простой", "отказ"),
 }
+# В слове побеждает самая длинная основа: «доступность» — availability, не
+# security («доступ»); «безопасность» — security, не safety («опасн»).
 UNKNOWN_WORDS = frozenset({
     "неизвестно", "никто", "нет", "не назначен", "не назначено",
     "пока нет", "пока не решили", "не решили",
@@ -89,13 +91,19 @@ def gaps(findings: list[str]) -> Gaps:
 
 
 def category_hypothesis(body: str) -> list[str]:
-    """Категории NFR по ключевым основам текста; ничего не узнано — `[]`."""
-    text = body.casefold()
-    return [
-        cat
-        for cat, stems in CATEGORY_STEMS.items()
-        if any(stem in text for stem in stems)
-    ]
+    """Категории NFR по ключевым основам текста; ничего не узнано — `[]`.
+    В каждом слове засчитывается только самая длинная найденная основа."""
+    found: set[str] = set()
+    for word in body.casefold().split():
+        hits = [
+            (len(stem), cat)
+            for cat, stems in CATEGORY_STEMS.items()
+            for stem in stems
+            if stem in word
+        ]
+        longest = max((n for n, _cat in hits), default=0)
+        found |= {cat for n, cat in hits if n == longest}
+    return [cat for cat in CATEGORY_STEMS if cat in found]
 
 
 def parse_categories(text: str, hypothesis: list[str]) -> list[str] | None:

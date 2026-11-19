@@ -32,7 +32,7 @@ CATEGORY_LABELS = {
     "cost": "стоимость",
     "security": "безопасность",
     "compliance": "регламент",
-    "safety": "безопасность людей",
+    "safety": "вред людям",
     "availability": "доступность",
 }
 NUMERIC_LABELS = {

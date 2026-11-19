@@ -857,3 +857,36 @@ def test_skip_counts_in_gate_left(capsys) -> None:
          _agent(), live)  # fmt: skip
     assert live.resent == []
     assert gr.GATE_LEFT.format(n=2) in capsys.readouterr().out
+
+
+# слово подсказки вопроса о категории → категория (ревью задачи 3, #813)
+CATEGORY_HINT_WORDS = {
+    "скорость": "perf",
+    "стоимость": "cost",
+    "безопасность": "security",
+    "доступ": "security",
+    "регламент": "compliance",
+}
+
+
+@pytest.mark.parametrize(("word", "category"), CATEGORY_HINT_WORDS.items())
+def test_category_hint_words_recognised(word: str, category: str) -> None:
+    assert word in gr.CATEGORY_ASK and word in gr.CATEGORY_ASK_OPEN
+    assert bv.parse_categories(word, ["perf"]) == [category]
+
+
+def test_category_hint_lists_only_known_words() -> None:
+    hint = gr.CATEGORY_ASK.split("иначе: ")[1].split("…")[0]
+    assert hint.split(", ") == list(CATEGORY_HINT_WORDS)
+
+
+def test_availability_not_security() -> None:
+    assert bv.parse_categories("доступность", []) == ["availability"]
+    assert bv.category_hypothesis("Доступность 99,9 % в месяц") == ["availability"]
+
+
+def test_category_labels_round_trip() -> None:
+    from lite import gate_repair_v13 as v13
+
+    for code, label in v13.CATEGORY_LABELS.items():
+        assert bv.parse_categories(label, []) == [code], label
