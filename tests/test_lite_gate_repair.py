@@ -537,3 +537,28 @@ def test_criteria_malformed_retried_once() -> None:
     assert "отклонён" in agent.prompts[1]
     [(_qid, funcs)] = disc.resent
     assert funcs["entries"] == [{**FR1, "Acceptance": FR_HYP}]
+
+
+def test_appended_merges_translations_by_words_and_constraint() -> None:
+    held = {
+        "text": "a",
+        "translations": [
+            {"words": "w1", "category": "делать", "constraint": ["FR-01"]},
+            {"words": "w2", "category": "делать", "constraint": ["FR-02"]},
+        ],
+    }
+    new = yaml.safe_dump({
+        "text": "b",
+        "translations": [
+            {"words": "w2", "category": "стоить", "constraint": ["FR-02"]},
+            {"words": "w3", "category": "не делать", "constraint": ["OUT-01"]},
+        ],
+    }, allow_unicode=True)  # fmt: skip
+    out = yaml.safe_load(gr.appended(held, new))
+    assert [(r["words"], r["category"]) for r in out["translations"]] == [
+        ("w1", "делать"),
+        ("w2", "стоить"),
+        ("w3", "не делать"),
+    ]
+    plain = yaml.safe_load(gr.appended({"text": "a"}, yaml.safe_dump({"text": "b"})))
+    assert "translations" not in plain

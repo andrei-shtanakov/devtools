@@ -132,7 +132,22 @@ def appended(held: dict[str, Any], payload: str) -> str:
     out.pop("entries", None)
     if entries:
         out["entries"] = entries
+    rows = _merged_rows(held.get("translations"), new.get("translations"))
+    if rows:
+        out["translations"] = rows
     return yaml.safe_dump(out, allow_unicode=True, sort_keys=False)
+
+
+def _merged_rows(old: Any, new: Any) -> list[dict[str, Any]]:
+    """Строки таблицы: прежние, затем новые; та же пара (`words`,
+    `constraint`) — заменяется новой."""
+
+    def key(row: dict[str, Any]) -> tuple[Any, ...]:
+        return row.get("words"), tuple(row.get("constraint") or ())
+
+    merged = {key(r): r for r in old or []}
+    merged.update({key(r): r for r in new or []})
+    return list(merged.values())
 
 
 def _ids(pattern: re.Pattern[str], findings: list[str]) -> list[str]:
