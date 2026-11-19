@@ -311,8 +311,9 @@ def _hint_once() -> None:
 
 
 def is_skip(text: str) -> bool:
-    """Ответ — «пропустить» или «не знаю» (регистр и пробелы не важны)."""
-    return text.strip().casefold() in SKIP_WORDS
+    """Ответ — «пропустить» или «не знаю» (регистр, пробелы и конечная
+    пунктуация не важны)."""
+    return text.strip().casefold().rstrip(".!?,;… ") in SKIP_WORDS
 
 
 def stdin_read(prompt: str) -> str | None:

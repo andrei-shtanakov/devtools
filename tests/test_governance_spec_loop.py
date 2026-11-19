@@ -2932,3 +2932,29 @@ def test_test_mode_resume_prints_previous_stop_reason(
     assert [c[0] for c in env.calls] == ["resume"]
     out = capsys.readouterr().out
     assert "причина прошлой остановки: error EDGE-CHECK(x): R4 minor: y" in out
+
+
+def test_recover_with_ws_id_skips_slug(runs_root, tmp_path) -> None:
+    """Хвост ревью #818 (devtools#813 §8): с `--ws-id` слаг темы не нужен и не
+    вычисляется — тема без букв не валит восстановление отказом слага."""
+    asked: list[str] = []
+
+    class _Ops:
+        def prs_by_head_prefix(self, repo_slug, prefix):
+            asked.append(prefix)
+            return []
+
+    state = spec_loop.recover_wave_run_from_github(
+        subject="",
+        repo="alpha",
+        repo_slug="owner/alpha",
+        target_dir=str(tmp_path),
+        profile="profiles/team-exp.yaml",
+        author_backend="codex",
+        requested_ws_id="x-20260907",
+        requested_bundle_dir=None,
+        ops=_Ops(),
+        acquire=lambda run_id: None,
+    )
+    assert state is None
+    assert len(asked) == 1 and "x-20260907" in asked[0]

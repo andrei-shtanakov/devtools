@@ -79,6 +79,19 @@ INTERVIEW_REFUSAL = (
     "ответ по существу: dfl answer --items <файл> --id {qid}; "
     "здесь — только «пропустить»"
 )
+NUMERIC_REFUSAL = (
+    "ответ по существу: dfl answer --items <файл> --id {qid}; "
+    "здесь — только «пропустить» или «неизвестно»"
+)
+#: ключи починки, ответ на которые — текст человека (`dfl reply`), не раскладка
+TEXT_KEY_PREFIXES = ("verdict:", "category:", "owner:")
+TEXT_KEYS = frozenset({"assumptions"})
+NUMERIC_KEY_PREFIX = "nfr:"
+
+
+def takes_text(key: str) -> bool:
+    """Ответ на вопрос интервью с ключом `key` — текст через `dfl reply`."""
+    return key in TEXT_KEYS or key.startswith(TEXT_KEY_PREFIXES)
 
 
 class PendingError(Exception):
@@ -294,10 +307,16 @@ def _check_edge(text: str, rec: Mapping | None) -> str | None:
 def _check_interview(text: str, rec: Mapping | None) -> str | None:
     if is_skip(text):
         return None
-    verdict = str((rec or {}).get("key", "")).startswith("verdict:")
-    if verdict and text.strip():
+    key = str((rec or {}).get("key", ""))
+    if takes_text(key) and text.strip():
         return None
-    return INTERVIEW_REFUSAL.format(qid=(rec or {}).get("id", ""))
+    qid = (rec or {}).get("id", "")
+    if key.startswith(NUMERIC_KEY_PREFIX):
+        # ленивый импорт: `brief_v13` тянет правила починки
+        from lite.brief_v13 import is_unknown
+
+        return None if is_unknown(text) else NUMERIC_REFUSAL.format(qid=qid)
+    return INTERVIEW_REFUSAL.format(qid=qid)
 
 
 def check(kind: str, text: str, rec: Mapping | None = None) -> str | None:

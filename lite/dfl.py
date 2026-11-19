@@ -32,7 +32,7 @@ from collections.abc import Callable
 from contextlib import ExitStack, redirect_stdout
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import yaml
 
@@ -48,6 +48,7 @@ from governance.ops import Ops, RealOps
 from lite import edge_resolve as er
 from lite import failure_log as fl
 from lite import gate_repair as gr
+from lite import gate_repair_v13 as gv
 from lite import i18n, pending, runlog
 from lite import interview_chat as ic
 from lite import interview_remote as ir
@@ -1831,13 +1832,17 @@ def _remote_pass(state: rs.RunState) -> tuple[pending.Question | None, bool]:
             view = load_session(session_id)
         except (InterviewStateError, OSError, df_config.ConfigError) as exc:
             raise _SessionUnreadable(str(exc)) from exc
-        found = ir.next_question(
-            reply,
-            view,
-            ir.load_marks(rd),
-            incomplete=_stopped_incomplete(state),
-            upstream=_upstream_text(state),
-        )
+        where = {
+            "incomplete": _stopped_incomplete(state),
+            "upstream": _upstream_text(state),
+        }
+        if ir.table_rows_due(reply, view, ir.load_marks(rd), **where):
+            # строки таблицы из `Preference` — без вопроса, раз за проход
+            resend = _sender(state, supersede=True)
+            gv.send_derived(session_id, resend, load_session)
+            ir.mark(rd, ir.TABLE_AUTO, "done")
+            continue
+        found = ir.next_question(reply, view, ir.load_marks(rd), **where)
         if found is None:
             rec = pending.load(rd)  # вопрос, которого проход больше не ставит
             if rec is not None and rec.get("kind") in pending.INTERVIEW_KINDS:
@@ -2732,7 +2737,7 @@ def _apply_items(state: rs.RunState, path: Path, qid: str) -> None:
         raise DflError(ITEMS_STALE.format(run_id=state.run_id, status=state.status))
     if rec.get("id") != qid:
         raise DflError(t(pending.STALE))
-    if kind not in pending.INTERVIEW_KINDS or key.startswith("verdict:"):
+    if kind not in pending.INTERVIEW_KINDS or pending.takes_text(key):
         raise DflError(ITEMS_NOT_CONTENT)
     text, raw = _read_items(path)
     session_id = str((state.interview or {}).get("session_id"))
@@ -2779,7 +2784,9 @@ def _send_items(
                 "у вопроса нет ответа-держателя — dfl run поставит его заново"
             )
         if kind == pending.INTERVIEW_TOPUP:
-            parts = [(holder, text, _items_entries(text, raw, view))]
+            parts = [(holder, text, *_items_parts(text, raw, view))]
+        elif key.startswith(("nfr:", "table:")):
+            parts = [_v13_part(key, holder, text, raw, view)]
         elif key.startswith("criterion:"):
             eid = key.split(":", 1)[1]
             parts = [_criterion_part(eid, text, raw, view, str(rec.get("id", "")))]
@@ -2790,15 +2797,35 @@ def _send_items(
     return _resend_parts(state, parts, view)
 
 
-def _items_entries(text: str, raw: str, view: SessionView) -> list[dict]:
-    """Записи ответа по раскладке (`structure.payload_from_items`)."""
+def _v13_part(
+    key: str, holder: str, text: str, raw: str, view: SessionView
+) -> tuple[str, str, list[dict], list[dict]]:
+    """`nfr:<kind>` / `table:<категория>` как в терминале
+    (`gate_repair_v13`): `NFR` без категории `kind` её получает, строка
+    категории без строки агента — по первому пункту-ограничению; нечего
+    дописать — отказ «не записано». Записи и строки — держателю `holder`."""
     doc = yaml.safe_load(st.payload_from_items(text, raw, view))
-    return list(doc.get("entries") or [])
+    how, arg = key.split(":", 1)
+    if how == "nfr" and not gv.with_category(doc, arg):
+        raise DflError(gv.NO_REQUIREMENT.format(label=gv.NUMERIC_LABELS[arg]))
+    if how == "table" and not gv.with_row(doc, arg, text):
+        raise DflError(gv.NO_CONSTRAINT.format(category=arg))
+    entries = list(doc.get("entries") or [])
+    return holder, text, entries, list(doc.get("translations") or [])
+
+
+def _items_parts(
+    text: str, raw: str, view: SessionView
+) -> tuple[list[dict], list[dict]]:
+    """Записи и строки таблицы `translations` ответа по раскладке
+    (`structure.payload_from_items`; `ref` строк уже заменены id)."""
+    doc = yaml.safe_load(st.payload_from_items(text, raw, view))
+    return list(doc.get("entries") or []), list(doc.get("translations") or [])
 
 
 def _criterion_part(
     eid: str, text: str, raw: str, view: SessionView, qid: str
-) -> tuple[str, str, list[dict]]:
+) -> tuple[str, str, list[dict], list[dict]]:
     """GC-08 как `gate_repair._fill_criterion`: пункты — по правилам
     `gate_repair._criterion_items` (только критерий пункта и новые `Q`, на
     которые он ссылается). Согласие с гипотезой скила (`gate_repair._agrees`)
@@ -2820,7 +2847,7 @@ def _criterion_part(
         note = f"Критерий для «{record['body']}»: {shown}"
     else:
         note = f"Уточнение к «{record['body']}»: {words}"
-    return view.holders[eid], note, entries
+    return view.holders[eid], note, entries, []
 
 
 def _bare_no(words: str) -> bool:
@@ -2832,7 +2859,7 @@ def _bare_no(words: str) -> bool:
 
 def _traces_parts(
     key: str, raw: str, view: SessionView
-) -> list[tuple[str, str, list[dict]]]:
+) -> list[tuple[str, str, list[dict], list[dict]]]:
     """GC-13 как `gate_repair._fill_traces`: из пункта берутся только
     `traces` (прочее — из записи), цели — действующие пункты допустимых
     префиксов (`gate_repair._TRACE_TARGETS`); обновляется непустое
@@ -2866,22 +2893,26 @@ def _traces_parts(
         groups.setdefault(view.holders[eid], []).append(entry)
     if errors:
         raise st.FormError("; ".join(dict.fromkeys(errors)))
-    return [(qid, gr.TRACES_NOTE, group) for qid, group in groups.items()]
+    return [(qid, gr.TRACES_NOTE, group, []) for qid, group in groups.items()]
 
 
 def _resend_parts(
-    state: rs.RunState, parts: list[tuple[str, str, list[dict]]], view: SessionView
+    state: rs.RunState,
+    parts: list[tuple[str, str, list[dict], list[dict]]],
+    view: SessionView,
 ) -> str | None:
-    """Дописать каждому держателю его записи (замена по id) и заметку; текст,
+    """Дописать каждому держателю его записи (замена по id), строки таблицы
+    `translations` (замена по словам и ограничению) и заметку; текст,
     которым ответ держателя уже кончается (повтор после частичного отказа),
     не дублируется. Первый отказ discovery — его причина."""
     resend = _sender(state, supersede=True)
-    for qid, note, entries in parts:
+    for qid, note, entries, rows in parts:
         held = view.held_answer(qid)
         said = "" if str(held.get("text") or "").endswith(note) else note
-        part = yaml.safe_dump(
-            {"text": said, "entries": entries}, allow_unicode=True, sort_keys=False
-        )
+        doc: dict[str, Any] = {"text": said, "entries": entries}
+        if rows:
+            doc["translations"] = rows
+        part = yaml.safe_dump(doc, allow_unicode=True, sort_keys=False)
         reason = ir.discovery_refusal(resend(qid, gr.appended(held, part)))
         if reason is not None:
             return reason

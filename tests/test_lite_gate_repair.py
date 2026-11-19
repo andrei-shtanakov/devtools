@@ -15,6 +15,7 @@ import yaml
 
 from governance import interview as iv
 from governance.discovery_contract import gate_check
+from lite import brief_v13 as bv
 from lite import gate_repair as gr
 from lite import structure as sx
 from lite.interview_state import Entry, SessionView
@@ -537,3 +538,379 @@ def test_criteria_malformed_retried_once() -> None:
     assert "отклонён" in agent.prompts[1]
     [(_qid, funcs)] = disc.resent
     assert funcs["entries"] == [{**FR1, "Acceptance": FR_HYP}]
+
+
+def test_appended_merges_translations_by_words_and_constraint() -> None:
+    held = {
+        "text": "a",
+        "translations": [
+            {"words": "w1", "category": "делать", "constraint": ["FR-01"]},
+            {"words": "w2", "category": "делать", "constraint": ["FR-02"]},
+        ],
+    }
+    new = yaml.safe_dump({
+        "text": "b",
+        "translations": [
+            {"words": "w2", "category": "стоить", "constraint": ["FR-02"]},
+            {"words": "w3", "category": "не делать", "constraint": ["OUT-01"]},
+        ],
+    }, allow_unicode=True)  # fmt: skip
+    out = yaml.safe_load(gr.appended(held, new))
+    assert [(r["words"], r["category"]) for r in out["translations"]] == [
+        ("w1", "делать"),
+        ("w2", "стоить"),
+        ("w3", "не делать"),
+    ]
+    plain = yaml.safe_load(gr.appended({"text": "a"}, yaml.safe_dump({"text": "b"})))
+    assert "translations" not in plain
+
+
+# --- GC-18…GC-21: контракт брифа v1.3, фрейм заказчика (#813) ---
+
+V13_NFR_FINDING = (
+    "GC-20 error [NFR-01] нет **Category**: без неё perf/cost-цель не проверить"
+)
+_OWNER = "GC-21 error [owns: {}] владелец не назван: нет P или открытого Q с этим owns"
+PERS_QID = "customer.personas.01"
+OUT_QID = "customer.out_of_scope.01"
+
+
+def _v13_answers() -> dict[str, dict[str, Any]]:
+    return {
+        "customer.goals.01": {
+            "text": "цель",
+            "entries": [{"id": "G-01", "body": "Цель"}],
+        },
+        PERS_QID: {
+            "text": "аналитики",
+            "entries": [{"id": "P-01", "body": "Аналитик"}],
+        },
+        FUNCS_QID: {
+            "text": FUNCS_TEXT,
+            "entries": [
+                {
+                    **FR1,
+                    "Preference": "запуск одной командой",
+                    "Acceptance": "одна команда",
+                }
+            ],  # fmt: skip
+        },
+        NFR_QID: {
+            "text": "чтобы не ждать",
+            "entries": [
+                {
+                    "id": "NFR-01",
+                    "body": "Ответ быстро, за секунды",
+                    "Preference": "чтобы не ждать",
+                }
+            ],  # fmt: skip
+        },
+        OUT_QID: {
+            "text": "мобилка не нужна",
+            "entries": [
+                {
+                    "id": "OUT-01",
+                    "body": "Без мобильного клиента",
+                    "Preference": "мобилка не нужна",
+                }
+            ],  # fmt: skip
+        },
+    }
+
+
+@dataclass
+class Live:
+    """Фейк discovery с состоянием: пересылка меняет ответ, `load` — снимок."""
+
+    answers: dict[str, dict[str, Any]] = field(default_factory=_v13_answers)
+    frame: str = "customer"
+    resent: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+
+    def resend(self, qid: str, payload: str) -> iv.DiscoveryReply:
+        doc = yaml.safe_load(payload)
+        self.resent.append((qid, doc))
+        self.answers.pop(qid, None)
+        self.answers[qid] = doc
+        return iv.DiscoveryReply(10, {"operation": {"status": "ok"}}, "")
+
+    def load(self, _session: str) -> SessionView:
+        holders: dict[str, str] = {}
+        records: dict[str, dict[str, Any]] = {}
+        for qid, answer in self.answers.items():
+            for e in answer.get("entries") or []:
+                holders[e["id"]] = qid
+                records[e["id"]] = e
+        entries = [
+            Entry(
+                eid, r["body"], {k: v for k, v in r.items() if k not in ("id", "body")}
+            )
+            for eid, r in records.items()
+        ]
+        return SessionView(
+            frame=self.frame,
+            required={
+                "goals": "G",
+                "personas": "P",
+                "functions": "FR",
+                "nfr": "NFR",
+                "out_of_scope": "OUT",
+            },  # fmt: skip
+            optional={},
+            entries=entries,
+            declared=list(records),
+            holders=holders,
+            answers={q: dict(a) for q, a in self.answers.items()},
+            answered_keys=["goals", "personas", "functions", "nfr", "out_of_scope"],
+            readiness="ready",
+            asked={q: q.split(".")[1] for q in self.answers},
+        )
+
+
+def _v13(findings: list[str], ask: Any, agent: Any, live: Live) -> None:
+    gr.repair(findings, SESSION, ask=ask, agent=agent, resend=live.resend,
+              load=live.load, upstream=lambda: UPSTREAM)  # fmt: skip
+
+
+def _entry_of(doc: dict[str, Any], eid: str) -> dict[str, Any]:
+    return next(e for e in doc["entries"] if e["id"] == eid)
+
+
+def test_category_confirmed_by_yes() -> None:
+    live = Live()
+    ask = _asker("да")
+    _v13([V13_NFR_FINDING], ask, _agent(), live)
+    assert ask.asked == [
+        gr.CATEGORY_ASK.format(body="Ответ быстро, за секунды", hypothesis="скорость")
+    ]
+    [(qid, doc)] = live.resent
+    assert qid == NFR_QID and _entry_of(doc, "NFR-01")["category"] == ["perf"]
+
+
+def test_category_named_in_words() -> None:
+    live = Live()
+    _v13([V13_NFR_FINDING], _asker("это про стоимость"), _agent(), live)
+    [(_qid, doc)] = live.resent
+    assert _entry_of(doc, "NFR-01")["category"] == ["cost"]
+
+
+def test_category_without_hypothesis_asks_without_yes() -> None:
+    live = Live()
+    live.answers[NFR_QID]["entries"][0]["body"] = "Удобно"
+    ask = _asker("скорость")
+    _v13([V13_NFR_FINDING], ask, _agent(), live)
+    assert ask.asked == [gr.CATEGORY_ASK_OPEN.format(body="Удобно")]
+    assert "«да»" not in ask.asked[0]
+    assert _entry_of(live.resent[0][1], "NFR-01")["category"] == ["perf"]
+
+
+def test_numeric_unknown_creates_nfr_and_q() -> None:
+    live = Live()
+    ask = _asker("неизвестно")
+    finding = "GC-20 error [Category: perf] нет ни одной NFR категории perf"
+    _v13([finding], ask, _agent(), live)
+    assert ask.asked == [gr.NUMERIC_ASK.format(question=bv.NUMERIC_QUESTIONS["perf"])]
+    [(qid, doc)] = live.resent
+    assert qid == NFR_QID
+    nfr, q = _entry_of(doc, "NFR-02"), _entry_of(doc, "Q-01")
+    assert nfr["category"] == ["perf"] and nfr["Target"] == "значение из Q-01"
+    assert q["owner_role"] == "analyst"
+    assert _entry_of(doc, "NFR-01")["body"] == "Ответ быстро, за секунды"
+
+
+def test_numeric_answer_structured_into_nfr() -> None:
+    live = Live()
+    said = "не больше ста тысяч в месяц"
+    item = {"prefix": "NFR", "body": "Бюджет в месяц", "category": ["cost"],
+            "preference": said, "target": "не больше 100000 ₽ в месяц"}  # fmt: skip
+    agent = _agent({"items": [item]})
+    finding = "GC-20 error [Category: cost] нет ни одной NFR категории cost"
+    _v13([finding], _asker(said), agent, live)
+    assert bv.NUMERIC_QUESTIONS["cost"] in agent.prompts[0]
+    [(qid, doc)] = live.resent
+    assert qid == NFR_QID
+    assert _entry_of(doc, "NFR-02")["category"] == ["cost"]
+    assert said in doc["text"]
+
+
+def test_owner_named_and_unknown() -> None:
+    live = Live()
+    ask = _asker("Иван, руководитель отдела", "никто")
+    _v13([_OWNER.format("process"), _OWNER.format("data")], ask, _agent(), live)
+    assert ask.asked == [
+        gr.OWNER_ASK.format(label="процесс"),
+        gr.OWNER_ASK.format(label="данные"),
+    ]
+    (q1, first), (q2, second) = live.resent
+    assert q1 == q2 == PERS_QID
+    assert _entry_of(first, "P-02")["owns"] == ["process"]
+    q = _entry_of(second, "Q-01")
+    assert q["owns"] == ["data"] and q["owner_role"] == "analyst"
+    assert _entry_of(second, "P-02")["owns"] == ["process"]  # не потеряна
+
+
+def test_owner_already_named_not_asked() -> None:
+    live = Live()
+    live.answers[PERS_QID]["entries"][0]["owns"] = ["process"]
+    ask = _asker()
+    _v13([_OWNER.format("process")], ask, _agent(), live)
+    assert ask.asked == [] and live.resent == []
+
+
+def test_table_rows_derived_without_question(capsys) -> None:
+    live = Live()
+    ask = _asker(None, None, None)
+    empty = "GC-18 error [Translation table] секции нет или в ней нет строк"
+    _v13([empty], ask, _agent(), live)
+    assert ask.asked[:2] == [
+        gr.TABLE_ASK.format(category="стоить"),
+        gr.TABLE_ASK.format(category="доказывать"),
+    ]
+    rows = {q: d["translations"] for q, d in live.resent}
+    assert rows[FUNCS_QID] == [{"words": "запуск одной командой",
+                                "category": "делать", "constraint": ["FR-01"],
+                                "assumption": "одна команда"}]  # fmt: skip
+    assert rows[OUT_QID][0]["category"] == "не делать"
+    assert gr.GATE_LEFT.format(n=3) in capsys.readouterr().out
+
+
+def _row(words: str, category: str, eid: str, **extra: Any) -> dict[str, Any]:
+    return {"words": words, "category": category, "constraint": [eid],
+            "assumption": "", **extra}  # fmt: skip
+
+
+def test_table_missing_category_asks() -> None:
+    live = Live()
+    live.answers[FUNCS_QID]["translations"] = [
+        _row("a", "делать", "FR-01"),
+        _row("b", "доказывать", "FR-01"),
+    ]
+    live.answers[OUT_QID]["translations"] = [_row("c", "не делать", "OUT-01")]
+    said = "дешевле нынешнего подрядчика"
+    item = {"prefix": "NFR", "body": "Дешевле подрядчика", "ref": "new-1",
+            "category": ["cost"], "preference": said,
+            "target": "не дороже значения из q-1"}  # fmt: skip
+    q_item = {"prefix": "Q", "body": "Сколько стоит подрядчик?", "ref": "q-1",
+              "owner_role": "analyst"}  # fmt: skip
+    rows = [{"words": said, "category": "стоить", "constraint": ["new-1"],
+             "assumption": None}]  # fmt: skip
+    agent = _agent({"items": [item, q_item], "translations": rows})
+    finding = "GC-19 error [Translation table] нет ни одной строки категории «стоить»"
+    ask = _asker(said, None)  # затем вопрос о допущении выведенной строки
+    _v13([finding], ask, agent, live)
+    assert ask.asked == [gr.TABLE_ASK.format(category="стоить"), gr.CONFIRM_ASK]
+    # строки FR-01/OUT-01 из Preference — без вопроса, держателям пунктов
+    assert [q for q, _d in live.resent] == [FUNCS_QID, OUT_QID, NFR_QID]
+    funcs, doc = live.resent[0][1], live.resent[2][1]
+    assert funcs["translations"][-1]["words"] == "запуск одной командой"
+    [row] = doc["translations"]
+    assert row["category"] == "стоить" and row["constraint"] == ["NFR-02"]
+
+
+def test_confirmation_one_question_for_all_rows(capsys) -> None:
+    live = Live()
+    live.answers[FUNCS_QID]["translations"] = [
+        _row("a", "делать", "FR-01", assumption="одна команда"),
+        _row("b", "доказывать", "FR-01"),
+    ]
+    live.answers[OUT_QID]["translations"] = [
+        _row("c", "не делать", "OUT-01", assumption="без iOS и Android"),
+    ]
+    finding = "GC-18 error [Translation table#1] у допущения нет подтверждающего"
+    ask = _asker("владелец продукта, 01.12.2099")
+    _v13([finding], ask, _agent(), live)
+    assert ask.asked == [gr.CONFIRM_ASK]
+    out = capsys.readouterr().out
+    assert "одна команда" in out and "без iOS и Android" in out
+    sent = {q: d["translations"] for q, d in live.resent}
+    assert set(sent) == {FUNCS_QID, OUT_QID}
+    a, b = sent[FUNCS_QID]
+    assert (a["confirmer"], a["due"]) == ("владелец продукта", "2099-12-01")
+    assert "confirmer" not in b  # без допущения — без подтверждающего
+    assert sent[OUT_QID][0]["due"] == "2099-12-01"
+
+
+def test_confirmation_bad_date_reasks_then_skip(capsys) -> None:
+    live = Live()
+    live.answers[FUNCS_QID]["translations"] = [
+        _row("a", "делать", "FR-01", assumption="одна команда"),
+    ]
+    finding = "GC-18 error [Translation table#1] у допущения нет срока YYYY-MM-DD"
+    ask = _asker("до конца месяца", None)
+    _v13([finding], ask, _agent(), live)
+    assert ask.asked == [gr.CONFIRM_ASK, gr.CONFIRM_ASK]
+    out = capsys.readouterr().out
+    assert bv.NEED_DATE in out
+    assert live.resent == [] and gr.GATE_LEFT.format(n=1) in out
+
+
+def test_engineer_frame_no_v13_steps(capsys) -> None:
+    live = Live(frame="engineer")
+    ask = _asker()
+    _v13([V13_NFR_FINDING, _OWNER.format("data")], ask, _agent(), live)
+    assert ask.asked == [] and live.resent == []
+    assert capsys.readouterr().out == ""
+
+
+def test_skip_counts_in_gate_left(capsys) -> None:
+    live = Live()
+    _v13([V13_NFR_FINDING, _OWNER.format("process")], _asker(None, None),
+         _agent(), live)  # fmt: skip
+    assert live.resent == []
+    assert gr.GATE_LEFT.format(n=2) in capsys.readouterr().out
+
+
+# слово подсказки вопроса о категории → категория (ревью задачи 3, #813)
+CATEGORY_HINT_WORDS = {
+    "скорость": "perf",
+    "стоимость": "cost",
+    "безопасность": "security",
+    "доступ": "security",
+    "регламент": "compliance",
+}
+
+
+@pytest.mark.parametrize(("word", "category"), CATEGORY_HINT_WORDS.items())
+def test_category_hint_words_recognised(word: str, category: str) -> None:
+    assert word in gr.CATEGORY_ASK and word in gr.CATEGORY_ASK_OPEN
+    assert bv.parse_categories(word, ["perf"]) == [category]
+
+
+def test_category_hint_lists_only_known_words() -> None:
+    hint = gr.CATEGORY_ASK.split("иначе: ")[1].split("…")[0]
+    assert hint.split(", ") == list(CATEGORY_HINT_WORDS)
+
+
+def test_availability_not_security() -> None:
+    assert bv.parse_categories("доступность", []) == ["availability"]
+    assert bv.category_hypothesis("Доступность 99,9 % в месяц") == ["availability"]
+
+
+def test_category_labels_round_trip() -> None:
+    from lite import gate_repair_v13 as v13
+
+    for code, label in v13.CATEGORY_LABELS.items():
+        assert bv.parse_categories(label, []) == [code], label
+
+
+@pytest.mark.parametrize("said", ["Не знаю.", "пропустить."])
+def test_owner_skip_with_period_writes_nothing(said: str) -> None:
+    from lite.interview_chat import _ask_or_skip
+
+    live = Live()
+    asked: list[str] = []
+    lines = iter([said, ""])  # ответ, затем пустая строка — конец ввода
+
+    def ask(header: str) -> str | None:
+        asked.append(header)
+        return _ask_or_skip(header, lambda _prompt: next(lines))
+
+    _v13([_OWNER.format("process")], ask, _agent(), live)
+    assert asked and live.resent == []
+
+
+def test_owner_negation_phrase_writes_open_q() -> None:
+    live = Live()
+    _v13([_OWNER.format("data")], _asker("нет владельца"), _agent(), live)
+    [(_qid, doc)] = live.resent
+    q = _entry_of(doc, "Q-01")
+    assert q["owns"] == ["data"] and "нет владельца" not in q["body"]

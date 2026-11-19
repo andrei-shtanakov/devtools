@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,7 @@ import yaml
 from governance import interview as iv
 from governance import run_lock, spec_loop
 from governance import run_state as rs
+from governance.discovery_contract import gate_check as gc
 from lite import dfl, pending
 from lite import interview_remote as ir
 from lite.interview_state import Entry, InterviewStateError, SessionView
@@ -787,3 +788,531 @@ def test_interview_wait_line_names_subject_when_several(
     assert env.run("run", "--subject", "тема") == 0
     out = capsys.readouterr().out
     assert "ждёт ответа: Не хватает" in out and "--subject 'тема'" in out
+
+
+# --- контракт брифа v1.3: починка GC-18…GC-21 без терминала (#813) ---
+
+PERS_QID = "customer.personas.01"
+FUNCS_QID = "customer.functions.01"
+NFR_QID = "customer.nfr.01"
+OUT_QID = "customer.out_of_scope.01"
+CON_QID = "customer.constraints.01"
+_OWNERS = ("process", "data", "quality", "operations")
+_CATS = ("делать", "не делать", "стоить", "доказывать")
+
+
+def _row(category: str, eid: str, **extra: str) -> dict[str, Any]:
+    return {"words": f"слова {category}", "category": category,
+            "constraint": [eid], "assumption": None, **extra}  # fmt: skip
+
+
+def _complete_answers() -> dict[str, dict]:
+    """Бриф, которому v1.3 ничего не находит; тесты портят по одному месту."""
+    owners = [
+        {"id": f"P-0{n}", "body": f"Владелец {d}", "owns": [d]}
+        for n, d in enumerate(_OWNERS, 2)
+    ]
+    return {
+        "customer.goals.01": {"text": "цель", "entries": [{"id": "G-01", "body": "Цель"}]},
+        PERS_QID: {
+            "text": "аналитики",
+            "entries": [{"id": "P-01", "body": "Аналитик"}, *owners],
+        },
+        FUNCS_QID: {
+            "text": "запуск одной командой",
+            "entries": [{"id": "FR-01", "body": "Запуск", "Acceptance": "1 команда",
+                         "Preference": "запуск одной командой"}],
+            "translations": [_row("делать", "FR-01"), _row("не делать", "OUT-01")],
+        },  # fmt: skip
+        NFR_QID: {
+            "text": "быстро и дёшево",
+            "entries": [{"id": "NFR-01", "body": "Быстро и дёшево",
+                         "category": ["perf", "cost"], "Target": "2 с"}],
+            "translations": [_row("стоить", "NFR-01"), _row("доказывать", "NFR-01")],
+        },  # fmt: skip
+        OUT_QID: {"text": "без мобилки",
+                  "entries": [{"id": "OUT-01", "body": "Без мобильного клиента"}]},
+    }  # fmt: skip
+
+
+@dataclass
+class V13Session:
+    """Фейк discovery для v1.3: ответы и находки GC-18…GC-21 по ним."""
+
+    answers: dict[str, dict]
+    sent: list[tuple[str, bool, dict]] = field(default_factory=list)
+
+    def answer(
+        self,
+        session_id: str,
+        role: str,
+        file: Path,
+        cwd: Path,
+        *,
+        question: str | None = None,
+        supersede: bool = False,
+    ) -> iv.DiscoveryReply:
+        payload = yaml.safe_load(file.read_text(encoding="utf-8"))
+        assert question is not None and supersede
+        self.sent.append((question, supersede, payload))
+        self.answers.pop(question, None)
+        self.answers[question] = payload
+        return iv.DiscoveryReply(20, {"operation": {"status": "ok"}}, "")
+
+    def status(self, session_id: str, cwd: Path) -> iv.DiscoveryReply:
+        lines = self.findings()
+        return iv.DiscoveryReply(11 if lines else 0, {"findings": lines}, "")
+
+    def _entries(self) -> list[dict]:
+        return [e for a in self.answers.values() for e in a.get("entries") or []]
+
+    def view(self, session_id: str) -> SessionView:
+        held = {e["id"]: q for q, a in self.answers.items() for e in a["entries"]}
+        return SessionView(
+            frame="customer",
+            required={},
+            optional={},
+            entries=[
+                Entry(
+                    e["id"],
+                    e["body"],
+                    {k: v for k, v in e.items() if k not in ("id", "body")},
+                )
+                for e in self._entries()
+            ],  # fmt: skip
+            declared=list(held),
+            holders=held,
+            answers=dict(self.answers),
+            answered_keys=[],
+            readiness="incomplete" if self.findings() else "ready",
+            findings=[],
+            asked={q: q.split(".")[1] for q in self.answers},
+        )
+
+    def findings(self) -> list[str]:
+        entries = self._entries()
+        nfrs = [e for e in entries if e["id"].startswith("NFR-")]
+        lines = [
+            f"GC-20 error [{e['id']}] нет **Category**: без неё perf/cost-цель "
+            "не проверить"
+            for e in nfrs
+            if not e.get("category")
+        ]
+        lines += [
+            f"GC-20 error [Category: {k}] нет ни одной NFR категории {k}"
+            for k in ("perf", "cost")
+            if not any(k in (e.get("category") or []) for e in nfrs)
+        ]
+        owned = {d for e in entries if e["id"][0] in "PQ" for d in e.get("owns") or []}
+        lines += [
+            f"GC-21 error [owns: {d}] владелец не назван: нет P или открытого Q"
+            for d in _OWNERS
+            if d not in owned
+        ]
+        rows = [r for a in self.answers.values() for r in a.get("translations") or []]
+        if not rows:
+            return [
+                *lines,
+                "GC-18 error [Translation table] секции нет или в ней нет строк",
+            ]
+        seen = {r["category"] for r in rows}
+        lines += [
+            f"GC-19 error [Translation table] нет ни одной строки категории «{c}»"
+            for c in _CATS
+            if c not in seen
+        ]
+        lines += [
+            f"GC-18 error [Translation table#{n}] у допущения нет подтверждающего"
+            for n, r in enumerate(rows, 1)
+            if r.get("assumption") and not (r.get("confirmer") and r.get("due"))
+        ]
+        return lines
+
+
+def _v13(monkeypatch: pytest.MonkeyPatch, answers: dict[str, dict]) -> V13Session:
+    sess = V13Session(answers)
+    monkeypatch.setattr(dfl, "load_session", sess.view)
+    monkeypatch.setattr(dfl, "_discovery_status", sess.status)
+    monkeypatch.setattr(dfl, "_discovery_answer", sess.answer)
+    _stopped(INCOMPLETE)
+    return sess
+
+
+def _reply(env: Env, key: str, text: str) -> dict:  # noqa: F811
+    rec = _pending()
+    assert rec is not None and rec["key"] == key
+    assert env.run("reply", "--id", rec["id"], "--text", text) == 0
+    return rec
+
+
+def _without_owner(domain: str) -> dict[str, dict]:
+    answers = _complete_answers()
+    pers = answers[PERS_QID]
+    pers["entries"] = [e for e in pers["entries"] if domain not in e.get("owns", [])]
+    return answers
+
+
+def test_owner_reply_writes_p_with_owns(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sess = _v13(monkeypatch, _without_owner("process"))
+    assert env.run("run") == 0
+    rec = _reply(env, "owner:process", "Иван, владелец продукта")
+    assert "процесс" in rec["text"]
+    assert env.run("run") == 0
+    qid, supersede, payload = sess.sent[-1]
+    assert (qid, supersede) == (PERS_QID, True)
+    new = payload["entries"][-1]
+    assert new["id"].startswith("P-") and new["owns"] == ["process"]
+    assert "Иван, владелец продукта" in new["body"]
+    assert sess.findings() == [] and fakes.calls == []
+
+
+def test_owner_unknown_reply_writes_open_q(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sess = _v13(monkeypatch, _without_owner("data"))
+    assert env.run("run") == 0
+    _reply(env, "owner:data", "никто")
+    assert env.run("run") == 0
+    new = sess.sent[-1][2]["entries"][-1]
+    assert new["id"].startswith("Q-") and new["owns"] == ["data"]
+    assert new["owner_role"] == "analyst" and "никто" not in new["body"]
+    assert len(sess.sent) == 1
+
+
+def test_owner_skip_reply_marks_skipped(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """«не знаю» — пропуск, как везде в dfl: ничего не записано."""
+    sess = _v13(monkeypatch, _without_owner("quality"))
+    assert env.run("run") == 0
+    _reply(env, "owner:quality", "не знаю")
+    assert env.run("run") == 0
+    assert sess.sent == []
+
+
+def test_assumptions_reply_bad_date_refused_question_kept(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    answers = _complete_answers()
+    rows = answers[FUNCS_QID]["translations"]
+    rows[0]["assumption"] = "одна команда"
+    sess = _v13(monkeypatch, answers)
+    assert env.run("run") == 0
+    for bad in ("владелец продукта, до конца месяца", "владелец, 01.01.2020"):
+        rec = _reply(env, "assumptions", bad)
+        assert rec["data"]["rows"] == [
+            {"words": "слова делать", "category": "делать", "constraint": ["FR-01"],
+             "assumption": "одна команда"},
+        ]  # fmt: skip
+        capsys.readouterr()
+        assert env.run("run") == 2
+        err = capsys.readouterr().err
+        assert "дата" in err
+        again = _pending()
+        assert again is not None and again["id"] == rec["id"]
+        assert sess.sent == []
+    _reply(env, "assumptions", "владелец продукта, 2099-12-01")
+    assert env.run("run") == 0
+    qid, _sup, payload = sess.sent[-1]
+    assert qid == FUNCS_QID
+    row = payload["translations"][0]
+    assert (row["confirmer"], row["due"]) == ("владелец продукта", "2099-12-01")
+    assert sess.findings() == []
+
+
+def test_table_auto_rows_sent_once(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Строки из `Preference` — без вопроса, один раз за проход; затем
+    вопрос по недостающей категории; второй `dfl run` строки не шлёт."""
+    answers = _complete_answers()
+    for a in answers.values():
+        a.pop("translations", None)
+    sess = _v13(monkeypatch, answers)
+    assert env.run("run") == 0
+    assert len(sess.sent) == 1
+    qid, _sup, payload = sess.sent[0]
+    assert qid == FUNCS_QID
+    assert payload["translations"] == [
+        {"words": "запуск одной командой", "category": "делать",
+         "constraint": ["FR-01"], "assumption": "1 команда"},
+    ]  # fmt: skip
+    assert "table:auto" in ir.load_marks(_rd())["done"]
+    rec = _pending()
+    assert rec is not None and rec["key"] == "table:не делать"
+    assert ir.HUMAN_PLACEHOLDER in rec["data"]["prompt"]
+    assert rec["data"]["holder"] == OUT_QID
+    assert env.run("run") == 0
+    assert len(sess.sent) == 1
+    assert (_pending() or {}).get("id") == rec["id"]
+
+
+def test_category_reply_unknown_word_refused(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    answers = _complete_answers()
+    answers[NFR_QID]["entries"].append({"id": "NFR-02", "body": "Отчёт красивый"})
+    sess = _v13(monkeypatch, answers)
+    assert env.run("run") == 0
+    rec = _reply(env, "category:NFR-02", "фиолетовая")
+    assert rec["data"]["hypothesis"] == []
+    capsys.readouterr()
+    assert env.run("run") == 2
+    assert "категори" in capsys.readouterr().err
+    assert (_pending() or {}).get("id") == rec["id"] and sess.sent == []
+    _reply(env, "category:NFR-02", "безопасность")
+    assert env.run("run") == 0
+    nfr = sess.sent[-1][2]["entries"][-1]
+    assert (nfr["id"], nfr["category"]) == ("NFR-02", ["security"])
+    assert sess.sent[-1][0] == NFR_QID
+
+
+def test_nfr_unknown_reply_writes_nfr_and_q(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """«неизвестно» на `nfr:cost` — `NFR` с целью из нового `Q` аналитика."""
+    answers = _complete_answers()
+    answers[NFR_QID]["entries"][0]["category"] = ["perf"]
+    sess = _v13(monkeypatch, answers)
+    assert env.run("run") == 0
+    _reply(env, "nfr:cost", "неизвестно")
+    assert env.run("run") == 0
+    qid, _sup, payload = sess.sent[-1]
+    nfr, q = payload["entries"][-2:]
+    assert qid == NFR_QID
+    assert (nfr["id"], nfr["category"]) == ("NFR-02", ["cost"])
+    assert nfr["Target"] == f"значение из {q['id']}"
+    assert q["id"].startswith("Q-") and q["owner_role"] == "analyst"
+    assert sess.findings() == []
+
+
+# --- сквозной: починка v1.3 без терминала до брифа без GC-18…GC-21 (#813) ---
+
+_V13_TOPICS = {"nfr": "NFR", "constraints": "CON", "out_of_scope": "OUT"}
+_V13_RULES = (gc.check_translation_table, gc.check_numeric_targets, gc.check_owners)
+_TABLE_HEAD = (
+    "| слова | категория | ограничение | допущение | подтверждает | срок |\n"
+    "|---|---|---|---|---|---|"
+)
+
+
+def _entry_lines(e: dict[str, Any]) -> list[str]:
+    """Пункт брифа в формате секций контракта §2 (как рендерит discovery)."""
+    lines = [f"- **{e['id']}** {e['body']}"]
+    lines += [f"  **{k}**: {e[k]}" for k in ("Acceptance", "Target") if e.get(k)]
+    if e.get("category"):
+        lines.append(f"  **Category**: {', '.join(e['category'])}")
+    if e.get("owns"):
+        lines.append(f"  owns: {', '.join(e['owns'])}")
+    if e.get("resolved") is True or e.get("status") == "resolved":
+        lines.append("  resolved: true")
+    return lines
+
+
+def _row_line(r: dict[str, Any]) -> str:
+    cells = [r["words"], r["category"], ", ".join(r["constraint"])]
+    cells += [r.get(k) or "—" for k in ("assumption", "confirmer", "due")]
+    return "| " + " | ".join(cells) + " |"
+
+
+def brief_body(answers: dict[str, dict]) -> str:
+    """Тело брифа из ответов сессии: пункты и `## Translation table`."""
+    held = {e["id"]: e for a in answers.values() for e in a.get("entries") or []}
+    lines = [line for e in held.values() for line in _entry_lines(e)]
+    rows = [r for a in answers.values() for r in a.get("translations") or []]
+    if rows:
+        lines += ["", gc.TRANSLATION_HEADING, "", _TABLE_HEAD]
+        lines += [_row_line(r) for r in rows]
+    return "\n".join(lines) + "\n"
+
+
+class GateV13Session(V13Session):
+    """`V13Session`, чьи находки GC-18…GC-21 считает сам vendored
+    `gate_check` (его правила v1.3) по брифу из того, что сессия держит;
+    темы — для раскладки скила (`dfl answer --items` проверяет префиксы)."""
+
+    def view(self, session_id: str) -> SessionView:
+        return replace(super().view(session_id), optional=_V13_TOPICS)
+
+    def findings(self) -> list[str]:
+        body = brief_body(self.answers)
+        brief = gc.Brief(meta={}, entries=gc.parse_body(body), body=body)
+        out: list[str] = []
+
+        def report(rule: str, ref: str, msg: str) -> None:
+            out.append(str(gc.Finding(rule, "error", ref, msg)))
+
+        for rule in _V13_RULES:
+            rule(brief, report)
+        return out
+
+
+def _live_answers() -> dict[str, dict]:
+    """Как в живом прогоне: четыре NFR без категории, ни perf, ни cost,
+    владельцев нет, таблица пуста, у FR/NFR/OUT есть `Preference`."""
+    nfrs = [
+        {"id": "NFR-01", "body": "Доступ только сотрудникам склада"},
+        {"id": "NFR-02", "body": "Работает без отказов днём"},
+        {"id": "NFR-03", "body": "Хранить отчёты по закону",
+         "Target": "5 лет хранения", "Preference": "храним, как требует закон"},
+        {"id": "NFR-04", "body": "Понятные подписи в отчёте"},
+    ]  # fmt: skip
+    return {
+        "customer.goals.01": {
+            "text": "меньше сверки",
+            "entries": [{"id": "G-01", "body": "Меньше ручной сверки"}],
+        },
+        PERS_QID: {
+            "text": "аналитики",
+            "entries": [{"id": "P-01", "body": "Аналитик склада"}],
+        },
+        FUNCS_QID: {
+            "text": "запуск одной командой",
+            "entries": [
+                {
+                    "id": "FR-01",
+                    "body": "Запуск отчёта",
+                    "Acceptance": "1 команда",
+                    "Preference": "запуск одной командой",
+                }
+            ],
+        },
+        NFR_QID: {"text": "надёжно и по закону", "entries": nfrs},
+        OUT_QID: {
+            "text": "без мобилки",
+            "entries": [
+                {
+                    "id": "OUT-01",
+                    "body": "Без мобильного клиента",
+                    "Preference": "телефон не нужен",
+                }
+            ],
+        },
+    }
+
+
+def _key() -> str:
+    rec = _pending()
+    assert rec is not None and rec["answered"] is False
+    return str(rec["key"])
+
+
+def _reply_run(env: Env, key: str, text: str) -> dict:  # noqa: F811
+    rec = _reply(env, key, text)
+    assert env.run("run") == 0
+    return rec
+
+
+def _items_for(env: Env, key: str, text: str, items: list[dict]) -> None:  # noqa: F811
+    rec = _pending()
+    assert rec is not None and rec["key"] == key
+    _answer_items(env, rec["id"], text, items)
+
+
+def test_customer_v13_repair_end_to_end_without_terminal(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Дизайн §9: customer-бриф живого прогона чинится только `dfl run`,
+    `dfl reply` и `dfl answer --items` (агент и разговор — фейки, падающие
+    при вызове); итог — vendored `gate_check` не находит GC-18…GC-21."""
+    sess = GateV13Session(_live_answers())
+    monkeypatch.setattr(dfl, "load_session", sess.view)
+    monkeypatch.setattr(dfl, "_discovery_status", sess.status)
+    monkeypatch.setattr(dfl, "_discovery_answer", sess.answer)
+    _stopped(INCOMPLETE)
+    start = sess.findings()
+    assert {f.split()[0] for f in start} == {"GC-18", "GC-20", "GC-21"}
+    assert sum("нет **Category**" in f for f in start) == 4
+
+    # Категории NFR: гипотеза — «да», без гипотезы — словом.
+    assert env.run("run") == 0
+    for eid, hypothesis in (
+        ("NFR-01", ["security"]),
+        ("NFR-02", ["availability"]),
+        ("NFR-03", ["compliance"]),
+    ):
+        rec = _reply_run(env, f"category:{eid}", "да")
+        assert rec["data"]["hypothesis"] == hypothesis
+    rec = _reply_run(env, "category:NFR-04", "доступность")
+    assert rec["data"]["hypothesis"] == []
+    assert not any("нет **Category**" in f for f in sess.findings())
+
+    # perf — раскладкой скила; cost — «неизвестно» (NFR с целью из Q).
+    _items_for(
+        env,
+        "nfr:perf",
+        "отчёт не дольше пары секунд",
+        [{"prefix": "NFR", "body": "Отчёт быстро", "target": "не более 2 секунд"}],
+    )
+    _reply_run(env, "nfr:cost", "неизвестно")
+    assert not any(f.startswith("GC-20") for f in sess.findings())
+
+    # Владельцы: имя — P, «никто» — открытый Q.
+    for domain, text in (
+        ("process", "Иван Петров, начальник склада"),
+        ("data", "никто"),
+        ("quality", "Мария, старший аналитик"),
+        ("operations", "служба поддержки"),
+    ):
+        _reply_run(env, f"owner:{domain}", text)
+    assert not any(f.startswith("GC-21") for f in sess.findings())
+
+    # Строки из `Preference` — без вопроса; «стоить» — вопросом.
+    assert "table:auto" in ir.load_marks(_rd())["done"]
+    rows = [r for a in sess.answers.values() for r in a.get("translations") or []]
+    assert sorted(r["category"] for r in rows) == ["делать", "доказывать", "не делать"]
+    _items_for(
+        env,
+        "table:стоить",
+        "не дороже 100 тысяч",
+        [{"prefix": "CON", "body": "Бюджет до 100 тыс. ₽",
+          "acceptance": "не более 100 000 ₽"}],
+    )  # fmt: skip
+
+    # Допущения — один ответ «кто, срок» на все строки.
+    rec = _reply_run(env, "assumptions", "владелец продукта, 2099-12-01")
+    assert len(rec["data"]["rows"]) == 3
+
+    assert sess.findings() == []
+    assert gc.translation_rows(brief_body(sess.answers)) is not None
+    assert _pending() is None
+    assert all(sup for _q, sup, _p in sess.sent) and fakes.calls == []
+
+
+@pytest.mark.parametrize("text", ["Не знаю.", "Пока никто"])
+def test_owner_period_and_negation_replies(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+    text: str,
+) -> None:
+    """«Не знаю.» — пропуск, «Пока никто» — открытый Q; фальшивого P нет."""
+    sess = _v13(monkeypatch, _without_owner("quality"))
+    assert env.run("run") == 0
+    _reply(env, "owner:quality", text)
+    assert env.run("run") == 0
+    if text.startswith("Не знаю"):
+        assert sess.sent == []
+        return
+    new = sess.sent[-1][2]["entries"][-1]
+    assert new["id"].startswith("Q-") and new["owns"] == ["quality"]

@@ -11,7 +11,10 @@
   предлагает агент по записанным пунктам, человек подтверждает (#755);
 - GC-05 (Must-FR customer-брифа без вердикта реализуемости) — вопрос по
   каждой функции, вердикт — запись `X` с `target: FR-NN`: `resolved` —
-  реализуемо как есть, `open` — расхождение словами инженера (#755).
+  реализуемо как есть, `open` — расхождение словами инженера (#755);
+- GC-18…GC-21 (контракт v1.3, только фрейм заказчика) — категории NFR,
+  `perf`/`cost`, владельцы, таблица перевода, подтверждающий и срок
+  допущений: шаги в `lite.gate_repair_v13` (#813), тексты вопросов — здесь.
 
 Каждая правка — пересылка ответа держателя (`--supersede`) с прежними
 записями. Что не починено (пропуск, отказ) — человеку число и подсказка.
@@ -92,6 +95,33 @@ VERDICT_HINT = (
 )
 WORDS_ASK = "скажите своими словами, что имелось в виду («пропустить» — оставить)"
 WORDS_KEPT = "ваши слова записаны, критерий предложит следующий dfl run"
+# --- GC-18…GC-21 (v1.3): тексты вопросов (их же берёт путь без терминала) ---
+CATEGORY_ASK = (
+    "«{body}»: категория — {hypothesis}? («да» — так; иначе: скорость, "
+    "стоимость, безопасность, доступ, регламент…; «пропустить»)"
+)
+CATEGORY_ASK_OPEN = (
+    "«{body}»: какая категория? (скорость, стоимость, безопасность, доступ, "
+    "регламент…; «пропустить»)"
+)
+OWNER_ASK = (
+    "Кто отвечает за {label}? (имя или роль; «неизвестно» — запишу открытым "
+    "вопросом; «пропустить»)"
+)
+NUMERIC_ASK = "{question} («неизвестно» — заведу вопрос исследования; «пропустить»)"
+TABLE_ASK = (
+    "Что заказчик говорил о том, что система должна «{category}»? "
+    "(«пропустить» — оставить)"
+)
+CONFIRM_INTRO = (
+    "бриф не прошёл проверку: у допущений перевода нет подтверждающего и "
+    "срока; допущения:"
+)
+CONFIRM_ASK = (
+    "Кто подтвердит наши допущения и к какой дате? (например: «владелец "
+    "продукта, 2026-12-01»; «пропустить»)"
+)
+V13_FINDING_RE = re.compile(r"^GC-(?:18|19|20|21) ")
 GATE_LEFT = (
     "не исправлено пунктов: {n} — бриф не пройдёт проверку; dfl run спросит снова"
 )
@@ -116,6 +146,13 @@ def repair(
     left += _fill_verdicts(
         _ids(NO_VERDICT_RE, lines), session, ask, resend, load, upstream
     )
+    if any(V13_FINDING_RE.match(line) for line in lines):
+        # ленивый импорт: `brief_v13` сам берёт `_agrees` отсюда
+        from lite import gate_repair_v13
+
+        left += gate_repair_v13.repair_v13(
+            lines, session, ask=ask, agent=agent, resend=resend, load=load
+        )
     if left:
         say(GATE_LEFT.format(n=left))
 
@@ -132,7 +169,36 @@ def appended(held: dict[str, Any], payload: str) -> str:
     out.pop("entries", None)
     if entries:
         out["entries"] = entries
+    rows = _merged_rows(held.get("translations"), new.get("translations"))
+    if rows:
+        out["translations"] = rows
     return yaml.safe_dump(out, allow_unicode=True, sort_keys=False)
+
+
+def _merged_rows(old: Any, new: Any) -> list[dict[str, Any]]:
+    """Строки таблицы: прежние, затем новые; та же пара (`words`,
+    `constraint`) — заменяется новой."""
+
+    def key(row: dict[str, Any]) -> tuple[Any, ...]:
+        return row.get("words"), tuple(row.get("constraint") or ())
+
+    merged = {key(r): r for r in old or []}
+    merged.update({key(r): r for r in new or []})
+    return list(merged.values())
+
+
+def topic_holder(view: SessionView, key: str) -> str | None:
+    """Держатель новых записей темы `key`: последний отвеченный вопрос этой
+    темы, иначе последний отвеченный; ответов нет — `None`."""
+    answered = list(view.answers)
+    own = [q for q in answered if view.asked.get(q) == key]
+    return (own or answered or [None])[-1]
+
+
+def row_holder(view: SessionView, row: dict[str, Any]) -> str | None:
+    """Держатель строки таблицы: ответ, где записан первый пункт строки."""
+    constraint = row.get("constraint") or []
+    return view.holders.get(str(constraint[0])) if constraint else None
 
 
 def _ids(pattern: re.Pattern[str], findings: list[str]) -> list[str]:
@@ -149,6 +215,12 @@ def _resent(
     payload = yaml.safe_dump(
         {"text": text, "entries": entries}, allow_unicode=True, sort_keys=False
     )
+    return resent_payload(qid, payload, view, resend)
+
+
+def resent_payload(qid: str, payload: str, view: SessionView, resend: Send) -> bool:
+    """Переслать ответ держателя `qid`, дополненный YAML-ответом `payload`
+    (`appended`); отказ — причина человеку, `False`."""
     reply = resend(qid, appended(view.held_answer(qid), payload))
     if reply.code not in (1, 2):
         return True
@@ -527,9 +599,7 @@ def verdict_entry(fr: str, text: str, number: int) -> dict[str, Any]:
 
 def _feasibility_holder(view: SessionView) -> str | None:
     """Последний отвеченный вопрос реализуемости, иначе последний отвеченный."""
-    answered = list(view.answers)
-    own = [q for q in answered if view.asked.get(q) == FEASIBILITY_KEY]
-    return (own or answered or [None])[-1]
+    return topic_holder(view, FEASIBILITY_KEY)
 
 
 def must_bodies(text: str) -> dict[str, str]:

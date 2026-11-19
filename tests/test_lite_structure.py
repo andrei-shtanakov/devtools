@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 import yaml
 
+from governance.discovery_contract import gate_check
 from lite import structure as sx
 from lite.interview_state import Entry, SessionView
 
@@ -682,3 +683,253 @@ def test_plain_word_number_tokens_are_not_refs(token: str) -> None:
         {**FR_FULL, "body": f"Даты в {token}", "acceptance": f"Формат {token}"},
     ]  # fmt: skip
     assert sx.form_errors(items, _customer()) == []
+
+
+# --- v1.3 (#813): category, owns, translations (customer) ---
+
+# build_prompt для engineer до #813 (снят на d9b371b): engineer не меняется
+ENGINEER_PROMPT_BEFORE_V13 = """\
+Ты аналитик-переводчик: раскладываешь ответ человека в интервью о требованиях
+на пункты. Человек говорит на простом языке (предпочтения), ты переводишь это
+на технический язык (ограничения). Числа у человека не спрашивай: это
+исследование, а не вопрос одному человеку.
+
+Вопрос (тема feasibility_review): Риски?
+Эта тема покрывается самим ответом: пункты не обязательны.
+
+Ответ человека (вместе с уточнениями):
+<<<
+ответ
+>>>
+
+Уже записанные пункты (на них можно ссылаться в traces, не дублируй их):
+- (пока нет)
+Если ответ дополняет или уточняет уже записанный пункт (например, его
+важность, критерий проверки, целевое значение) — не создавай новый: верни
+этот пункт с его "id" и тем же "prefix", его body (прежним или уточнённым) и
+только теми полями, которые ответ заполняет или меняет. Новым пунктам "id" не
+давай.
+
+Допустимые префиксы пунктов (пункт может относиться к любой теме, не только
+к теме вопроса):
+- S — тема systems
+- RK — тема risks
+Префикс Q — только открытый вопрос исследования (см. ниже). Служебный
+префикс X и любые другие не используй.
+
+Правила полей:
+- body — суть пункта одной-двумя фразами, словами человека.
+- FR (функция): traces — список id целей G или задач J, к которым она
+  относится; priority — одно из Must, Should, Could, Won't; acceptance —
+  как проверить, что функция работает.
+- NFR: acceptance (критерий) или target (целевое значение).
+- M (метрика): traces — список id целей G, которые она измеряет; target —
+  целевое значение.
+- FR, NFR, M: preference — слова человека дословно (цитата из ответа, без
+  пересказа), если он выразил предпочтение («чтобы было бесшовно»);
+  acceptance/target — твоя гипотеза-перевод этого предпочтения в проверяемое
+  ограничение: пиши её сам, у человека не спрашивай (у FR и NFR критерий
+  обязателен).
+- Если для гипотезы нужно число (порог, baseline, целевое значение), а
+  человек его не назвал, — не выдумывай и не спрашивай: заведи в этом же
+  ответе пункт Q (открытый вопрос исследования): body — какое значение
+  найти, owner_role — analyst (данные, бизнес) или engineer (техника), свой
+  "ref" (например "q-1"). В критерии сошлись на него этим ref:
+  «… не хуже значения из q-1» — скрипт подставит id. Ссылаться на Q-NN
+  можно только на уже записанные пункты Q из списка выше.
+- IF (интерфейс): traces — список id систем S, к которым он относится.
+- AP (архитектурное предпочтение): traces — список id систем S или
+  ограничений CON, которые оно затрагивает.
+- Остальные префиксы: достаточно body.
+- traces ссылаются только на id из списка выше или на ref нового пункта
+  этого же ответа: дай новому пункту поле "ref" (например "new-1") и укажи
+  этот ref в traces другого пункта. Id новым пунктам не придумывай —
+  их назначит скрипт.
+
+Главное правило: не выдумывай. body и preference — только из сказанного
+человеком; acceptance/target — перевод сказанного, неизвестное число —
+ссылка на Q. Чего в ответе нет по смыслу (важности, цели, кому это нужно) —
+оставь поле пустым (null) и задай человеку один короткий уточняющий вопрос в
+"ask" — простыми словами, без id, префиксов и терминов. Не спрашивай чисел,
+порогов и того, как проверять: это твой перевод. Если всего хватает —
+"ask": null. Если человек говорит «не знаю» или «пропустить» — не спрашивай.
+
+Верни только JSON, без пояснений:
+{"items": [{"prefix": "FR", "body": "...", "ref": "new-1", "traces": ["G-01"],
+"priority": "Must", "preference": "...", "acceptance": "...", "target": null},
+{"prefix": "Q", "body": "...", "ref": "q-1", "owner_role": "analyst"}],
+"ask": null}
+"""
+
+NFR_PERF = {"prefix": "NFR", "body": "Отчёт быстро", "target": "≤ 2 с"}
+ROW = {
+    "words": "чтобы выгружалось",
+    "category": "делать",
+    "constraint": ["new-1"],
+    "assumption": None,
+}
+
+
+def _with_personas() -> SessionView:
+    return _customer(optional={"risks": "RK", "success_metrics": "M", "personas": "P"})
+
+
+def _rows_raw(*rows: dict[str, Any], items: list[Any] | None = None) -> str:
+    return json.dumps({"items": items or [], "translations": list(rows)})
+
+
+def test_engineer_prompt_unchanged() -> None:
+    assert sx.build_prompt(FEAS, "ответ", _engineer()) == ENGINEER_PROMPT_BEFORE_V13
+
+
+def test_customer_prompt_mentions_v13_fields() -> None:
+    prompt = sx.build_prompt(FUNCS, "ответ", _customer())
+    for word in ("category", "owns", "translations", *gate_check.REQUIRED_CATEGORIES):
+        assert word in prompt
+    assert "confirmer" not in prompt and sx.V13_FRAME == "customer"
+
+
+def test_nfr_category_normalized() -> None:
+    items, _ = sx.parse_items(json.dumps({"items": [
+        {**NFR_PERF, "category": "perf, cost"},
+        {**NFR_PERF, "category": ["Perf"]},
+        {**FR_FULL, "category": "perf"},
+    ]}))  # fmt: skip
+    assert items[0]["category"] == ["perf", "cost"]
+    assert items[1]["category"] == ["Perf"] and "category" not in items[2]
+    errors = sx.form_errors(items, _customer())
+    assert len(errors) == 1 and "Perf" in errors[0]
+
+
+def test_nfr_category_wrong_type_is_form_error() -> None:
+    with pytest.raises(sx.FormError, match="category"):
+        sx.parse_items(json.dumps({"items": [{**NFR_PERF, "category": 5}]}))
+
+
+def test_owns_only_p_and_q() -> None:
+    items, _ = sx.parse_items(json.dumps({"items": [
+        {"prefix": "P", "body": "Бухгалтер", "owns": "process, data"},
+        {**FR_FULL, "owns": ["process"]},
+        {"prefix": "Q", "body": "Кто владелец?", "owner_role": "analyst",
+         "owns": ["operations"]},
+        {"prefix": "P", "body": "Финдир", "owns": ["finance"]},
+    ]}))  # fmt: skip
+    assert items[0]["owns"] == ["process", "data"] and "owns" not in items[1]
+    assert items[2]["owns"] == ["operations"]
+    errors = sx.form_errors(items, _with_personas())
+    assert len(errors) == 1 and "finance" in errors[0]
+
+
+def test_category_and_owns_rendered_as_lists() -> None:
+    raw = json.dumps({"items": [
+        {**NFR_PERF, "category": "perf"},
+        {"prefix": "P", "body": "Бухгалтер", "owns": "data"},
+    ]})  # fmt: skip
+    entries = _entries(sx.payload_from_items("ответ", raw, _with_personas()))
+    assert entries[0]["category"] == ["perf"] and entries[1]["owns"] == ["data"]
+
+
+def test_translations_ref_replaced_by_id() -> None:
+    fr = {**FR_FULL, "ref": "new-1"}
+    agent = _agent({"items": [fr], "translations": [ROW], "ask": None})
+    got = sx.structure_answer(FUNCS, "ответ", _customer(), agent, may_ask=True)
+    assert isinstance(got, sx.Ready)
+    doc = yaml.safe_load(got.payload)
+    assert doc["entries"][0]["id"] == "FR-01"
+    assert doc["translations"] == [{**ROW, "constraint": ["FR-01"]}]
+
+
+def test_translations_survive_criterion_missing_retry() -> None:
+    fr = {**FR_FULL, "ref": "new-1"}
+    del fr["acceptance"]
+    answer = {"items": [fr], "translations": [ROW], "ask": None}
+    agent = _agent(answer, answer)
+    got = sx.structure_answer(FUNCS, "ответ", _customer(), agent, may_ask=False)
+    assert isinstance(got, sx.Ready)
+    assert yaml.safe_load(got.payload)["translations"][0]["constraint"] == ["FR-01"]
+
+
+def test_translation_pipe_in_words_is_form_error() -> None:
+    fr = {**FR_FULL, "ref": "new-1"}
+    bad = {"items": [fr], "translations": [{**ROW, "words": "a | b"}]}
+    good = {"items": [fr], "translations": [ROW]}
+    agent = _agent(bad, good)
+    got = sx.structure_answer(FUNCS, "ответ", _customer(), agent, may_ask=True)
+    assert isinstance(got, sx.Ready) and len(agent.prompts) == 2
+    assert "отклонён" in agent.prompts[1] and "|" in agent.prompts[1]
+    rows = sx.parse_translations(_rows_raw({**ROW, "words": "a\nb"}))
+    assert sx.translation_errors(rows, [fr], _customer())
+
+
+def test_translation_unknown_category_is_form_error() -> None:
+    rows = sx.parse_translations(_rows_raw({**ROW, "category": "хотеть"}))
+    errors = sx.translation_errors(rows, [{**FR_FULL, "ref": "new-1"}], _customer())
+    assert len(errors) == 1 and "хотеть" in errors[0]
+
+
+def test_translation_confirmer_from_agent_is_form_error() -> None:
+    fr = {**FR_FULL, "ref": "new-1"}
+    for key in ("confirmer", "due"):
+        rows = sx.parse_translations(_rows_raw({**ROW, key: "x"}))
+        errors = sx.translation_errors(rows, [fr], _customer())
+        assert len(errors) == 1 and key in errors[0]
+
+
+def test_translation_constraint_to_g_is_form_error() -> None:
+    rows = sx.parse_translations(_rows_raw({**ROW, "constraint": ["G-01"]}))
+    errors = sx.translation_errors(rows, [], _customer())
+    assert len(errors) == 1 and "G-01" in errors[0]
+
+
+def test_translation_empty_words_and_constraint_are_form_errors() -> None:
+    rows = sx.parse_translations(_rows_raw({**ROW, "words": " ", "constraint": []}))
+    assert len(sx.translation_errors(rows, [], _customer())) == 2
+
+
+def test_parse_translations_schema() -> None:
+    assert sx.parse_translations(json.dumps({"items": []})) == []
+    for bad in ({"translations": "x"}, {"translations": ["x"]},
+                {"translations": [{**ROW, "words": 5}]}):  # fmt: skip
+        with pytest.raises(sx.FormError):
+            sx.parse_translations(json.dumps(bad))
+
+
+def test_payload_from_items_carries_translations() -> None:
+    raw = json.dumps({
+        "text": "ответ",
+        "items": [{**FR_FULL, "ref": "new-1"}],
+        "translations": [{**ROW, "assumption": "выгрузка раз в сутки"}],
+    })  # fmt: skip
+    doc = yaml.safe_load(sx.payload_from_items("ответ", raw, _customer()))
+    assert doc["translations"] == [
+        {**ROW, "constraint": ["FR-01"], "assumption": "выгрузка раз в сутки"}
+    ]
+
+
+def test_payload_from_items_refuses_bad_translations() -> None:
+    raw = _rows_raw({**ROW, "category": "хотеть"}, items=[{**FR_FULL, "ref": "new-1"}])
+    with pytest.raises(sx.FormError, match="хотеть"):
+        sx.payload_from_items("ответ", raw, _customer())
+
+
+def test_engineer_translations_refused() -> None:
+    rows = [{**ROW, "constraint": ["CON-01"]}]
+    raw = json.dumps({"items": [], "translations": rows})
+    with pytest.raises(sx.FormError, match="translations"):
+        sx.payload_from_items("ответ", raw, _engineer())
+    agent = _agent({"items": [], "translations": rows}, {"items": []})
+    got = sx.structure_answer(FEAS, "ответ", _engineer(), agent, may_ask=True)
+    assert isinstance(got, sx.Ready) and "translations" not in got.payload
+
+
+def test_engineer_category_and_owns_dropped() -> None:
+    raw = json.dumps({"items": [{"prefix": "RK", "body": "Риск"},
+                                {"prefix": "Q", "body": "Кто?", "owner_role":
+                                 "engineer", "owns": ["data"]}]})  # fmt: skip
+    payload = sx.payload_from_items("ответ", raw, _engineer())
+    assert "owns" not in payload
+
+
+def test_to_payload_without_rows_has_no_translations() -> None:
+    payload = sx.to_payload("ответ", [FR_FULL], _customer())
+    assert "translations" not in yaml.safe_load(payload)

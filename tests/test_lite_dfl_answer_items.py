@@ -765,3 +765,167 @@ def test_items_repair_criterion_bare_no_refused(
     assert "своими словами" in err and f"--id {rec['id']}" in err
     assert fakes.sent.calls == [] and fakes.runs == []
     assert (pending.load(_rd()) or {}).get("id") == rec["id"]
+
+
+# --- контракт брифа v1.3: `nfr:*` раскладкой скила (#813) ---
+
+
+def _nfr_view() -> SessionView:
+    """customer: NFR-01 без perf у ответа `customer.nfr.01`."""
+    nfr = {"id": "NFR-01", "body": "Надёжно", "category": ["availability"]}
+    return SessionView(
+        frame="customer",
+        required={},
+        optional={"nfr": "NFR", "constraints": "CON"},
+        entries=[Entry("NFR-01", "Надёжно", {"category": ["availability"]})],
+        declared=[],
+        holders={"NFR-01": "customer.nfr.01"},
+        answers={"customer.nfr.01": {"text": "надёжно", "entries": [nfr]}},
+        answered_keys=[],
+        readiness="incomplete",
+        asked={"customer.nfr.01": "nfr"},
+    )
+
+
+def test_nfr_perf_items_appended_with_translations(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Раскладка ответа о скорости: новый `NFR` (категория `perf`
+    дописывается, как в терминале) и строка таблицы с `ref` → id — держателю
+    темы `nfr`; пункт отмечен сделанным."""
+    view = _nfr_view()
+    fakes = _fakes(env, monkeypatch, view)
+    _stopped("status вернул 11: findings в /r/interview-findings.json")
+    finding = "GC-20 error [Category: perf] нет ни одной NFR категории perf"
+    reply = iv.DiscoveryReply(11, {"findings": [finding]}, "")
+    rec = _post(ir.next_question(reply, view, ir.load_marks(_rd()),
+                                 incomplete=True, upstream=""))  # fmt: skip
+    assert rec["key"] == "nfr:perf" and rec["data"]["holder"] == "customer.nfr.01"
+    doc = {
+        "text": "отчёт не дольше пары секунд",
+        "items": [
+            {"prefix": "NFR", "ref": "n-a", "body": "Отчёт быстро",
+             "target": "не более 2 секунд"},
+        ],
+        "translations": [
+            {"words": "не дольше пары секунд", "category": "стоить",
+             "constraint": ["n-a"], "assumption": "2 секунды"},
+        ],
+    }  # fmt: skip
+    (env.tmp / "target" / ITEMS).write_text(
+        json.dumps(doc, ensure_ascii=False), encoding="utf-8"
+    )
+    assert env.run("answer", "--items", ITEMS, "--id", rec["id"]) == 0
+    assert len(fakes.sent.calls) == 1
+    question, supersede, payload = fakes.sent.calls[0]
+    assert (question, supersede) == ("customer.nfr.01", True)
+    assert payload["text"] == "надёжно\n\nотчёт не дольше пары секунд"
+    new = payload["entries"][-1]
+    assert new["id"] == "NFR-02" and new["category"] == ["perf"]
+    assert payload["translations"] == [
+        {"words": "не дольше пары секунд", "category": "стоить",
+         "constraint": ["NFR-02"], "assumption": "2 секунды"},
+    ]  # fmt: skip
+    assert ir.load_marks(_rd())["done"] == ["nfr:perf"]
+    assert pending.load(_rd()) is None
+
+
+def test_nfr_items_without_nfr_refused(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    view = _nfr_view()
+    fakes = _fakes(env, monkeypatch, view)
+    _stopped("status вернул 11: findings в /r/interview-findings.json")
+    finding = "GC-20 error [Category: cost] нет ни одной NFR категории cost"
+    reply = iv.DiscoveryReply(11, {"findings": [finding]}, "")
+    rec = _post(ir.next_question(reply, view, ir.load_marks(_rd()),
+                                 incomplete=True, upstream=""))  # fmt: skip
+    _items(env, "денег мало", [{"prefix": "CON", "body": "Бюджет мал"}])
+    capsys.readouterr()
+    assert env.run("answer", "--items", ITEMS, "--id", rec["id"]) == 2
+    assert "нет требования" in capsys.readouterr().err
+    assert fakes.sent.calls == [] and pending.load(_rd()) is not None
+
+
+def test_table_items_row_from_first_constraint(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`table:<категория>` без строки от скила: строка по первому
+    пункту-ограничению ответа, слова — ответ человека (как в терминале)."""
+    view = _nfr_view()
+    fakes = _fakes(env, monkeypatch, view)
+    _stopped("status вернул 11: findings в /r/interview-findings.json")
+    finding = "GC-19 error [Translation table] нет ни одной строки категории «стоить»"
+    reply = iv.DiscoveryReply(11, {"findings": [finding]}, "")
+    for asked in ("table:делать", "table:не делать"):  # как в терминале — все
+        ir.mark(_rd(), asked, "skipped")
+    rec = _post(ir.next_question(reply, view, ir.load_marks(_rd()),
+                                 incomplete=True, upstream=""))  # fmt: skip
+    assert rec["key"] == "table:стоить"
+    _items(env, "не дороже 100 тысяч", [
+        {"prefix": "CON", "body": "Бюджет до 100 тыс. ₽",
+         "acceptance": "не более 100 000 ₽"},
+    ])  # fmt: skip
+    assert env.run("answer", "--items", ITEMS, "--id", rec["id"]) == 0
+    question, _sup, payload = fakes.sent.calls[0]
+    assert question == "customer.nfr.01"
+    assert payload["translations"] == [
+        {"words": "не дороже 100 тысяч", "category": "стоить",
+         "constraint": ["CON-01"], "assumption": "не более 100 000 ₽"},
+    ]  # fmt: skip
+    assert ir.load_marks(_rd())["done"] == ["table:стоить"]
+
+
+def test_items_refused_for_text_keys(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Владелец, категория, допущения — только `dfl reply`."""
+    view = _nfr_view()
+    fakes = _fakes(env, monkeypatch, view)
+    _stopped("status вернул 11: findings в /r/interview-findings.json")
+    q = pending.Question(pending.INTERVIEW_REPAIR, "owner:data", "Кто?")
+    rec = _post((q, {"holder": "customer.nfr.01"}))
+    _items(env, "Иван", [{"prefix": "NFR", "body": "x"}])
+    assert env.run("answer", "--items", ITEMS, "--id", rec["id"]) == 2
+    assert fakes.sent.calls == []
+
+
+def test_items_topup_keeps_translations(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ревью задачи 4 (R6, дизайн §5): добор через `--items` дописывает
+    держателю и строки таблицы скила (`ref` → id), а не только записи."""
+    view = _customer_view()
+    fakes = _fakes(env, monkeypatch, view)
+    _stopped("status вернул 11: findings в /r/interview-findings.json")
+    rec = _post(ir._top_ups(view)[1])
+    assert rec["key"] == "topic:functions"
+    doc = {
+        "text": "отчёт по складу, данные из 1С",
+        "items": [
+            {"prefix": "FR", "ref": "f-a", "body": "Отчёт по складу",
+             "acceptance": "отчёт за 1 минуту"},
+        ],
+        "translations": [
+            {"words": "данные из 1С", "category": "данные",
+             "constraint": ["f-a"], "assumption": None},
+        ],
+    }  # fmt: skip
+    (env.tmp / "target" / ITEMS).write_text(
+        json.dumps(doc, ensure_ascii=False), encoding="utf-8"
+    )
+    assert env.run("answer", "--items", ITEMS, "--id", rec["id"]) == 0
+    question, supersede, payload = fakes.sent.calls[0]
+    assert (question, supersede) == ("customer.goals.01", True)
+    assert [e["id"] for e in payload["entries"]] == ["G-01", "FR-01"]
+    assert payload["translations"] == [
+        {"words": "данные из 1С", "category": "данные",
+         "constraint": ["FR-01"], "assumption": None},
+    ]  # fmt: skip
+    assert ir.load_marks(_rd())["done"] == ["topic:functions"]
