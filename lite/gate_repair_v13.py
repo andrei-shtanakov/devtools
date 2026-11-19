@@ -17,6 +17,9 @@ from typing import Any
 import yaml
 
 from governance.discovery_contract.gate_check import (
+    _ID_LIST_RE,
+    _NUMBER_UNIT_RE,
+    _Q_REF_RE,
     CONSTRAINT_PREFIXES,
     REQUIRED_CATEGORIES,
 )
@@ -34,6 +37,7 @@ CATEGORY_LABELS = {
     "compliance": "регламент",
     "safety": "вред людям",
     "availability": "доступность",
+    "quality": "качество",
 }
 NUMERIC_LABELS = {
     "perf": "скорость ответа и объём работы",
@@ -49,7 +53,10 @@ TABLE_TOPICS = {
 CATEGORY_UNKNOWN = "категория не узнана — пункт не исправлен"
 TABLE_DERIVED = "таблица перевода: строки из записанных предпочтений"
 NO_CONSTRAINT = "в ответе нет пункта-ограничения — строка «{category}» не записана"
-NO_REQUIREMENT = "в ответе нет требования — «{label}» не записано"
+NO_REQUIREMENT = (
+    "в ответе нет требования с числом и единицей (например «2 секунды», "
+    "«100 000 ₽») — «{label}» не записано; значения не знаете — «неизвестно»"
+)
 
 
 def repair_v13(
@@ -208,14 +215,26 @@ def has_category(view: SessionView, kind: str) -> bool:
 
 
 def with_category(doc: dict[str, Any], kind: str) -> bool:
-    """Есть `NFR` категории `kind` (агент не поставил — первому `NFR`
-    ответа она дописывается); нет ни одного `NFR` — `False`."""
+    """Есть `NFR` категории `kind` с числовой целью (GC-20): агент поставил
+    категорию — у всех таких `NFR` цель числом или `Q-NN`; не поставил —
+    она дописывается первому `NFR` ответа с такой целью. Иначе `False`:
+    категория без числа оставила бы GC-20 красным, а вопрос — закрытым."""
     nfrs = [e for e in doc.get("entries") or [] if str(e["id"]).startswith("NFR-")]
-    if not nfrs:
+    kinded = [e for e in nfrs if kind in (e.get("category") or [])]
+    if kinded:
+        return all(numeric_target(e) for e in kinded)
+    fit = next((e for e in nfrs if numeric_target(e)), None)
+    if fit is None:
         return False
-    if not any(kind in (e.get("category") or []) for e in nfrs):
-        nfrs[0]["category"] = [*(nfrs[0].get("category") or []), kind]
+    fit["category"] = [*(fit.get("category") or []), kind]
     return True
+
+
+def numeric_target(entry: dict[str, Any]) -> bool:
+    """Цель записи — число с единицей или ссылка на `Q-NN` (как GC-20)."""
+    target = " ".join(str(entry[k]) for k in ("Acceptance", "Target") if entry.get(k))
+    numbers = _ID_LIST_RE.sub(" ", target)
+    return bool(_NUMBER_UNIT_RE.search(numbers) or _Q_REF_RE.search(target))
 
 
 def unknown_numeric_entries(kind: str, view: SessionView) -> list[dict[str, Any]]:

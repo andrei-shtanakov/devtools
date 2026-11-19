@@ -37,6 +37,7 @@ CATEGORY_STEMS = {
     "compliance": ("регламент", "закон", "аудит", "соответств"),
     "safety": ("вред", "опасн"),
     "availability": ("доступност", "простой", "отказ"),
+    "quality": ("качеств",),
 }
 # В слове побеждает самая длинная основа: «доступность» — availability, не
 # security («доступ»); «безопасность» — security, не safety («опасн»).
@@ -45,7 +46,8 @@ UNKNOWN_WORDS = frozenset({
     "пока нет", "пока не решили", "не решили",
 })  # fmt: skip
 UNKNOWN_MAX_WORDS = 4
-UNKNOWN_MARKERS = ("нет", "никто", "никого", "неизвест", "пока")
+UNKNOWN_MARKERS = frozenset({"нет", "никто", "никого", "пока"})  # слово целиком
+UNKNOWN_PREFIX = "неизвест"  # неизвестно, неизвестен, неизвестный
 _NOT_YET_RE = re.compile(r"\bне (назнач|определ|решил|знаем)")
 NEED_DATE = "нужна дата: ГГГГ-ММ-ДД или ДД.ММ.ГГГГ"
 PAST_DATE = "дата уже прошла"
@@ -130,7 +132,7 @@ def is_unknown(text: str) -> bool:
     if not words or len(words) > UNKNOWN_MAX_WORDS:
         return False
     return bool(_NOT_YET_RE.search(norm)) or any(
-        w.startswith(UNKNOWN_MARKERS) for w in words
+        w in UNKNOWN_MARKERS or w.startswith(UNKNOWN_PREFIX) for w in words
     )
 
 

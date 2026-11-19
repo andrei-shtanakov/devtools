@@ -17,6 +17,7 @@ from governance import interview as iv
 from governance.discovery_contract import gate_check
 from lite import brief_v13 as bv
 from lite import gate_repair as gr
+from lite import gate_repair_v13 as v13
 from lite import structure as sx
 from lite.interview_state import Entry, SessionView
 from lite.structure import AgentUnavailable
@@ -717,6 +718,31 @@ def test_numeric_unknown_creates_nfr_and_q() -> None:
     assert _entry_of(doc, "NFR-01")["body"] == "Ответ быстро, за секунды"
 
 
+def test_numeric_answer_without_number_not_categorised(capsys) -> None:
+    """Ревью #819: `perf` не клеится к `NFR` без числовой цели — GC-20
+    иначе залип бы красным, а вопрос `nfr:perf` больше не ставился."""
+    live = Live()
+    item = {"prefix": "NFR", "body": "Работает без отказов днём",
+            "acceptance": "работает весь день"}  # fmt: skip
+    finding = "GC-20 error [Category: perf] нет ни одной NFR категории perf"
+    _v13([finding], _asker("чтобы не ждать"), _agent({"items": [item]}), live)
+    assert live.resent == []
+    assert "нет требования с числом" in capsys.readouterr().out
+
+
+def test_with_category_checks_target() -> None:
+    def nfr(n: int, target: str, *cat: str) -> dict:
+        return {"id": f"NFR-0{n}", "Target": target, "category": list(cat)}
+
+    doc = {"entries": [nfr(1, "весь день"), nfr(2, "не более 2 с")]}
+    assert v13.with_category(doc, "perf")
+    assert doc["entries"][0]["category"] == []
+    assert doc["entries"][1]["category"] == ["perf"]
+    assert v13.with_category({"entries": [nfr(1, "значение из Q-03")]}, "cost")
+    assert not v13.with_category({"entries": [nfr(1, "быстро", "perf")]}, "perf")
+    assert not v13.with_category({"entries": [nfr(1, "из NFR-02")]}, "perf")
+
+
 def test_numeric_answer_structured_into_nfr() -> None:
     live = Live()
     said = "не больше ста тысяч в месяц"
@@ -864,8 +890,10 @@ CATEGORY_HINT_WORDS = {
     "скорость": "perf",
     "стоимость": "cost",
     "безопасность": "security",
-    "доступ": "security",
+    "доступность": "availability",
     "регламент": "compliance",
+    "вред людям": "safety",
+    "качество": "quality",
 }
 
 
@@ -876,7 +904,8 @@ def test_category_hint_words_recognised(word: str, category: str) -> None:
 
 
 def test_category_hint_lists_only_known_words() -> None:
-    hint = gr.CATEGORY_ASK.split("иначе: ")[1].split("…")[0]
+    hint = gr.CATEGORY_ASK.split("иначе: ")[1].split("; «пропустить»")[0]
+    assert "…" not in gr.CATEGORY_ASK and "…" not in gr.CATEGORY_ASK_OPEN
     assert hint.split(", ") == list(CATEGORY_HINT_WORDS)
 
 

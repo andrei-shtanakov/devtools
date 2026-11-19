@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from typing import Any
 
@@ -9,6 +10,7 @@ import pytest
 
 from governance.discovery_contract import gate_check
 from lite import brief_v13 as bv
+from lite import structure as sx
 from lite.interview_state import Entry, SessionView
 
 LIVE = [
@@ -205,11 +207,10 @@ def test_vocab_matches_gate_check() -> None:
     assert set(bv.DOMAIN_LABELS) == set(gate_check.OWNER_DOMAINS)
     assert set(bv.NUMERIC_QUESTIONS) == gate_check.NUMERIC_CATEGORIES
     assert tuple(bv.DOMAIN_LABELS) == gate_check.OWNER_DOMAINS
+    # каждая категория разбора названа агенту в промпте раскладки (ревью #819)
+    rules = sx._v13_rules()
     for cat in bv.CATEGORY_STEMS:
-        assert cat in {*gate_check.NUMERIC_CATEGORIES, "security", "compliance"} | {
-            "safety",
-            "availability",
-        }
+        assert re.search(rf"\b{cat}\b", rules), cat
 
 
 UNKNOWN_OWNER_PHRASES = [
@@ -231,9 +232,18 @@ def test_owner_unknown_phrases_open_q(text: str) -> None:
     assert entry["id"].startswith("Q-") and text.strip(".!") not in entry["body"]
 
 
-@pytest.mark.parametrize("text", ["Иван, руководитель отдела", "Мария Петрова"])
+@pytest.mark.parametrize(
+    "text",
+    ["Иван, руководитель отдела", "Мария Петрова", "Покатилов Иван",
+     "Нетребко", "Никитин, аналитик"],
+)  # fmt: skip
 def test_owner_named_not_unknown(text: str) -> None:
     assert not bv.is_unknown(text)
+
+
+@pytest.mark.parametrize("text", ["Неизвестен", "пока неизвестно", "нет никого"])
+def test_unknown_word_forms(text: str) -> None:
+    assert bv.is_unknown(text)
 
 
 def test_confirmer_cell_sanitised() -> None:
