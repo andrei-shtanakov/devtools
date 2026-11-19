@@ -315,6 +315,8 @@ remediation-issue у уже помеченного родителя). Повто
 Лёгкая установка режима test на свой Mac или Linux и репо: `sh install.sh`, затем
 `dfl init-repo` и `dfl run`. Пошаговая памятка, в том числе что в test
 выключено: [docs/darkfactory-for-colleagues.md](docs/darkfactory-for-colleagues.md).
+`install.sh` ставит и скил `darkfactory` (`~/.claude/skills/`): тот же путь
+разговором в Claude Code Desktop.
 
 ### Личный проект
 
