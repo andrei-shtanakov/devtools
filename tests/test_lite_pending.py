@@ -44,8 +44,8 @@ def test_record_refuses_without_pending(tmp_path):
 def test_record_refuses_bad_answer(tmp_path):
     q = pending.Question(pending.REVIEW, "brief", "x")
     pending.asker(tmp_path)(q)
-    with pytest.raises(pending.PendingError, match="в терминале"):
-        pending.record(tmp_path, q.id, "поправь требования")
+    with pytest.raises(pending.PendingError, match="замечания словами"):
+        pending.record(tmp_path, q.id, "  ")
     assert not (tmp_path / pending.REPLIES_FILE).exists()
 
 
@@ -137,24 +137,25 @@ def _rec(kind, key="design", options=()):
     return {"kind": kind, "key": key, "options": list(options)}
 
 
-def test_review_reply_accepts_remarks_except_brief():
+def test_review_reply_accepts_remarks_including_brief():
+    """R6 (#766 срез 4): замечания к брифу без терминала принимаются."""
     assert pending.check(pending.REVIEW, "убери D-02", _rec(pending.REVIEW)) is None
     assert pending.check(pending.REVIEW, "дальше", _rec(pending.REVIEW)) is None
     brief = _rec(pending.REVIEW, "brief")
-    assert pending.check(pending.REVIEW, "убери", brief) == pending.REVIEW_REFUSAL
+    assert pending.check(pending.REVIEW, "убери", brief) is None
     assert pending.check(pending.REVIEW, "дальше", brief) is None
     assert pending.check(pending.REVIEW, "правка") is None
 
 
 def test_empty_review_reply_refusal_by_stage():
-    """Пустой ответ: бриф — «только в терминале», прочие этапы и вопрос без
-    записи — «дальше» или замечания словами (замечания `dfl reply` берёт)."""
+    """Пустой ответ на любом этапе (и бриф, R6) и на вопрос без записи —
+    «дальше» или замечания словами (замечания `dfl reply` берёт)."""
     empty = pending.REVIEW_EMPTY_REFUSAL
     assert empty == "ответ: «дальше» или замечания словами"
     assert pending.check(pending.REVIEW, "  ", _rec(pending.REVIEW)) == empty
     assert pending.check(pending.REVIEW, "") == empty
     brief = _rec(pending.REVIEW, "brief")
-    assert pending.check(pending.REVIEW, " ", brief) == pending.REVIEW_REFUSAL
+    assert pending.check(pending.REVIEW, " ", brief) == empty
 
 
 def test_is_done():

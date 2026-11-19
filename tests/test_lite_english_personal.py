@@ -517,12 +517,11 @@ def test_s7_stop_and_refusal(
     out = _screen(capsys)
     assert "awaiting an answer: stage “brief” is ready" in out
     _clean(out)
-    # замечания к брифу через reply — отказ, код 2
+    # замечания к брифу через reply — записаны, код 0 (R6, #766 срез 4)
     qid = _pending_id()
-    assert env.run("reply", "--id", qid, "--text", "more goals") == 2
+    assert env.run("reply", "--id", qid, "--text", "more goals") == 0
     out = _screen(capsys)
-    assert "dfl reply: refusal (code 2)" in out
-    assert "  reason:" in out and "  what to do:" in out
+    assert "answer recorded — continue: dfl run" in out
     _clean(out)
     # «дальше» принят; повторный reply без вопроса — отказ, код 2
     assert env.run("reply", "--id", qid, "--text", "next") == 0

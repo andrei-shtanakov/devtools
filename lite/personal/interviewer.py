@@ -411,26 +411,37 @@ def _ask_turn(doc: dict[str, Any], errors: dict[str, str]) -> AskTurn:
 
 
 def _settle_brief(turn: BriefTurn, log: _Log, lang: str = "ru") -> Brief | None:
-    """Бриф к сводке или `None` (проблемы отправлены агенту репликой `check`).
-
-    На лимите вопросов или после `MAX_CHECKS_IN_ROW` проверок подряд бриф
-    принимается: функции без критерия и оставшиеся проблемы — в «Уточнить»."""
-    entries = log.entries
-    forced = (
-        _questions(entries) >= MAX_QUESTIONS
-        or _checks_in_row(entries) >= MAX_CHECKS_IN_ROW
-    )
-    problems = brief_problems(turn.brief, lang=lang)
-    if forced:
-        demoted = demote_uncovered(turn.brief, lang=lang)
-        rest = tuple(brief_problems(demoted, lang=lang))
-        return replace(demoted, open_items=demoted.open_items + rest)
-    if not problems:
-        return turn.brief
+    """Бриф к сводке или `None` (проблемы отправлены агенту репликой `check`)."""
+    brief, problems = settle(turn.brief, log.entries, lang=lang)
+    if brief is not None:
+        return brief
     text = json.dumps(turn.data, ensure_ascii=False)
     log.append({"role": "agent", "kind": "brief", "text": text})
     log.append({"role": "check", "text": "\n".join(problems)})
     return None
+
+
+def settle(
+    brief: Brief, entries: list[Entry], *, force: bool = False, lang: str = "ru"
+) -> tuple[Brief | None, list[str]]:
+    """Принять бриф или вернуть его проблемы (общая для терминала и удалённого
+    интервью).
+
+    Принудительно (`force`, лимит вопросов или `MAX_CHECKS_IN_ROW` проверок
+    подряд в `entries`) — `(бриф, [])`, функции без критерия и оставшиеся
+    проблемы — в «Уточнить»; проблем нет — `(brief, [])`; иначе
+    `(None, проблемы)`. Журнал не пишет."""
+    forced = (
+        force
+        or _questions(entries) >= MAX_QUESTIONS
+        or _checks_in_row(entries) >= MAX_CHECKS_IN_ROW
+    )
+    if forced:
+        demoted = demote_uncovered(brief, lang=lang)
+        rest = tuple(brief_problems(demoted, lang=lang))
+        return replace(demoted, open_items=demoted.open_items + rest), []
+    problems = brief_problems(brief, lang=lang)
+    return (None, problems) if problems else (brief, [])
 
 
 def _questions(entries: list[Entry]) -> int:
@@ -476,4 +487,10 @@ def _correction(text: str, read: Read) -> str:
         if more is None:
             raise _Stop
         return more.strip()
+    return fix_text(text)
+
+
+def fix_text(text: str) -> str:
+    """Текст поправки без префикса «поправить:»/«2.» (пустой остаток — весь
+    текст: «поправить» без продолжения — тоже слова человека)."""
     return _FIX_PREFIX.sub("", text, count=1).strip() or text.strip()

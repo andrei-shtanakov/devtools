@@ -148,13 +148,6 @@ EN: dict[str, str] = {
     "ждут ответа {n} ручных проверок — запустите dfl run в терминале": (
         "manual checks await an answer: {n} — run dfl run in a terminal"
     ),
-    (
-        "замечания к этапу пока принимаются только в терминале: dfl run; "
-        "без замечаний — «дальше»"
-    ): (
-        "remarks on the stage are accepted only in the terminal for now: dfl run; "
-        "with no remarks — “next”"
-    ),
     "ответ: «дальше» или замечания словами": (
         "answer: “next” or your remarks in words"
     ),
@@ -227,6 +220,37 @@ EN: dict[str, str] = {
     ): (
         "awaiting an answer: {first} — question: dfl pending{pick}; "
         "answer: dfl reply{pick} --id {qid} --text '…'"
+    ),
+    # личный путь без терминала (lite/personal/remote_interview.py, #766 срез 4)
+    "ответ на этот вопрос — dfl note и dfl brief (бриф собирает скил)": (
+        "the answer to this question is dfl note and dfl brief "
+        "(the skill builds the brief)"
+    ),
+    "ответ: «да» или поправка словами": "answer: “yes” or a fix in words",
+    (
+        "нужен бриф по теме «{subject}»: разговор ведёт скил — "
+        "dfl note, затем dfl brief"
+    ): (
+        "a brief is needed on the topic “{subject}”: the skill leads the "
+        "conversation — dfl note, then dfl brief"
+    ),
+    "лимит вопросов исчерпан — соберите бриф: dfl brief": (
+        "the question limit is reached — build the brief: dfl brief"
+    ),
+    (
+        "строить пока нечего: нет ни одной функции с критерием приёмки — "
+        "спросите человека, что должно работать (dfl note), и сдайте бриф снова"
+    ): (
+        "nothing to build yet: no function has an acceptance criterion — "
+        "ask the person what should work (dfl note) and submit the brief again"
+    ),
+    "бриф не принят — поправьте и сдайте снова:": (
+        "the brief is not accepted — fix it and submit again:"
+    ),
+    "пустая реплика не записывается": "an empty line is not recorded",
+    "роль реплики: agent или human": "the line role: agent or human",
+    "у реплики человека вариантов нет — --option только у agent": (
+        "a person's line has no options — --option is for agent only"
     ),
     # ввод в терминале (lite/interview_chat.py)
     "(пустая строка — отправить)": "(empty line — send)",

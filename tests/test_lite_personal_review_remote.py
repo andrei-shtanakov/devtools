@@ -167,10 +167,8 @@ def test_brief_remarks_by_reply_refused(tmp_path) -> None:
     rec = pending.load(rd)
     assert rec is not None and rec["key"] == "brief"
     assert rec["accepts"] == "«дальше»"  # замечания к брифу — только в терминале
-    with pytest.raises(pending.PendingError) as exc:
-        pending.record(rd, str(rec["id"]), "цель шире")
-    assert str(exc.value) == pending.REVIEW_REFUSAL
-    assert not pending.answered(rd)
+    pending.record(rd, str(rec["id"]), "цель шире")  # R6: замечание записано
+    assert pending.answered(rd)
 
 
 def test_brief_remark_without_tty_still_stops(tmp_path) -> None:

@@ -215,7 +215,7 @@ def test_hints_name_english_words_in_en() -> None:
         hints = [
             pending.check(pending.MANUAL, "?"),
             pending.check(pending.EDGE, "?", rec),
-            pending.check(pending.REVIEW, "x", rec),
+            pending.check(pending.REVIEW, " ", rec),
             pending.check(pending.REVIEW, " ", {"key": "design"}),
             pending.check(pending.REMARKS_CONFIRM, "?", _confirm_rec("удалить")),
             i18n.t(er.ANSWER_HELP),
