@@ -70,6 +70,7 @@ from lite.output import (
     verbosity_from_env,
 )
 from lite.personal import flow as personal_flow
+from lite.personal import remote_interview
 from lite.personal import state as personal_state
 from lite.pipeline import (
     CHAIN_STOPPED_HINT,
@@ -208,7 +209,12 @@ REVIEW_SHOWN = "review-shown.json"
 #: узлы паузы волны, на которые «дальше» уже получено без терминала (#766)
 REVIEW_ACKED = "review-acked.json"
 #: команды, продолжающие активный личный прогон: язык вызова — его язык (#769)
-PERSONAL_COMMANDS = frozenset({"run", "abandon", "pending", "reply"})
+PERSONAL_COMMANDS = frozenset(
+    {"run", "abandon", "pending", "reply", "note", "brief", "interview"}
+)
+#: `dfl note`/`dfl brief`/личный `dfl interview` без личного прогона (#766 срез 4)
+NO_PERSONAL_RUN = "нет личного прогона, ждущего бриф — dfl status"
+BRIEF_FILE_REFUSAL = "не прочитать бриф из {path}: {error}"
 TEST_MODE_ONLY = (
     "dfl работает только в режиме test (mode = {mode}) — "
     'поставьте mode = "test" в {path} '
@@ -550,6 +556,20 @@ def _dispatch(
             return pending_cmd(cwd, args.subject, as_json=args.json), None
         if args.command == "reply":
             return reply_cmd(cwd, args.subject, args.id, _reply_text(args)), None
+        if args.command == "note":
+            code = note_cmd(
+                cwd, args.subject, args.id, args.role, args.text, tuple(args.option)
+            )
+            return code, None
+        if args.command == "brief":
+            code = brief_cmd(
+                cwd,
+                args.subject,
+                args.id,
+                Path(args.file),
+                accept_uncovered=args.accept_uncovered,
+            )
+            return code, None
         if args.command == "correct":
             return correct(cwd, args.text, args.subject), None
         code = run(
@@ -692,14 +712,31 @@ def _parser() -> argparse.ArgumentParser:
     p_pen.add_argument("--subject", help="тема конвейера, если их несколько")
     p_rpl = add(
         "reply",
-        help="ответ на ждущий вопрос: review, remarks-confirm, edge, manual "
-        "(затем dfl run)",
+        help="ответ на ждущий вопрос: review, remarks-confirm, edge, manual, "
+        "brief-confirm (затем dfl run)",
     )
     p_rpl.add_argument("--id", required=True, help="id вопроса из dfl pending")
     src = p_rpl.add_mutually_exclusive_group(required=True)
     src.add_argument("--text", help="текст ответа")
     src.add_argument("--file", help="файл с текстом ответа")
     p_rpl.add_argument("--subject", help="тема конвейера, если их несколько")
+    p_note = add("note", help="реплика разговора личного прогона в журнал интервью")
+    p_note.add_argument("--id", required=True, help="id вопроса из dfl pending")
+    p_note.add_argument("--role", required=True, choices=("agent", "human"))
+    p_note.add_argument("--text", required=True, help="текст реплики")
+    p_note.add_argument(
+        "--option", action="append", default=[], help="вариант ответа (у agent)"
+    )
+    p_note.add_argument("--subject", help="тема конвейера, если их несколько")
+    p_brief = add("brief", help="сдать бриф личного прогона (затем dfl reply)")
+    p_brief.add_argument("--id", required=True, help="id вопроса из dfl pending")
+    p_brief.add_argument("--file", required=True, help="JSON-файл с брифом")
+    p_brief.add_argument(
+        "--accept-uncovered",
+        action="store_true",
+        help="принять бриф с функциями без критерия (уйдут в «Уточнить»)",
+    )
+    p_brief.add_argument("--subject", help="тема конвейера, если их несколько")
     add("status", help="прогоны репо и что дальше")
     add("init-repo", help="PR с шаблонами DarkFactory в репо")
     p_rep = add(
@@ -887,9 +924,12 @@ def _pending_lines(rec: dict, *, answered: bool = False) -> list[str]:
         lines.append(t("принимается: {accepts}").format(accepts=rec["accepts"]))
     if answered:
         lines.append(t(pending.ANSWERED))
+        return lines
+    if rec.get("kind") == pending.INTERVIEW_PERSONAL:
+        reply = t(pending.PERSONAL_ANSWER_HINT)
     else:
         reply = t("ответ: dfl reply --id {qid} --text '…'")
-        lines.append(reply.format(qid=rec.get("id", "")))
+    lines.append(reply.format(qid=rec.get("id", "")))
     return lines
 
 
@@ -926,6 +966,84 @@ def reply_cmd(cwd: Path, subject: str | None, qid: str, text: str) -> int:
     except pending.PendingError as exc:
         raise DflError(str(exc)) from exc
     say(t(pending.ANSWERED))
+    return 0
+
+
+def _personal_run(cwd: Path, subject: str | None) -> personal_state.PersonalRun:
+    """Активный личный прогон репо; нет — отказ `NO_PERSONAL_RUN`."""
+    target = _registered_target(cwd)
+    slug = user_targets.slug_from_url(target.repo_url)
+    run = personal_state.active_for(slug, subject=subject)
+    if run is None:
+        raise DflError(t(NO_PERSONAL_RUN))
+    return run
+
+
+def note_cmd(
+    cwd: Path,
+    subject: str | None,
+    qid: str,
+    role: str,
+    text: str,
+    options: tuple[str, ...],
+) -> int:
+    """`dfl note`: реплика разговора в журнал интервью личного прогона."""
+    run = _personal_run(cwd, subject)
+    run_dir = personal_state.run_dir(run.run_id)
+    try:
+        with run_lock.run_lock(run_dir.name):
+            remote_interview.note(
+                run_dir, qid, role, text, options, lang=_run_language(run)
+            )
+    except run_lock.LockBusy as exc:
+        raise DflError(_lock_busy(exc)) from exc
+    except (pending.PendingError, ValueError) as exc:
+        raise DflError(str(exc)) from exc
+    say(t("реплика записана"))
+    return 0
+
+
+def _read_brief_file(path: Path) -> object:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        message = t(BRIEF_FILE_REFUSAL).format(path=path, error=exc)
+        raise DflError(message) from exc
+
+
+def brief_cmd(
+    cwd: Path,
+    subject: str | None,
+    qid: str,
+    path: Path,
+    *,
+    accept_uncovered: bool,
+) -> int:
+    """`dfl brief`: сдать бриф; 0 — принят (ждём «Верно?»), 1 — проблемы."""
+    run = _personal_run(cwd, subject)
+    run_dir = personal_state.run_dir(run.run_id)
+    data = _read_brief_file(path)
+    try:
+        with run_lock.run_lock(run_dir.name):
+            done = remote_interview.submit(
+                run_dir,
+                qid,
+                data,
+                subject=run.subject,
+                accept_uncovered=accept_uncovered,
+                lang=_run_language(run),
+            )
+    except run_lock.LockBusy as exc:
+        raise DflError(_lock_busy(exc)) from exc
+    except (pending.PendingError, st.FormError) as exc:
+        raise DflError(str(exc)) from exc
+    if not done.ok:
+        say(t(remote_interview.BRIEF_PROBLEMS))
+        for problem in done.problems:
+            say(problem)
+        return 1
+    say(done.summary)
+    say(pending.wait_text(run_dir))
     return 0
 
 
@@ -1097,6 +1215,7 @@ def _advance_personal(run: personal_state.PersonalRun) -> int:
         agent=_quiet(st.claude_agent(df_config.load().author_model)),
         launch=_quiet(launch_author),
         check=_quiet(run_check),
+        remote=not _track_tty(),
     )
 
 
@@ -2967,6 +3086,9 @@ def interview(cwd: Path, subject: str | None, *, as_json: bool = False) -> int:
 
     Агент и терминал не нужны; работает в любом статусе прогона с сессией.
     `as_json` — то же данными для скила (`_interview_data`, #766 срез 3)."""
+    personal = _personal_interview(cwd, subject, as_json=as_json)
+    if personal is not None:
+        return _personal_interview_out(personal, as_json)
     state = _interview_run(cwd, subject)
     _enterprise_language()
     session_id = str((state.interview or {}).get("session_id"))
@@ -2982,6 +3104,42 @@ def interview(cwd: Path, subject: str | None, *, as_json: bool = False) -> int:
     print(f"Тема: {state.subject}")
     failure = _status_failure(reply)
     print(iview.render_view(view, ic.current_question(reply), failure))
+    return 0
+
+
+def _personal_interview(
+    cwd: Path, subject: str | None, *, as_json: bool = False
+) -> personal_state.PersonalRun | None:
+    """Активный личный прогон для `dfl interview` (R7); иначе `None`. С
+    `as_json` предупреждения `active_for` о битых прогонах уходят в stderr:
+    stdout — только JSON."""
+    with ExitStack() as stack:
+        if as_json:
+            stack.enter_context(redirect_stdout(sys.stderr))
+        try:
+            return _personal_run(cwd, subject)
+        except DflError:
+            return None
+
+
+def _personal_interview_out(run: personal_state.PersonalRun, as_json: bool) -> int:
+    data = remote_interview.status(personal_state.run_dir(run.run_id), run.subject)
+    if as_json:
+        say(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+    say(t("Тема: {subject}").format(subject=run.subject))
+    say(
+        t("вопросов задано: {n} из {m}").format(
+            n=data["questions"], m=data["max_questions"]
+        )
+    )
+    say(t("проверок брифа подряд: {n}").format(n=data["checks_in_row"]))
+    if data["draft"] is None:
+        say(t("черновика брифа нет"))
+        return 0
+    say(t("черновик брифа есть"))
+    for fid in data["uncovered"]:
+        say(t("функция без критерия: {fid}").format(fid=fid))
     return 0
 
 

@@ -5,6 +5,17 @@
 from __future__ import annotations
 
 EN: dict[str, str] = {
+    "нет личного прогона, ждущего бриф — dfl status": (
+        "no personal run is waiting for a brief — dfl status"
+    ),
+    "не прочитать бриф из {path}: {error}": "cannot read the brief from {path}: {error}",
+    "реплика записана": "note recorded",
+    "Тема: {subject}": "Subject: {subject}",
+    "вопросов задано: {n} из {m}": "questions asked: {n} of {m}",
+    "проверок брифа подряд: {n}": "brief checks in a row: {n}",
+    "черновика брифа нет": "no brief draft",
+    "черновик брифа есть": "a brief draft exists",
+    "функция без критерия: {fid}": "function without a criterion: {fid}",
     # баннер режима test (факты — `governance.df_config`, Task 2)
     "режим test: по сравнению со strict выключено": (
         "test mode: compared with strict, disabled:"
@@ -148,13 +159,6 @@ EN: dict[str, str] = {
     "ждут ответа {n} ручных проверок — запустите dfl run в терминале": (
         "manual checks await an answer: {n} — run dfl run in a terminal"
     ),
-    (
-        "замечания к этапу пока принимаются только в терминале: dfl run; "
-        "без замечаний — «дальше»"
-    ): (
-        "remarks on the stage are accepted only in the terminal for now: dfl run; "
-        "with no remarks — “next”"
-    ),
     "ответ: «дальше» или замечания словами": (
         "answer: “next” or your remarks in words"
     ),
@@ -179,7 +183,6 @@ EN: dict[str, str] = {
         "не понял ответ — номер варианта, «своё: …», «не согласен: …» или «пропустить»"
     ): "did not get that — an option number, “own: …”, “disagree: …” or “skip”",
     "напишите причину после «не согласен:»": "write the reason after “disagree:”",
-    "«дальше»": "“next”",
     "«дальше» или замечания своими словами": "“next” or your remarks in your own words",
     "Верно? 1. да · 2. поправить: <что>": "Correct? 1. yes · 2. fix: <what>",
     # экран личного пути (Task 6): отказ, ошибки до прогона, подсказки
@@ -227,6 +230,51 @@ EN: dict[str, str] = {
     ): (
         "awaiting an answer: {first} — question: dfl pending{pick}; "
         "answer: dfl reply{pick} --id {qid} --text '…'"
+    ),
+    # личный путь без терминала (lite/personal/remote_interview.py, #766 срез 4)
+    (
+        "ждёт ответа: {first} — вопрос: dfl pending{pick}; "
+        "ответ: dfl note{pick} --id {qid}, затем dfl brief{pick} --id {qid}"
+    ): (
+        "awaiting an answer: {first} — question: dfl pending{pick}; "
+        "answer: dfl note{pick} --id {qid}, then dfl brief{pick} --id {qid}"
+    ),
+    (
+        "ответ: dfl note --id {qid} --role … --text '…', затем dfl brief --id {qid} "
+        "--file <бриф.json>"
+    ): (
+        "answer: dfl note --id {qid} --role … --text '…', then dfl brief --id {qid} "
+        "--file <brief.json>"
+    ),
+    "ответ на этот вопрос — dfl note и dfl brief (бриф собирает скил)": (
+        "the answer to this question is dfl note and dfl brief "
+        "(the skill builds the brief)"
+    ),
+    "ответ: «да» или поправка словами": "answer: “yes” or a fix in words",
+    (
+        "нужен бриф по теме «{subject}»: разговор ведёт скил — "
+        "dfl note, затем dfl brief"
+    ): (
+        "a brief is needed on the topic “{subject}”: the skill leads the "
+        "conversation — dfl note, then dfl brief"
+    ),
+    "лимит вопросов исчерпан — соберите бриф: dfl brief": (
+        "the question limit is reached — build the brief: dfl brief"
+    ),
+    (
+        "строить пока нечего: нет ни одной функции с критерием приёмки — "
+        "спросите человека, что должно работать (dfl note), и сдайте бриф снова"
+    ): (
+        "nothing to build yet: no function has an acceptance criterion — "
+        "ask the person what should work (dfl note) and submit the brief again"
+    ),
+    "бриф не принят — поправьте и сдайте снова:": (
+        "the brief is not accepted — fix it and submit again:"
+    ),
+    "пустая реплика не записывается": "an empty line is not recorded",
+    "роль реплики: agent или human": "the line role: agent or human",
+    "у реплики человека вариантов нет — --option только у agent": (
+        "a person's line has no options — --option is for agent only"
     ),
     # ввод в терминале (lite/interview_chat.py)
     "(пустая строка — отправить)": "(empty line — send)",

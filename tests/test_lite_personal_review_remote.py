@@ -17,7 +17,7 @@ import pytest
 from lite import owner_review as orv
 from lite import pending
 from lite import review_pause as rp
-from lite.personal import state
+from lite.personal import flow, state
 from tests.test_lite_personal_flow import FakeOps, checker
 from tests.test_lite_personal_review import (  # noqa: F401
     DECOMP_EDGE,
@@ -160,27 +160,38 @@ def test_review_reply_consumed_before_revise(tmp_path) -> None:
     assert not pending.answered(rd)
 
 
-def test_brief_remarks_by_reply_refused(tmp_path) -> None:
+def test_brief_remarks_by_reply_recorded(tmp_path) -> None:
     run = _run(tmp_path, ("brief",))
     assert _advance(run, FakeOps(run), read=_no_read, tty=False) == 0
     rd = state.run_dir(run.run_id)
     rec = pending.load(rd)
     assert rec is not None and rec["key"] == "brief"
-    assert rec["accepts"] == "«дальше»"  # замечания к брифу — только в терминале
-    with pytest.raises(pending.PendingError) as exc:
-        pending.record(rd, str(rec["id"]), "цель шире")
-    assert str(exc.value) == pending.REVIEW_REFUSAL
-    assert not pending.answered(rd)
+    assert rec["accepts"] == rp.REMOTE_ACCEPTS  # R6: замечания — как у design
+    pending.record(rd, str(rec["id"]), "цель шире")  # R6: замечание записано
+    assert pending.answered(rd)
 
 
-def test_brief_remark_without_tty_still_stops(tmp_path) -> None:
-    """Недоигранное замечание к брифу без терминала — прежний стоп NO_TTY."""
+def test_brief_remark_without_tty_reinterviews(tmp_path) -> None:
+    """R6: недоигранное замечание к брифу без терминала принимается — бриф
+    пересобирает скил (`interview-personal`), замечание ещё не применено."""
     run = _run(tmp_path, ("brief",))
     assert _advance(run, FakeOps(run), read=_lines()) == 0
     rd = state.run_dir(run.run_id)
     rp.record(rd, "brief", "цель шире")
-    assert _advance(run, FakeOps(run), read=_no_read, tty=False) == 0
-    assert run.stop_reason.startswith("ждёт просмотра этапа «бриф»")
+    rc = flow.advance(
+        run,
+        FakeOps(run),
+        read=_no_read,
+        agent=lambda p: "",
+        launch=_author(),
+        check=checker("PASS"),
+        tty=lambda: False,
+        remote=True,
+    )
+    assert rc == 0 and run.step == "interview"
+    assert run.stop_reason.startswith("ждёт ответа:")
+    rec = pending.load(rd)
+    assert rec is not None and rec["kind"] == pending.INTERVIEW_PERSONAL
     assert [r.text for r in rp.pending(rd, "brief")] == ["цель шире"]
 
 

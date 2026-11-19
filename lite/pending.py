@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -27,6 +28,10 @@ INTERVIEW_QUESTION = "interview-question"
 INTERVIEW_TOPUP = "interview-topup"
 INTERVIEW_REPAIR = "interview-repair"
 INTERVIEW_KINDS = frozenset({INTERVIEW_QUESTION, INTERVIEW_TOPUP, INTERVIEW_REPAIR})
+#: личный путь без терминала: нужен бриф (ответ — `dfl note`/`dfl brief`)
+INTERVIEW_PERSONAL = "interview-personal"
+#: «Верно?» по сводке брифа, построенной `dfl` (ответ — `dfl reply`)
+BRIEF_CONFIRM = "brief-confirm"
 PENDING_FILE = "pending.json"
 REPLIES_FILE = "replies.json"
 
@@ -67,9 +72,15 @@ WAIT_LINE = (
     "ждёт ответа: {first} — вопрос: dfl pending{pick}; "
     "ответ: dfl reply{pick} --id {qid} --text '…'"
 )
-REVIEW_REFUSAL = (
-    "замечания к этапу пока принимаются только в терминале: dfl run; "
-    "без замечаний — «дальше»"
+#: строка ожидания «нужен бриф» (`INTERVIEW_PERSONAL`): ответ — не `dfl reply`
+WAIT_LINE_PERSONAL = (
+    "ждёт ответа: {first} — вопрос: dfl pending{pick}; "
+    "ответ: dfl note{pick} --id {qid}, затем dfl brief{pick} --id {qid}"
+)
+#: приглашение ответить в выводе `dfl pending` для `INTERVIEW_PERSONAL`
+PERSONAL_ANSWER_HINT = (
+    "ответ: dfl note --id {qid} --role … --text '…', затем dfl brief --id {qid} "
+    "--file <бриф.json>"
 )
 REVIEW_EMPTY_REFUSAL = "ответ: «дальше» или замечания словами"
 MANUAL_REFUSAL = "ответ: 1/выполнено, 2/не выполнено[: заметка], 3/с оговоркой: <текст>"
@@ -79,9 +90,18 @@ INTERVIEW_REFUSAL = (
     "ответ по существу: dfl answer --items <файл> --id {qid}; "
     "здесь — только «пропустить»"
 )
+PERSONAL_REPLY_REFUSAL = (
+    "ответ на этот вопрос — dfl note и dfl brief (бриф собирает скил)"
+)
+CONFIRM_FIX_REFUSAL = "ответ: «да» или поправка словами"
 NUMERIC_REFUSAL = (
     "ответ по существу: dfl answer --items <файл> --id {qid}; "
     "здесь — только «пропустить» или «неизвестно»"
+)
+#: префикс поправки на «Верно?» («2.», «поправить:», «fix»); общий для терминала
+#: (`interviewer.fix_text`) и проверки ответа `brief-confirm` без терминала
+FIX_PREFIX = re.compile(
+    r"^\s*(?:2\s*[.):](?!\d)\s*)?(?:(?:поправить|fix)\s*:?\s*)?", re.IGNORECASE
 )
 #: ключи починки, ответ на которые — текст человека (`dfl reply`), не раскладка
 TEXT_KEY_PREFIXES = ("verdict:", "category:", "owner:")
@@ -216,16 +236,17 @@ def asker(run_dir: Path) -> Ask:
     return ask
 
 
-def _line(qid: str, text: str, subject: str | None = None) -> str:
+def _line(qid: str, text: str, subject: str | None = None, kind: str = "") -> str:
     first = text.splitlines()[0] if text.strip() else ""
     pick = f" --subject '{subject}'" if subject else ""
-    return i18n.t(WAIT_LINE).format(first=first, pick=pick, qid=qid)
+    line = WAIT_LINE_PERSONAL if kind == INTERVIEW_PERSONAL else WAIT_LINE
+    return i18n.t(line).format(first=first, pick=pick, qid=qid)
 
 
 def wait_line(q: Question, subject: str | None = None) -> str:
     """Строка «ждёт ответа» для вывода `dfl run`; `subject` — тема в
     подсказке, когда без неё `dfl pending`/`dfl reply` не выберут прогон."""
-    return _line(q.id, q.text, subject)
+    return _line(q.id, q.text, subject, q.kind)
 
 
 def wait_text(run_dir: Path, subject: str | None = None) -> str:
@@ -237,7 +258,8 @@ def wait_text(run_dir: Path, subject: str | None = None) -> str:
         return ""
     if answered(run_dir):
         return i18n.t(ANSWERED)
-    return _line(str(rec.get("id", "")), str(rec.get("text", "")), subject)
+    qid, text = str(rec.get("id", "")), str(rec.get("text", ""))
+    return _line(qid, text, subject, str(rec.get("kind", "")))
 
 
 def parse_manual(text: str) -> dict:
@@ -264,8 +286,6 @@ def is_done(text: str) -> bool:
 def _check_review(text: str, rec: Mapping | None) -> str | None:
     if is_done(text):
         return None
-    if rec is not None and rec.get("key") == "brief":
-        return i18n.t(REVIEW_REFUSAL)
     return None if text.strip() else i18n.t(REVIEW_EMPTY_REFUSAL)
 
 
@@ -304,6 +324,20 @@ def _check_edge(text: str, rec: Mapping | None) -> str | None:
     return i18n.t(EDGE_REFUSAL).format(n=n)
 
 
+def fix_rest(text: str) -> str:
+    """Слова поправки без префикса `FIX_PREFIX` (пусто — слов нет)."""
+    return FIX_PREFIX.sub("", text, count=1).strip()
+
+
+def _check_brief_confirm(text: str) -> str | None:
+    """«Верно?»: любой ответ со словами; пустой, голое «2» и префикс поправки
+    без слов («2.», «поправить:», «fix») — отказ: поправка — словами."""
+    word = text.strip()
+    if word == "2" or not fix_rest(word):
+        return i18n.t(CONFIRM_FIX_REFUSAL)
+    return None
+
+
 def _check_interview(text: str, rec: Mapping | None) -> str | None:
     if is_skip(text):
         return None
@@ -323,7 +357,8 @@ def check(kind: str, text: str, rec: Mapping | None = None) -> str | None:
     """Причина отказа принять ответ или `None`.
 
     `rec` — записанный вопрос (`load()`): по нему проверяются варианты и
-    этап `brief` (замечания к нему через reply не принимаются).
+    ключ вопроса интервью. На «нужен бриф» (`INTERVIEW_PERSONAL`) reply не
+    отвечают: ответ — `dfl note`/`dfl brief`.
     """
     if kind == REVIEW:
         return _check_review(text, rec)
@@ -335,6 +370,10 @@ def check(kind: str, text: str, rec: Mapping | None = None) -> str | None:
         return _check_manual(text)
     if kind in INTERVIEW_KINDS:
         return _check_interview(text, rec)
+    if kind == INTERVIEW_PERSONAL:
+        return i18n.t(PERSONAL_REPLY_REFUSAL)
+    if kind == BRIEF_CONFIRM:
+        return _check_brief_confirm(text)
     return f"неизвестный вид вопроса: {kind}"
 
 

@@ -40,6 +40,7 @@ from lite.edge_resolve import MAX_ROUNDS, Outcome, PaidCalls, Scope, resolve_sco
 from lite.i18n import t
 from lite.interview_chat import Read
 from lite.output import say
+from lite.personal import remote_interview
 from lite.personal.brief import Brief, brief_from_json, render_brief
 from lite.personal.check import WAVES, NodeCheck, check_node, decomposition_problems
 from lite.personal.interviewer import Halt, append_correction, interview
@@ -114,6 +115,8 @@ class _Ctx:
     base: str = FALLBACK_BASE
     #: есть терминал для паузы на просмотр (спрашивается только на паузе)
     tty: Callable[[], bool] = _stdin_is_tty
+    #: интервью ведёт скил без терминала (`remote_interview`, #766 срез 4)
+    remote: bool = False
 
     def stop(self, reason: str) -> bool:
         """Записать и показать причину стопа; `False` — шаг встал."""
@@ -136,14 +139,16 @@ def advance(
     launch: Launch = launch_author,
     check: Callable = run_check,
     tty: Callable[[], bool] = _stdin_is_tty,
+    remote: bool = False,
 ) -> int:
     """Выполнить шаги прогона, пока можно.
 
     0 — дошёл до `code-pr`/`done` или ждёт человека; 1 — стоп
     (`run.stop_reason` записан и выведен). После каждого шага — `save(run)`.
-    `tty` — есть ли терминал для паузы на просмотр этапа (#768).
+    `tty` — есть ли терминал для паузы на просмотр этапа (#768); `remote` —
+    интервью без терминала ведёт скил (#766 срез 4, `dfl run` без терминала).
     """
-    ctx = _Ctx(run, ops, read, agent, launch, check, tty=tty)
+    ctx = _Ctx(run, ops, read, agent, launch, check, tty=tty, remote=remote)
     run.stop_reason = ""
     save(run)
     ctx.base = _base(run, ops)
@@ -205,7 +210,14 @@ def _step_interview(ctx: _Ctx) -> bool:
 
 
 def _interview(ctx: _Ctx, rd: Path) -> bool:
-    """Интервью до подтверждённого брифа и его запись; `False` — пауза/стоп."""
+    """Интервью до подтверждённого брифа и его запись; `False` — пауза/стоп.
+
+    `ctx.remote` — разговор ведёт скил (`remote_interview`, #766 срез 4):
+    вопрос поставлен — ожидание (код 0). Иначе удалённое состояние
+    снимается (терминал побеждает, R5) и идёт прежний интервьюер."""
+    if ctx.remote:
+        return _interview_remote(ctx, rd)
+    remote_interview.reset(rd)
     # `lang` — только не по умолчанию: русский вызов прежний (подмены
     # `interview` в тестах держат прежнюю сигнатуру)
     lang = {"lang": ctx.run.language} if ctx.run.language != "ru" else {}
@@ -216,6 +228,16 @@ def _interview(ctx: _Ctx, rd: Path) -> bool:
         return False
     if isinstance(brief, Halt):
         return ctx.stop(_msg("интервью не завершено — {retry}"))
+    _write_brief(ctx, rd, brief)
+    return True
+
+
+def _interview_remote(ctx: _Ctx, rd: Path) -> bool:
+    """Шаг интервью без терминала: подтверждённый бриф — запись; иначе
+    вопрос `interview-personal`/`brief-confirm` ждёт скил или человека."""
+    brief = remote_interview.step(rd, ctx.run.subject, lang=ctx.run.language)
+    if brief is None:
+        return _stop_wait(ctx, pending.wait_text(rd))
     _write_brief(ctx, rd, brief)
     return True
 
@@ -608,8 +630,8 @@ def _review(ctx: _Ctx, stage: str, files: list[str]) -> bool:
     рендеру с подсказкой, и пауза снова (дальше читают `brief.json`).
     `/стоп`/EOF — пауза (код 0); без терминала — тоже пауза (код 0)
     с подсказкой-ссылкой: ждёт человека, не сбой. Замечания к дизайну и
-    декомпозиции приходят и через `dfl reply` (#766 срез 2); к брифу — только
-    в терминале.
+    декомпозиции приходят и через `dfl reply` (#766 срез 2), к брифу — тоже
+    (срез 4, R6): без терминала бриф пересобирает скил (`interview-personal`).
     """
     rd = run_dir(ctx.run.run_id)
     paths = [ctx.bundle / name for name in files]
@@ -625,12 +647,6 @@ def _review(ctx: _Ctx, stage: str, files: list[str]) -> bool:
     round_no = 0
     while True:
         batch = rp.pending(rd, stage)
-        if batch and stage == "brief" and not ctx.tty():
-            # бриф правится интервьюером — только в терминале (`dfl reply`
-            # замечания к брифу не принимает)
-            return _stop_wait(
-                ctx, t(NO_TTY).format(label=label, links=orv.links(paths))
-            )
         if batch:
             round_no += 1
             say(
@@ -734,10 +750,22 @@ def _apply_remarks(ctx: _Ctx, stage: str, batch: list[rp.Remark]) -> bool:
 
 def _brief_by_owner(ctx: _Ctx, batch: list[rp.Remark]) -> bool:
     """Замечание к брифу — правка интервьюеру («поправить: …» в журнал
-    интервью), бриф пересобирается и снова подтверждается «Верно?»."""
+    интервью), бриф пересобирается и снова подтверждается «Верно?».
+    Без терминала переинтервью уже идёт (вопрос скилу или «Верно?») — правка
+    в журнале, повтор `dfl run` её не дублирует: после сводки скила
+    `append_correction` её уже не видит."""
     rd = run_dir(ctx.run.run_id)
-    append_correction(rd, "\n".join(r.text for r in batch), lang=ctx.run.language)
+    if not (ctx.remote and _remote_interview_open(rd)):
+        text = "\n".join(r.text for r in batch)
+        append_correction(rd, text, lang=ctx.run.language)
     return _interview(ctx, rd)
+
+
+def _remote_interview_open(rd: Path) -> bool:
+    """Ждёт вопрос удалённого интервью (`interview-personal`/`brief-confirm`)."""
+    rec = pending.load(rd)
+    kinds = (pending.INTERVIEW_PERSONAL, pending.BRIEF_CONFIRM)
+    return rec is not None and rec.get("kind") in kinds
 
 
 def _revise_by_owner(ctx: _Ctx, stage: str, batch: list[rp.Remark]) -> bool:
