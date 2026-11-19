@@ -1297,3 +1297,22 @@ def test_customer_v13_repair_end_to_end_without_terminal(
     assert gc.translation_rows(brief_body(sess.answers)) is not None
     assert _pending() is None
     assert all(sup for _q, sup, _p in sess.sent) and fakes.calls == []
+
+
+@pytest.mark.parametrize("text", ["Не знаю.", "Пока никто"])
+def test_owner_period_and_negation_replies(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+    text: str,
+) -> None:
+    """«Не знаю.» — пропуск, «Пока никто» — открытый Q; фальшивого P нет."""
+    sess = _v13(monkeypatch, _without_owner("quality"))
+    assert env.run("run") == 0
+    _reply(env, "owner:quality", text)
+    assert env.run("run") == 0
+    if text.startswith("Не знаю"):
+        assert sess.sent == []
+        return
+    new = sess.sent[-1][2]["entries"][-1]
+    assert new["id"].startswith("Q-") and new["owns"] == ["quality"]

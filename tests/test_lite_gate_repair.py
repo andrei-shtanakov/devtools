@@ -890,3 +890,27 @@ def test_category_labels_round_trip() -> None:
 
     for code, label in v13.CATEGORY_LABELS.items():
         assert bv.parse_categories(label, []) == [code], label
+
+
+@pytest.mark.parametrize("said", ["Не знаю.", "пропустить."])
+def test_owner_skip_with_period_writes_nothing(said: str) -> None:
+    from lite.interview_chat import _ask_or_skip
+
+    live = Live()
+    asked: list[str] = []
+    lines = iter([said, ""])  # ответ, затем пустая строка — конец ввода
+
+    def ask(header: str) -> str | None:
+        asked.append(header)
+        return _ask_or_skip(header, lambda _prompt: next(lines))
+
+    _v13([_OWNER.format("process")], ask, _agent(), live)
+    assert asked and live.resent == []
+
+
+def test_owner_negation_phrase_writes_open_q() -> None:
+    live = Live()
+    _v13([_OWNER.format("data")], _asker("нет владельца"), _agent(), live)
+    [(_qid, doc)] = live.resent
+    q = _entry_of(doc, "Q-01")
+    assert q["owns"] == ["data"] and "нет владельца" not in q["body"]

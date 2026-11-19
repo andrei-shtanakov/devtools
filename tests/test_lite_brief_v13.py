@@ -210,3 +210,33 @@ def test_vocab_matches_gate_check() -> None:
             "safety",
             "availability",
         }
+
+
+UNKNOWN_OWNER_PHRASES = [
+    "Не знаю.",
+    "никого",
+    "нет владельца",
+    "владельца нет",
+    "Пока никто",
+    "пока никто.",
+    "не определён",
+    "Не назначен!",
+]
+
+
+@pytest.mark.parametrize("text", [p for p in UNKNOWN_OWNER_PHRASES if "знаю" not in p])
+def test_owner_unknown_phrases_open_q(text: str) -> None:
+    assert bv.is_unknown(text)
+    [entry] = bv.owner_entries("data", text, _view())
+    assert entry["id"].startswith("Q-") and text.strip(".!") not in entry["body"]
+
+
+@pytest.mark.parametrize("text", ["Иван, руководитель отдела", "Мария Петрова"])
+def test_owner_named_not_unknown(text: str) -> None:
+    assert not bv.is_unknown(text)
+
+
+def test_confirmer_cell_sanitised() -> None:
+    today = date(2026, 11, 1)
+    got = bv.parse_confirmation("Иван | ПМ\nотдела, 2026-12-01", today)
+    assert got == ("Иван ПМ отдела", "2026-12-01")

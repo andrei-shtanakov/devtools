@@ -44,6 +44,9 @@ UNKNOWN_WORDS = frozenset({
     "неизвестно", "никто", "нет", "не назначен", "не назначено",
     "пока нет", "пока не решили", "не решили",
 })  # fmt: skip
+UNKNOWN_MAX_WORDS = 4
+UNKNOWN_MARKERS = ("нет", "никто", "никого", "неизвест", "пока")
+_NOT_YET_RE = re.compile(r"\bне (назнач|определ|решил|знаем)")
 NEED_DATE = "нужна дата: ГГГГ-ММ-ДД или ДД.ММ.ГГГГ"
 PAST_DATE = "дата уже прошла"
 NEED_WHO = "кто подтверждает?"
@@ -118,8 +121,17 @@ def parse_categories(text: str, hypothesis: list[str]) -> list[str] | None:
 
 
 def is_unknown(text: str) -> bool:
-    """Ответ — «владельца нет/неизвестен» («не знаю» — это пропуск, не сюда)."""
-    return text.strip().casefold().rstrip(".!?,;… ") in UNKNOWN_WORDS
+    """Ответ — «владельца нет/неизвестен» («не знаю» — это пропуск, не сюда):
+    слово из списка либо короткий ответ (до 4 слов) с отрицанием/отсутствием."""
+    norm = " ".join(text.casefold().strip(".!?,;… \t\r\n").split())
+    if norm in UNKNOWN_WORDS:
+        return True
+    words = re.findall(r"\w+", norm)
+    if not words or len(words) > UNKNOWN_MAX_WORDS:
+        return False
+    return bool(_NOT_YET_RE.search(norm)) or any(
+        w.startswith(UNKNOWN_MARKERS) for w in words
+    )
 
 
 def _is_open(entry: Any) -> bool:
@@ -233,7 +245,7 @@ def parse_confirmation(text: str, today: date) -> tuple[str, str] | str:
     if due < today:
         return PAST_DATE
     rest = (text[: match.start()] + " " + text[match.end() :]).strip(_SEPARATORS)
-    confirmer = re.sub(r"\s+", " ", rest.strip(_SEPARATORS))
+    confirmer = re.sub(r"\s+", " ", cell(rest.strip(_SEPARATORS))).strip()
     return (confirmer, due.isoformat()) if confirmer else NEED_WHO
 
 
