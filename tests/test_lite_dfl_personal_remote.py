@@ -12,12 +12,17 @@ from pathlib import Path
 import pytest
 
 from governance import user_targets
+from governance.author_launch import LaunchOutcome
 from lite import dfl, i18n, pending
-from lite.personal import interviewer
+from lite.personal import flow, interviewer
 from lite.personal import remote_interview as ri
 from lite.personal import state as ps
+from lite.personal.brief import brief_from_json, render_brief
+from lite.personal.flow import FILENAMES
 from tests.test_lite_dfl import REPO, SLUG, URL, Env, env  # noqa: F401
+from tests.test_lite_personal_flow import FakeOps, checker
 from tests.test_lite_personal_remote_interview import BRIEF, _bare
+from tests.test_lite_personal_review import NODE_TEXT
 
 SUBJECT = "заметки"
 
@@ -79,12 +84,19 @@ def test_note_and_brief_cli_round_trip(
     assert entries[1] == {"role": "human", "text": "список"}
 
 
-def test_note_after_confirm_posted_is_stale(env: Env) -> None:  # noqa: F811
+def test_note_after_confirm_posted_is_stale(
+    env: Env,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     run_dir = _personal()
     qid = _qid(run_dir)
     assert env.run("brief", "--id", qid, "--file", _file(env, BRIEF)) == 0
+    confirm = _qid(run_dir)
+    capsys.readouterr()
     before = (run_dir / interviewer.TRANSCRIPT).read_text("utf-8")
-    assert env.run("note", "--id", qid, "--role", "human", "--text", "x") == 2
+    for stale in (qid, confirm):  # старый id и id brief-confirm (kind guard)
+        assert env.run("note", "--id", stale, "--role", "human", "--text", "x") == 2
+        assert pending.STALE.split(" — ")[0] in capsys.readouterr().err
     assert (run_dir / interviewer.TRANSCRIPT).read_text("utf-8") == before
 
 
@@ -139,3 +151,82 @@ def test_note_without_personal_run_refused(
     args = ("note", "--id", "x", "--role", "human", "--text", "x")
     assert env.run(*args) == 2
     assert "нет личного прогона, ждущего бриф" in capsys.readouterr().err
+
+
+def test_personal_path_to_design_without_terminal(
+    env: Env,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`run → pending → note → brief → reply «да» → run`, пауза на брифе с
+    замечанием через `reply`, дальше — до дизайна; агент интервьюера не зовётся."""
+    authored: list[str] = []
+
+    def author(call: object, prompt: object) -> LaunchOutcome:
+        name = call.filename  # type: ignore[attr-defined]
+        authored.append(name)
+        path = Path(call.target_dir) / call.bundle_dir / name  # type: ignore[attr-defined]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(NODE_TEXT[name], encoding="utf-8")
+        return LaunchOutcome(0)
+
+    def no_agent(prompt: str) -> str:
+        pytest.fail("платный вызов интервью без терминала")
+
+    def advance(run: ps.PersonalRun, ops: object, **kwargs: object) -> int:
+        return real_advance(
+            run,
+            FakeOps(run),
+            read=lambda p: pytest.fail("чтение терминала"),
+            agent=no_agent,
+            launch=author,
+            check=checker("PASS"),
+            tty=lambda: False,
+            remote=kwargs["remote"],  # type: ignore[arg-type]
+        )
+
+    real_advance = flow.advance
+    monkeypatch.setattr(flow, "advance", advance)
+    monkeypatch.setattr(flow, "config_mode", lambda: "test")
+    monkeypatch.setattr(dfl, "_track_tty", lambda: False)
+
+    def run_dfl() -> int:
+        return env.run(
+            "run", "--subject", SUBJECT, "--track", "personal", "--review", "brief"
+        )
+
+    assert run_dfl() == 0
+    [rd] = [p for p in ps.personal_root().iterdir() if p.is_dir()]
+    qid = _qid(rd)
+    assert pending.load(rd)["kind"] == pending.INTERVIEW_PERSONAL  # type: ignore[index]
+    note = ("note", "--id", qid, "--role")
+    assert env.run(*note, "agent", "--text", "Что должно получиться?") == 0
+    assert env.run(*note, "human", "--text", "чтоб печатал") == 0
+    assert env.run("brief", "--id", qid, "--file", _file(env, BRIEF)) == 0
+    confirm = pending.load(rd)
+    assert confirm is not None and confirm["kind"] == pending.BRIEF_CONFIRM
+    assert env.run("reply", "--id", confirm["id"], "--text", "да") == 0
+    assert run_dfl() == 0  # бриф записан, пауза на брифе
+    review = pending.load(rd)
+    assert review is not None and review["kind"] == pending.REVIEW
+    assert review["key"] == "brief" and authored == []
+    # замечание к брифу без терминала: заново интервью, бриф и подтверждение
+    assert env.run("reply", "--id", review["id"], "--text", "цель шире") == 0
+    assert run_dfl() == 0
+    again = pending.load(rd)
+    assert again is not None and again["kind"] == pending.INTERVIEW_PERSONAL
+    assert env.run("brief", "--id", again["id"], "--file", _file(env, BRIEF)) == 0
+    confirm = pending.load(rd)
+    assert confirm is not None and confirm["kind"] == pending.BRIEF_CONFIRM
+    assert env.run("reply", "--id", confirm["id"], "--text", "1") == 0
+    assert run_dfl() == 0
+    review = pending.load(rd)
+    assert review is not None and review["key"] == "brief"
+    assert env.run("reply", "--id", review["id"], "--text", "дальше") == 0
+    assert run_dfl() == 0
+    run = ps.load(rd.name)
+    assert run.step != "interview" and "20-design.md" in authored
+    bundle = Path(run.target_dir) / run.bundle_dir
+    expected = render_brief(brief_from_json(BRIEF))
+    assert (bundle / FILENAMES["brief"]).read_text(encoding="utf-8") == expected
+    capsys.readouterr()
