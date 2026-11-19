@@ -352,17 +352,25 @@ def test_check_skill_target_allows_missing(tmp_path: Path) -> None:
     install.check_skill_target(tmp_path / "darkfactory")
 
 
-def test_foreign_skill_dir_refused_before_clone(tmp_path: Path, capsys) -> None:
+def test_foreign_skill_dir_refused_before_clone(
+    tmp_path: Path, remote: Remote, capsys
+) -> None:
     dest = tmp_path / "skills" / "darkfactory"
     dest.mkdir(parents=True)
     (dest / "SKILL.md").write_text("mine")
+    sha = remote.commit("one")
     comps = tmp_path / "components.toml"
-    comps.write_text('schema = "darkfactory-components/v1"\n')
+    comps.write_text(
+        'schema = "darkfactory-components/v1"\n'
+        f'[repos.comp]\nurl = "{remote.url}"\nsha = "{sha}"\n'
+    )
+    dt = tmp_path / "ws" / "devtools"
+    dt.mkdir(parents=True)
     rec = Recorder()
     code = install.main(
         ["--login", "x"],
         runs_root=tmp_path / "runs",
-        devtools=tmp_path / "dt",
+        devtools=dt,
         components=comps,
         config_path=tmp_path / "cfg.toml",
         bin_dir=tmp_path / "bin",
@@ -373,7 +381,52 @@ def test_foreign_skill_dir_refused_before_clone(tmp_path: Path, capsys) -> None:
     err = capsys.readouterr().err
     assert str(dest) in err and "не установлен install.sh" in err
     assert not rec.verbs("clone")
+    assert not (tmp_path / "ws" / "comp").exists()
     assert (dest / "SKILL.md").read_text() == "mine"
+
+
+def test_write_skill_refuses_foreign_dir(tmp_path: Path) -> None:
+    dest = tmp_path / "skills" / "darkfactory"
+    dest.mkdir(parents=True)
+    (dest / "SKILL.md").write_text("mine")
+    with pytest.raises(install.InstallError, match="не установлен install.sh"):
+        install.write_skill(tmp_path / "skills")
+    assert sorted(p.name for p in dest.iterdir()) == ["SKILL.md"]
+    assert (dest / "SKILL.md").read_text() == "mine"
+
+
+def test_write_skill_copy_failure_keeps_old_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    skills = tmp_path / "skills"
+    dest = install.write_skill(skills)
+    (dest / "SKILL.md").write_text("old")
+
+    def broken(src: Path, dst: Path, **kw: object) -> None:
+        Path(dst).mkdir()
+        (Path(dst) / "half.md").write_text("x")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(install.shutil, "copytree", broken)
+    with pytest.raises(install.InstallError, match="прежняя копия не тронута"):
+        install.write_skill(skills)
+    assert (dest / "SKILL.md").read_text() == "old"
+    assert (dest / install.SKILL_MARKER).is_file()
+    assert sorted(p.name for p in skills.iterdir()) == ["darkfactory"]
+    monkeypatch.undo()
+    install.write_skill(skills)
+    src = (install.SKILL_SOURCE / "SKILL.md").read_bytes()
+    assert (dest / "SKILL.md").read_bytes() == src
+
+
+def test_write_skill_clears_stale_temp(tmp_path: Path) -> None:
+    skills = tmp_path / "skills"
+    (skills / ".darkfactory.tmp").mkdir(parents=True)
+    (skills / ".darkfactory.tmp" / "junk").write_text("x")
+    (skills / ".darkfactory.old").write_text("x")
+    dest = install.write_skill(skills)
+    assert sorted(p.name for p in skills.iterdir()) == ["darkfactory"]
+    assert not (dest / "junk").exists()
 
 
 def test_existing_strict_config_warns(tmp_path: Path, remote: Remote, capsys) -> None:

@@ -32,7 +32,7 @@ GLOBAL_FLAGS = frozenset({"--cwd", "--help"})
 _SPAN = re.compile(r"`([^`\n]+)`")
 _FENCE = re.compile(r"^```[^\n]*\n(.*?)^```", re.DOTALL | re.MULTILINE)
 _COMMAND = re.compile(r"\bdfl\s+([a-z][a-z-]*)(.*?)(?=\bdfl\s+[a-z]|$)")
-_FLAG = re.compile(r"(?<![\w-])--[a-z][a-z-]*")
+_FLAG = re.compile(r"(?<![\w-])(?:--[a-z][a-z-]*|-[a-z](?![\w-]))")
 
 
 def _subcommands() -> dict[str, argparse.ArgumentParser]:
@@ -57,6 +57,16 @@ def _commands(text: str) -> list[tuple[str, list[str]]]:
         for sub, rest in _COMMAND.findall(line):
             found.append((sub, _FLAG.findall(rest)))
     return found
+
+
+def _standalone_flags(text: str) -> list[str]:
+    """Флаги отдельных спанов кода без `dfl` (`--accept-uncovered`, `-v`)."""
+    return [
+        flag
+        for line in _code_lines(text)
+        if line.lstrip().startswith("-") and not _COMMAND.search(line)
+        for flag in _FLAG.findall(line)
+    ]
 
 
 def test_skill_frontmatter() -> None:
@@ -87,6 +97,18 @@ def test_skill_commands_exist() -> None:
     assert seen > 10, "скил не называет команд dfl — сторож ничего не проверил"
 
 
+def test_standalone_flags_exist() -> None:
+    """Флаг, названный отдельно от команды, есть хотя бы у одной подкоманды."""
+    subs = _subcommands()
+    known = GLOBAL_FLAGS.union(*(set(p._option_string_actions) for p in subs.values()))
+    seen = 0
+    for path in (SKILL, REFERENCE):
+        for flag in _standalone_flags(path.read_text(encoding="utf-8")):
+            seen += 1
+            assert flag in known, f"{path.name}: флага {flag} нет ни у одной команды"
+    assert seen > 0, "отдельных флагов не найдено — сторож ничего не проверил"
+
+
 def test_skill_has_prohibitions() -> None:
     text = SKILL.read_text(encoding="utf-8")
     for needle in ("не мержи", "make behaviour-run", "принято предложение:"):
@@ -99,6 +121,15 @@ def test_command_scanner_catches_unknown_flag() -> None:
     assert ("status", ["--json"]) in found
     assert ("nope", ["--x"]) in found
     assert "--json" not in _subcommands()["status"]._option_string_actions
+
+
+def test_command_scanner_catches_short_and_standalone_flags() -> None:
+    found = _commands("`dfl status -v -q` и `dfl run --x-y`")
+    assert found == [("status", ["-v", "-q"]), ("run", ["--x-y"])]
+    assert _standalone_flags("`--nope` и `-z` и `x --no` и `dfl run`") == [
+        "--nope",
+        "-z",
+    ]
 
 
 def test_command_scanner_ignores_placeholders() -> None:

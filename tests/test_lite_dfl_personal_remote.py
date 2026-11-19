@@ -221,14 +221,12 @@ def test_brief_missing_file_still_recorded(
 
 def test_accept_uncovered_help_names_full_scope() -> None:
     parser = dfl._parser()
-    text = parser.format_help()
     sub = next(
         a
         for a in parser._actions
         if getattr(a, "choices", None) and "brief" in a.choices
     ).choices["brief"]
     assert "все замечания" in " ".join(sub.format_help().split())
-    assert text
 
 
 def test_note_without_personal_run_refused(

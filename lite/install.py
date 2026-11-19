@@ -212,15 +212,39 @@ def check_skill_target(dest: Path) -> None:
 
 
 def write_skill(skills_dir: Path, source: Path = SKILL_SOURCE) -> Path:
-    """Заменить `skills_dir/darkfactory` копией `source`, дописав метку."""
+    """Заменить `skills_dir/darkfactory` копией `source`, дописав метку.
+
+    Копия с меткой собирается рядом (`.<имя>.tmp`) и подменяет прежнюю
+    переименованием: сбой копирования оставляет прежнюю копию целой."""
     dest = skills_dir / source.name
     check_skill_target(dest)
-    if dest.exists():
-        shutil.rmtree(dest)
     skills_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, dest)
-    (dest / SKILL_MARKER).write_text(SKILL_MARKER_TEXT, encoding="utf-8")
+    tmp = skills_dir / f".{source.name}.tmp"
+    old = skills_dir / f".{source.name}.old"
+    _remove_path(tmp)
+    _remove_path(old)
+    try:
+        shutil.copytree(source, tmp)
+        (tmp / SKILL_MARKER).write_text(SKILL_MARKER_TEXT, encoding="utf-8")
+    except OSError as exc:
+        _remove_path(tmp)
+        raise InstallError(
+            f"скил не скопирован в {dest}: {exc} — прежняя копия не тронута, "
+            "повторите install.sh"
+        ) from exc
+    if dest.exists():
+        dest.rename(old)
+    tmp.rename(dest)
+    _remove_path(old)
     return dest
+
+
+def _remove_path(path: Path) -> None:
+    """Удалить файл, ссылку или каталог `path`, если он есть."""
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
 
 
 def _login_hint(run: Runner) -> str:
