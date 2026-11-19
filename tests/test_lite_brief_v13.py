@@ -241,7 +241,9 @@ def test_owner_named_not_unknown(text: str) -> None:
     assert not bv.is_unknown(text)
 
 
-@pytest.mark.parametrize("text", ["Неизвестен", "пока неизвестно", "нет никого"])
+@pytest.mark.parametrize(
+    "text", ["Неизвестен", "пока неизвестно", "нет никого", "нету", "Некому."]
+)
 def test_unknown_word_forms(text: str) -> None:
     assert bv.is_unknown(text)
 

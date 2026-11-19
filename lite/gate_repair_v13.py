@@ -175,22 +175,22 @@ def _fill_numeric(
     qid = gr.topic_holder(view, "nfr")
     if qid is None:
         return 1
-    answer = ask(numeric_question(kind))
-    if answer is None:
-        return 1
-    if bv.is_unknown(answer):
-        doc = unknown_numeric_doc(kind, answer, view)
-        return 0 if _send(qid, doc, view, resend) else 1
     q = Question(qid, "nfr", bv.NUMERIC_QUESTIONS[kind])
-    done = structure_answer(q, answer, view, agent, may_ask=False)
-    if isinstance(done, Failed):
-        say(done.message)
-        return 1
-    doc = yaml.safe_load(done.payload) if isinstance(done, Ready) else {}
-    if not with_category(doc, kind):
+    while True:  # без числа — переспрос, как у срока допущений (ревью #820)
+        answer = ask(numeric_question(kind))
+        if answer is None:
+            return 1
+        if bv.is_unknown(answer):
+            doc = unknown_numeric_doc(kind, answer, view)
+            return 0 if _send(qid, doc, view, resend) else 1
+        done = structure_answer(q, answer, view, agent, may_ask=False)
+        if isinstance(done, Failed):
+            say(done.message)
+            return 1
+        doc = yaml.safe_load(done.payload) if isinstance(done, Ready) else {}
+        if with_category(doc, kind):
+            return 0 if _send(qid, doc, view, resend) else 1
         say(NO_REQUIREMENT.format(label=NUMERIC_LABELS[kind]))
-        return 1
-    return 0 if _send(qid, doc, view, resend) else 1
 
 
 def numeric_question(kind: str) -> str:

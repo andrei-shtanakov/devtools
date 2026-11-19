@@ -725,9 +725,22 @@ def test_numeric_answer_without_number_not_categorised(capsys) -> None:
     item = {"prefix": "NFR", "body": "Работает без отказов днём",
             "acceptance": "работает весь день"}  # fmt: skip
     finding = "GC-20 error [Category: perf] нет ни одной NFR категории perf"
-    _v13([finding], _asker("чтобы не ждать"), _agent({"items": [item]}), live)
-    assert live.resent == []
+    ask = _asker("чтобы не ждать", None)
+    _v13([finding], ask, _agent({"items": [item]}), live)
+    assert live.resent == [] and len(ask.asked) == 2  # переспрос, затем пропуск
     assert "нет требования с числом" in capsys.readouterr().out
+
+
+def test_numeric_reask_then_unknown_records_q() -> None:
+    """Ревью #820: после отказа «без числа» совет «неизвестно» исполним
+    в том же прогоне — переспрос, затем `NFR` + `Q` исследования."""
+    live = Live()
+    item = {"prefix": "NFR", "body": "Быстро", "acceptance": "быстро"}
+    finding = "GC-20 error [Category: perf] нет ни одной NFR категории perf"
+    ask = _asker("быстро", "неизвестно")
+    _v13([finding], ask, _agent({"items": [item]}), live)
+    [(_qid, doc)] = live.resent
+    assert _entry_of(doc, "NFR-02")["Target"] == "значение из Q-01"
 
 
 def test_with_category_checks_target() -> None:
