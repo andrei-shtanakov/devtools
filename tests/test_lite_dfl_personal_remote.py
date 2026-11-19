@@ -14,6 +14,7 @@ import pytest
 from governance import user_targets
 from governance.author_launch import LaunchOutcome
 from lite import dfl, i18n, pending
+from lite import failure_log as fl
 from lite.personal import flow, interviewer
 from lite.personal import remote_interview as ri
 from lite.personal import state as ps
@@ -121,7 +122,7 @@ def test_interview_json_personal(
     assert env.run("interview", "--json") == 0
     data = json.loads(capsys.readouterr().out)
     assert data["track"] == "personal" and data["subject"] == SUBJECT
-    assert data["draft"] is None and data["uncovered"] == []
+    assert data["draft"] is None and "uncovered" not in data
     assert data["max_questions"] == interviewer.MAX_QUESTIONS
     assert env.run("brief", "--id", _qid(run_dir), "--file", _file(env, BRIEF)) == 0
     capsys.readouterr()
@@ -194,6 +195,38 @@ def test_note_brief_in_english_run(
     assert "note recorded" in capsys.readouterr().out
     assert env.run("brief", "--id", qid, "--file", _file(env, _bare())) == 1
     assert i18n.EN[ri.BRIEF_PROBLEMS] in capsys.readouterr().out
+
+
+def test_brief_problems_not_recorded_as_failure(
+    env: Env,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_dir = _personal()
+    assert env.run("brief", "--id", _qid(run_dir), "--file", _file(env, _bare())) == 1
+    assert fl.load(env.tmp / "target") is None
+    assert dfl.REPORT_HINT not in capsys.readouterr().err
+
+
+def test_brief_missing_file_still_recorded(
+    env: Env,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_dir = _personal()
+    missing = str(env.tmp / "нет.json")
+    assert env.run("brief", "--id", _qid(run_dir), "--file", missing) == 2
+    rec = fl.load(env.tmp / "target")
+    assert rec is not None and (rec.command, rec.exit_code) == ("brief", 2)
+    assert dfl.REPORT_HINT in capsys.readouterr().err
+
+
+def test_accept_uncovered_help_names_full_scope() -> None:
+    parser = dfl._parser()
+    sub = next(
+        a
+        for a in parser._actions
+        if getattr(a, "choices", None) and "brief" in a.choices
+    ).choices["brief"]
+    assert "все замечания" in " ".join(sub.format_help().split())
 
 
 def test_note_without_personal_run_refused(

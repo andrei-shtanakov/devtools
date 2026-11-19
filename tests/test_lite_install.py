@@ -228,6 +228,7 @@ def test_active_run_refuses_before_any_clone(tmp_path: Path, capsys) -> None:
         ["--login", "x", "--yes"],
         runs_root=runs,
         devtools=tmp_path / "dt",
+        skills_dir=tmp_path / "skills",
         run=rec,
     )
     assert code == 2
@@ -304,12 +305,128 @@ def test_main_full_flow(tmp_path: Path, remote: Remote, capsys) -> None:
         components=comps,
         config_path=cfg,
         bin_dir=tmp_path / "bin",
+        skills_dir=tmp_path / "skills",
         run=rec,
     )
     assert code == 0
     assert (tmp_path / "ws" / "comp" / ".git").exists()
     assert 'root = "' + str(tmp_path / "ws") + '"' in cfg.read_text()
     assert (tmp_path / "bin" / "dfl").exists()
+    assert (tmp_path / "skills" / "darkfactory" / "SKILL.md").is_file()
+    assert f"Скил: {tmp_path / 'skills' / 'darkfactory'}" in capsys.readouterr().out
+
+
+def test_write_skill_fresh(tmp_path: Path) -> None:
+    dest = install.write_skill(tmp_path / "skills")
+    assert dest == tmp_path / "skills" / "darkfactory"
+    for src in install.SKILL_SOURCE.iterdir():
+        assert (dest / src.name).read_bytes() == src.read_bytes()
+    assert (dest / install.SKILL_MARKER).is_file()
+
+
+def test_write_skill_replaces_own_copy(tmp_path: Path) -> None:
+    dest = tmp_path / "skills" / "darkfactory"
+    dest.mkdir(parents=True)
+    (dest / "old.md").write_text("x")
+    (dest / install.SKILL_MARKER).write_text("m")
+    install.write_skill(tmp_path / "skills")
+    assert not (dest / "old.md").exists()
+    assert (dest / "SKILL.md").is_file()
+
+
+@pytest.mark.parametrize("kind", ["dir", "file", "symlink"])
+def test_check_skill_target_refuses_foreign(tmp_path: Path, kind: str) -> None:
+    dest = tmp_path / "darkfactory"
+    if kind == "dir":
+        dest.mkdir()
+        (dest / "SKILL.md").write_text("mine")
+    elif kind == "file":
+        dest.write_text("mine")
+    else:
+        dest.symlink_to(tmp_path)
+    with pytest.raises(install.InstallError, match="не установлен install.sh"):
+        install.check_skill_target(dest)
+
+
+def test_check_skill_target_allows_missing(tmp_path: Path) -> None:
+    install.check_skill_target(tmp_path / "darkfactory")
+
+
+def test_foreign_skill_dir_refused_before_clone(
+    tmp_path: Path, remote: Remote, capsys
+) -> None:
+    dest = tmp_path / "skills" / "darkfactory"
+    dest.mkdir(parents=True)
+    (dest / "SKILL.md").write_text("mine")
+    sha = remote.commit("one")
+    comps = tmp_path / "components.toml"
+    comps.write_text(
+        'schema = "darkfactory-components/v1"\n'
+        f'[repos.comp]\nurl = "{remote.url}"\nsha = "{sha}"\n'
+    )
+    dt = tmp_path / "ws" / "devtools"
+    dt.mkdir(parents=True)
+    rec = Recorder()
+    code = install.main(
+        ["--login", "x"],
+        runs_root=tmp_path / "runs",
+        devtools=dt,
+        components=comps,
+        config_path=tmp_path / "cfg.toml",
+        bin_dir=tmp_path / "bin",
+        skills_dir=tmp_path / "skills",
+        run=rec,
+    )
+    assert code == 1
+    err = capsys.readouterr().err
+    assert str(dest) in err and "не установлен install.sh" in err
+    assert not rec.verbs("clone")
+    assert not (tmp_path / "ws" / "comp").exists()
+    assert (dest / "SKILL.md").read_text() == "mine"
+
+
+def test_write_skill_refuses_foreign_dir(tmp_path: Path) -> None:
+    dest = tmp_path / "skills" / "darkfactory"
+    dest.mkdir(parents=True)
+    (dest / "SKILL.md").write_text("mine")
+    with pytest.raises(install.InstallError, match="не установлен install.sh"):
+        install.write_skill(tmp_path / "skills")
+    assert sorted(p.name for p in dest.iterdir()) == ["SKILL.md"]
+    assert (dest / "SKILL.md").read_text() == "mine"
+
+
+def test_write_skill_copy_failure_keeps_old_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    skills = tmp_path / "skills"
+    dest = install.write_skill(skills)
+    (dest / "SKILL.md").write_text("old")
+
+    def broken(src: Path, dst: Path, **kw: object) -> None:
+        Path(dst).mkdir()
+        (Path(dst) / "half.md").write_text("x")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(install.shutil, "copytree", broken)
+    with pytest.raises(install.InstallError, match="прежняя копия не тронута"):
+        install.write_skill(skills)
+    assert (dest / "SKILL.md").read_text() == "old"
+    assert (dest / install.SKILL_MARKER).is_file()
+    assert sorted(p.name for p in skills.iterdir()) == ["darkfactory"]
+    monkeypatch.undo()
+    install.write_skill(skills)
+    src = (install.SKILL_SOURCE / "SKILL.md").read_bytes()
+    assert (dest / "SKILL.md").read_bytes() == src
+
+
+def test_write_skill_clears_stale_temp(tmp_path: Path) -> None:
+    skills = tmp_path / "skills"
+    (skills / ".darkfactory.tmp").mkdir(parents=True)
+    (skills / ".darkfactory.tmp" / "junk").write_text("x")
+    (skills / ".darkfactory.old").write_text("x")
+    dest = install.write_skill(skills)
+    assert sorted(p.name for p in skills.iterdir()) == ["darkfactory"]
+    assert not (dest / "junk").exists()
 
 
 def test_existing_strict_config_warns(tmp_path: Path, remote: Remote, capsys) -> None:
@@ -324,6 +441,7 @@ def test_existing_strict_config_warns(tmp_path: Path, remote: Remote, capsys) ->
         components=comps,
         config_path=cfg,
         bin_dir=tmp_path / "bin",
+        skills_dir=tmp_path / "skills",
         run=Recorder(),
     )
     assert code == 0
@@ -399,7 +517,15 @@ def test_completed_test_engineer_without_accept_is_active(tmp_path: Path) -> Non
 def test_active_run_refusal_names_abandon(tmp_path: Path, capsys) -> None:
     runs = tmp_path / "runs"
     write_run(runs, "r1", "running")
-    assert install.main(["--login", "x"], runs_root=runs, run=Recorder()) == 2
+    assert (
+        install.main(
+            ["--login", "x"],
+            runs_root=runs,
+            skills_dir=tmp_path / "skills",
+            run=Recorder(),
+        )
+        == 2
+    )
     err = capsys.readouterr().err
     assert "dfl abandon" in err and "Завершите их" not in err
 
@@ -427,6 +553,7 @@ def test_all_existing_clones_checked_before_any_effect(
         components=comps,
         config_path=tmp_path / "cfg.toml",
         bin_dir=tmp_path / "bin",
+        skills_dir=tmp_path / "skills",
         run=rec,
     )
     assert code == 1
@@ -499,6 +626,7 @@ def test_failed_uv_named_without_traceback(
         runs_root=tmp_path / "runs",
         devtools=tmp_path / "dt",
         components=comps,
+        skills_dir=tmp_path / "skills",
         run=Recorder(),
     )
     assert code == 1
