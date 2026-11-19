@@ -205,7 +205,7 @@ def test_note_without_personal_run_refused(env, ...): ...
 
 **Files:**
 - Test: `tests/test_lite_dfl_personal_remote.py` (сквозной)
-- Modify: `README.md` (раздел `dfl` без терминала), `docs/darkfactory-for-colleagues.md` (памятка: личный путь без терминала), `TODO.md` (пункт среза 4 #766 — `[x]` с номером PR оставит контроллер; здесь строка «срез 4» — отметка выполнения без номера)
+- Modify: `README.md` (раздел `dfl` без терминала), `docs/darkfactory-for-colleagues.md` (памятка: личный путь без терминала)
 
 - [ ] **Step 1: Write the failing test** — `test_personal_path_to_design_without_terminal`: новый личный прогон без терминала только через `run/pending/note/brief/reply`, с паузой на `brief` и одним замечанием через `reply`; дошёл до шага `design`; агент интервьюера — падающий фейк (ноль платных вызовов интервью); бриф в бандле равен `render_brief` подтверждённого.
 - [ ] **Step 2: Run to verify fail/pass** — тест должен пройти на коде Tasks 1–3; падение — дефект там, чинить код, не тест.
