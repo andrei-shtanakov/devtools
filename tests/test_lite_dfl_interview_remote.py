@@ -91,12 +91,14 @@ def _incomplete(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(dfl, "_discovery_status", lambda s, c: _status(11))
 
 
-def test_waiting_question_posted_silently(
+def test_waiting_question_announced_once_without_answer_file_hint(
     env: Env,  # noqa: F811
     fakes: Discovery,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """devtools#814: без терминала вопрос объявляет строка «ждёт ответа»
+    (один раз), а не терминальная подсказка `dfl answer --file`."""
     monkeypatch.setattr(dfl, "_discovery_status", lambda s, c: _question_reply())
 
     def spec_main(argv: list[str]) -> int:
@@ -105,19 +107,16 @@ def test_waiting_question_posted_silently(
         return 0
 
     monkeypatch.setattr(spec_loop, "main", spec_main)
-    _waiting(RUN, "WS-1", "customer")  # оба вызова — продолжение прогона
-    real = dfl._remote_interview
-    monkeypatch.setattr(dfl, "_remote_interview", lambda t, s, r, code: code)
+    _waiting(RUN, "WS-1", "customer")
     assert env.run("run", "--subject", "тема") == 0
-    before = capsys.readouterr().out
-    assert _pending() is None
-    monkeypatch.setattr(dfl, "_remote_interview", real)
-    assert env.run("run", "--subject", "тема") == 0
-    assert capsys.readouterr().out == before
+    out = capsys.readouterr().out
     rec = _pending()
     assert rec is not None and rec["kind"] == pending.INTERVIEW_QUESTION
     assert rec["key"] == "q-1" and "Кто ваш клиент?" in rec["text"]
     assert rec["data"]["prompt"] and fakes.calls == []
+    assert out.count("Кто ваш клиент?") == 1
+    assert f"ждёт ответа: {rec['text']}" in out and rec["id"] in out
+    assert dfl.ANSWER_HINT not in out
 
 
 def test_topup_wait_line_and_skip_via_reply(
@@ -214,7 +213,10 @@ def test_question_skip_applied_then_step_once(
     nxt = _pending()
     assert nxt is not None and nxt["kind"] == pending.INTERVIEW_QUESTION
     assert nxt["key"] == "q-2" and "Что болит?" in nxt["text"]
-    assert "ждёт ответа" not in capsys.readouterr().out
+    out = capsys.readouterr().out
+    # devtools#814: только новый вопрос, без уже отвеченного и без `--file`
+    assert f"ждёт ответа: {nxt['text']}" in out
+    assert "Кто ваш клиент?" not in out and dfl.ANSWER_HINT not in out
 
 
 def test_discovery_refusal_is_dfl_error(

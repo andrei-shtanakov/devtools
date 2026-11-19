@@ -1559,15 +1559,18 @@ def test_waiting_without_tty_shows_question_text(env: Env, monkeypatch, capfd) -
         seen.append((session_id, cwd))
         return _question_reply()
 
+    monkeypatch.setattr(dfl, "load_session", lambda sid: _session_view())
     monkeypatch.setattr(dfl, "_discovery_status", status)
-    assert env.run("run", "--subject", "t") == 0
+    assert env.run("run", "--subject", "тема") == 0
     out, _ = _read(capfd)
-    assert "Кто ваш клиент?" in out and dfl.ANSWER_HINT in out
-    assert "вопрос выше" not in out and "text (ответ своими словами)" not in out
-    assert seen == [("sess-WS-1-a", rs.run_dir("WS-1-a"))]
+    # devtools#814: без терминала — строка «ждёт ответа» с вопросом из
+    # `dfl pending`, без терминальной подсказки `dfl answer --file`
+    assert out.count("Кто ваш клиент?") == 1 and "ждёт ответа: " in out
+    assert dfl.ANSWER_HINT not in out and "вопрос выше" not in out
+    assert set(seen) == {("sess-WS-1-a", rs.run_dir("WS-1-a"))}
     assert env.run("run", "-v") == 0
     out, _ = _read(capfd)
-    assert "text (ответ своими словами)" in out  # формат файла — уровень 1
+    assert "text (ответ своими словами)" not in out  # формат файла — терминалу
 
 
 @pytest.mark.parametrize("broken", ["code", "raise"])
@@ -1583,7 +1586,7 @@ def test_waiting_question_unreadable_points_to_interview(
         return iv.DiscoveryReply(1, {"operation": {"reason": "x"}}, "")
 
     monkeypatch.setattr(dfl, "_discovery_status", status)
-    assert env.run("run", "--subject", "t") == 0
+    assert env.run("run", "--subject", "тема") == 0
     out, _ = _read(capfd)
     assert "прогон WS-1-a ждёт ответа; вопрос: dfl interview" in out
 
@@ -1985,7 +1988,7 @@ def test_unreadable_question_points_to_log_once(
         raise OSError("uv не найден")
 
     monkeypatch.setattr(dfl, "_discovery_status", status)
-    assert env.run("run", "--subject", "t") == code
+    assert env.run("run", "--subject", "тема") == code
     out, err = _read(capfd)
     assert "вопрос: dfl interview" in out
     assert (out + err).count(dfl.LOG_HINT) == 1
@@ -1995,7 +1998,7 @@ def test_readable_question_no_log_hint(env: Env, monkeypatch, capfd) -> None:
     _bind_streams(monkeypatch)
     _step_leaves(monkeypatch, env, dfl.WAITING)
     monkeypatch.setattr(dfl, "_discovery_status", lambda s, c: _question_reply())
-    assert env.run("run", "--subject", "t") == 0
+    assert env.run("run", "--subject", "тема") == 0
     out, err = _read(capfd)
     assert dfl.LOG_HINT not in out + err
 

@@ -9,6 +9,7 @@ deliver_for_run подменяются, проверяется ТОЛЬКО де
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from datetime import date
 from pathlib import Path
@@ -157,9 +158,22 @@ def test_slug_from_subject_ascii() -> None:
     assert spec_loop.slug_from_subject("Fleet Inbox: v2 (MVP)") == "fleet-inbox-v2-mvp"
 
 
-def test_slug_from_subject_empty_fails_closed() -> None:
-    with pytest.raises(spec_loop.SpecLoopError, match="--ws-id"):
-        spec_loop.slug_from_subject("Только кириллица")
+def test_slug_from_subject_cyrillic_transliterated() -> None:
+    """devtools#815: тема без латиницы — транслитерация, а не отказ."""
+    assert spec_loop.slug_from_subject("Утилита заметок") == "utilita-zametok"
+    assert spec_loop.slug_from_subject("Щука, ёж и Юля") == "shchuka-ezh-i-yulya"
+
+
+def test_slug_from_subject_ascii_part_kept_without_translit() -> None:
+    """Есть ASCII-часть — слаг прежний: по нему ищутся ветки идущих прогонов."""
+    assert spec_loop.slug_from_subject("Экспорт CSV") == "csv"
+
+
+def test_slug_from_subject_other_script_hashed() -> None:
+    slug = spec_loop.slug_from_subject("日本語")
+    assert slug == spec_loop.slug_from_subject("日本語")
+    assert re.fullmatch(r"s-[0-9a-f]{8}", slug)
+    assert slug != spec_loop.slug_from_subject("中文")
 
 
 def test_ws_id_carries_date_only_at_creation() -> None:

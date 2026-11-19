@@ -91,9 +91,9 @@ def _cyr() -> state.PersonalRun:
     )
 
 
-def test_cyrillic_subject_falls_back() -> None:
+def test_cyrillic_subject_transliterated() -> None:
     run = _cyr()
-    assert re.fullmatch(r"personal-20261115-[0-9a-f]{4}", run.ws_id)
+    assert re.fullmatch(r"moj-proekt-20261115-[0-9a-f]{4}", run.ws_id)
     assert run.run_id.startswith(f"{run.ws_id}-")
     assert run.bundle_dir == f"workstreams/{run.ws_id}/spec"
 
