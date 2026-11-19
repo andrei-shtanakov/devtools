@@ -622,7 +622,8 @@ def recover_wave_run_from_github(
             rs.validate_id_component(requested_ws_id, label="ws_id")
         except ValueError as exc:
             raise SpecLoopError(str(exc)) from exc
-    prefix, grammar = _wave_branch_grammar(requested_ws_id, slug_from_subject(subject))
+    slug = slug_from_subject(subject) if requested_ws_id is None else ""
+    prefix, grammar = _wave_branch_grammar(requested_ws_id, slug)
     try:
         discovered = ops.prs_by_head_prefix(repo_slug, prefix)
     except RuntimeError as exc:

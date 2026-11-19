@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,7 @@ import yaml
 from governance import interview as iv
 from governance import run_lock, spec_loop
 from governance import run_state as rs
+from governance.discovery_contract import gate_check as gc
 from lite import dfl, pending
 from lite import interview_remote as ir
 from lite.interview_state import Entry, InterviewStateError, SessionView
@@ -1101,3 +1102,198 @@ def test_nfr_unknown_reply_writes_nfr_and_q(
     assert nfr["Target"] == f"значение из {q['id']}"
     assert q["id"].startswith("Q-") and q["owner_role"] == "analyst"
     assert sess.findings() == []
+
+
+# --- сквозной: починка v1.3 без терминала до брифа без GC-18…GC-21 (#813) ---
+
+_V13_TOPICS = {"nfr": "NFR", "constraints": "CON", "out_of_scope": "OUT"}
+_V13_RULES = (gc.check_translation_table, gc.check_numeric_targets, gc.check_owners)
+_TABLE_HEAD = (
+    "| слова | категория | ограничение | допущение | подтверждает | срок |\n"
+    "|---|---|---|---|---|---|"
+)
+
+
+def _entry_lines(e: dict[str, Any]) -> list[str]:
+    """Пункт брифа в формате секций контракта §2 (как рендерит discovery)."""
+    lines = [f"- **{e['id']}** {e['body']}"]
+    lines += [f"  **{k}**: {e[k]}" for k in ("Acceptance", "Target") if e.get(k)]
+    if e.get("category"):
+        lines.append(f"  **Category**: {', '.join(e['category'])}")
+    if e.get("owns"):
+        lines.append(f"  owns: {', '.join(e['owns'])}")
+    if e.get("resolved") is True or e.get("status") == "resolved":
+        lines.append("  resolved: true")
+    return lines
+
+
+def _row_line(r: dict[str, Any]) -> str:
+    cells = [r["words"], r["category"], ", ".join(r["constraint"])]
+    cells += [r.get(k) or "—" for k in ("assumption", "confirmer", "due")]
+    return "| " + " | ".join(cells) + " |"
+
+
+def brief_body(answers: dict[str, dict]) -> str:
+    """Тело брифа из ответов сессии: пункты и `## Translation table`."""
+    held = {e["id"]: e for a in answers.values() for e in a.get("entries") or []}
+    lines = [line for e in held.values() for line in _entry_lines(e)]
+    rows = [r for a in answers.values() for r in a.get("translations") or []]
+    if rows:
+        lines += ["", gc.TRANSLATION_HEADING, "", _TABLE_HEAD]
+        lines += [_row_line(r) for r in rows]
+    return "\n".join(lines) + "\n"
+
+
+class GateV13Session(V13Session):
+    """`V13Session`, чьи находки GC-18…GC-21 считает сам vendored
+    `gate_check` (его правила v1.3) по брифу из того, что сессия держит;
+    темы — для раскладки скила (`dfl answer --items` проверяет префиксы)."""
+
+    def view(self, session_id: str) -> SessionView:
+        return replace(super().view(session_id), optional=_V13_TOPICS)
+
+    def findings(self) -> list[str]:
+        body = brief_body(self.answers)
+        brief = gc.Brief(meta={}, entries=gc.parse_body(body), body=body)
+        out: list[str] = []
+
+        def report(rule: str, ref: str, msg: str) -> None:
+            out.append(str(gc.Finding(rule, "error", ref, msg)))
+
+        for rule in _V13_RULES:
+            rule(brief, report)
+        return out
+
+
+def _live_answers() -> dict[str, dict]:
+    """Как в живом прогоне: четыре NFR без категории, ни perf, ни cost,
+    владельцев нет, таблица пуста, у FR/NFR/OUT есть `Preference`."""
+    nfrs = [
+        {"id": "NFR-01", "body": "Доступ только сотрудникам склада"},
+        {"id": "NFR-02", "body": "Работает без отказов днём"},
+        {"id": "NFR-03", "body": "Хранить отчёты по закону",
+         "Target": "5 лет хранения", "Preference": "храним, как требует закон"},
+        {"id": "NFR-04", "body": "Понятные подписи в отчёте"},
+    ]  # fmt: skip
+    return {
+        "customer.goals.01": {
+            "text": "меньше сверки",
+            "entries": [{"id": "G-01", "body": "Меньше ручной сверки"}],
+        },
+        PERS_QID: {
+            "text": "аналитики",
+            "entries": [{"id": "P-01", "body": "Аналитик склада"}],
+        },
+        FUNCS_QID: {
+            "text": "запуск одной командой",
+            "entries": [
+                {
+                    "id": "FR-01",
+                    "body": "Запуск отчёта",
+                    "Acceptance": "1 команда",
+                    "Preference": "запуск одной командой",
+                }
+            ],
+        },
+        NFR_QID: {"text": "надёжно и по закону", "entries": nfrs},
+        OUT_QID: {
+            "text": "без мобилки",
+            "entries": [
+                {
+                    "id": "OUT-01",
+                    "body": "Без мобильного клиента",
+                    "Preference": "телефон не нужен",
+                }
+            ],
+        },
+    }
+
+
+def _key() -> str:
+    rec = _pending()
+    assert rec is not None and rec["answered"] is False
+    return str(rec["key"])
+
+
+def _reply_run(env: Env, key: str, text: str) -> dict:  # noqa: F811
+    rec = _reply(env, key, text)
+    assert env.run("run") == 0
+    return rec
+
+
+def _items_for(env: Env, key: str, text: str, items: list[dict]) -> None:  # noqa: F811
+    rec = _pending()
+    assert rec is not None and rec["key"] == key
+    _answer_items(env, rec["id"], text, items)
+
+
+def test_customer_v13_repair_end_to_end_without_terminal(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Дизайн §9: customer-бриф живого прогона чинится только `dfl run`,
+    `dfl reply` и `dfl answer --items` (агент и разговор — фейки, падающие
+    при вызове); итог — vendored `gate_check` не находит GC-18…GC-21."""
+    sess = GateV13Session(_live_answers())
+    monkeypatch.setattr(dfl, "load_session", sess.view)
+    monkeypatch.setattr(dfl, "_discovery_status", sess.status)
+    monkeypatch.setattr(dfl, "_discovery_answer", sess.answer)
+    _stopped(INCOMPLETE)
+    start = sess.findings()
+    assert {f.split()[0] for f in start} == {"GC-18", "GC-20", "GC-21"}
+    assert sum("нет **Category**" in f for f in start) == 4
+
+    # Категории NFR: гипотеза — «да», без гипотезы — словом.
+    assert env.run("run") == 0
+    for eid, hypothesis in (
+        ("NFR-01", ["security"]),
+        ("NFR-02", ["availability"]),
+        ("NFR-03", ["compliance"]),
+    ):
+        rec = _reply_run(env, f"category:{eid}", "да")
+        assert rec["data"]["hypothesis"] == hypothesis
+    rec = _reply_run(env, "category:NFR-04", "доступность")
+    assert rec["data"]["hypothesis"] == []
+    assert not any("нет **Category**" in f for f in sess.findings())
+
+    # perf — раскладкой скила; cost — «неизвестно» (NFR с целью из Q).
+    _items_for(
+        env,
+        "nfr:perf",
+        "отчёт не дольше пары секунд",
+        [{"prefix": "NFR", "body": "Отчёт быстро", "target": "не более 2 секунд"}],
+    )
+    _reply_run(env, "nfr:cost", "неизвестно")
+    assert not any(f.startswith("GC-20") for f in sess.findings())
+
+    # Владельцы: имя — P, «никто» — открытый Q.
+    for domain, text in (
+        ("process", "Иван Петров, начальник склада"),
+        ("data", "никто"),
+        ("quality", "Мария, старший аналитик"),
+        ("operations", "служба поддержки"),
+    ):
+        _reply_run(env, f"owner:{domain}", text)
+    assert not any(f.startswith("GC-21") for f in sess.findings())
+
+    # Строки из `Preference` — без вопроса; «стоить» — вопросом.
+    assert "table:auto" in ir.load_marks(_rd())["done"]
+    rows = [r for a in sess.answers.values() for r in a.get("translations") or []]
+    assert sorted(r["category"] for r in rows) == ["делать", "доказывать", "не делать"]
+    _items_for(
+        env,
+        "table:стоить",
+        "не дороже 100 тысяч",
+        [{"prefix": "CON", "body": "Бюджет до 100 тыс. ₽",
+          "acceptance": "не более 100 000 ₽"}],
+    )  # fmt: skip
+
+    # Допущения — один ответ «кто, срок» на все строки.
+    rec = _reply_run(env, "assumptions", "владелец продукта, 2099-12-01")
+    assert len(rec["data"]["rows"]) == 3
+
+    assert sess.findings() == []
+    assert gc.translation_rows(brief_body(sess.answers)) is not None
+    assert _pending() is None
+    assert all(sup for _q, sup, _p in sess.sent) and fakes.calls == []
