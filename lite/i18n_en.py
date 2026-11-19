@@ -172,7 +172,6 @@ EN: dict[str, str] = {
         "не понял ответ — номер варианта, «своё: …», «не согласен: …» или «пропустить»"
     ): "did not get that — an option number, “own: …”, “disagree: …” or “skip”",
     "напишите причину после «не согласен:»": "write the reason after “disagree:”",
-    "«дальше»": "“next”",
     "«дальше» или замечания своими словами": "“next” or your remarks in your own words",
     "Верно? 1. да · 2. поправить: <что>": "Correct? 1. yes · 2. fix: <what>",
     # экран личного пути (Task 6): отказ, ошибки до прогона, подсказки

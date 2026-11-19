@@ -1097,6 +1097,7 @@ def _advance_personal(run: personal_state.PersonalRun) -> int:
         agent=_quiet(st.claude_agent(df_config.load().author_model)),
         launch=_quiet(launch_author),
         check=_quiet(run_check),
+        remote=not _track_tty(),
     )
 
 

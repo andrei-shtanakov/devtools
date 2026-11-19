@@ -100,7 +100,7 @@ def question(stage: str, stage_label: str, paths: list[Path]) -> pending_mod.Que
         stage,
         i18n.t(STAGE_READY).format(label=stage_label),
         links=tuple(f"file://{p.resolve()}" for p in paths),
-        accepts=i18n.t("«дальше»" if stage == "brief" else REMOTE_ACCEPTS),
+        accepts=i18n.t(REMOTE_ACCEPTS),
     )
 
 
