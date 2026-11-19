@@ -1710,9 +1710,10 @@ def _remote_interview(
     """Интервью без терминала (#766 срез 3): после шага — вопрос в pending.
 
     Записанные ответы (`dfl reply`) применяются по одному, пока есть ответ на
-    текущий вопрос; ответа нет — вопрос ставится в `pending.json` (вопрос
-    discovery молча: его уже показал шаг; добор и починка — строкой «ждёт
-    ответа», код 0). Вопросов нет, а ответ применён (прогон ждёт ответа) или
+    текущий вопрос; ответа нет — вопрос ставится в `pending.json` и
+    объявляется строкой «ждёт ответа» (шаг без терминала вопрос не печатает:
+    до применения ответов он показал бы уже отвеченный, devtools#814; добор
+    и починка — код 0). Вопросов нет, а ответ применён (прогон ждёт ответа) или
     проход по неполному стопу исчерпан — отметки стираются, шаг ещё раз (один).
     После применённого ответа шаг, остановивший интервью неполным, начинает
     свежий проход — его первый пункт ставится со строкой «ждёт ответа»; после
@@ -1727,12 +1728,12 @@ def _remote_interview(
     try:
         posted, applied = _locked_pass(state)
     except _SessionUnreadable:
-        return code  # как `_say_question`: шаг уже сказал своё
+        return _say_unread(state, code)
     if posted is not None:
-        if posted.kind != pending.INTERVIEW_QUESTION or applied:
-            say(pending.wait_line(posted, _reply_subject(state)))
-            return 0
-        return code
+        say(pending.wait_line(posted, _reply_subject(state)))
+        return 0 if posted.kind != pending.INTERVIEW_QUESTION or applied else code
+    if state.status == WAITING and not applied:
+        return _say_unread(state, code)  # ждёт, а вопроса discovery не дал
     stopped = _stopped_incomplete(state)
     if not stopped and not (applied and state.status == WAITING):
         return code
@@ -1745,10 +1746,20 @@ def _remote_interview(
     try:
         posted, _ = _locked_pass(waiting)  # ответов нет (сняты выше): постановка
     except _SessionUnreadable:
+        return _say_unread(waiting, code)
+    if posted is None:
         return code
-    if posted is not None and posted.kind != pending.INTERVIEW_QUESTION:
-        say(pending.wait_line(posted, _reply_subject(waiting)))
-        return 0
+    say(pending.wait_line(posted, _reply_subject(waiting)))
+    return 0 if posted.kind != pending.INTERVIEW_QUESTION else code
+
+
+def _say_unread(state: rs.RunState, code: int) -> int:
+    """Вопрос не поставлен (сессия или статус discovery не прочитались):
+    шаг без терминала его не печатал — текст вопроса, если статус читается,
+    иначе куда смотреть и (как `_report_step`) строка лога."""
+    if state.status == WAITING and not _say_question(state):
+        if code == 0 and _LOG is not None:
+            say(LOG_HINT)
     return code
 
 
@@ -2063,7 +2074,14 @@ def _report_step(
     stop = sf.load(state.run_id, state.status)
     for text, level in sf.shown(stop) if stop is not None else []:
         say(text, level)
-    unread = state.status == WAITING and not chatting and not _say_question(state)
+    # без терминала вопрос объявляет `_remote_interview` — после применения
+    # записанных ответов (иначе здесь вышел бы уже отвеченный, devtools#814)
+    unread = (
+        state.status == WAITING
+        and not chatting
+        and _is_tty()
+        and not _say_question(state)
+    )
     stopped = state.status.startswith("stopped_")
     if (stopped or unread) and code == 0 and _LOG is not None:
         say(LOG_HINT)  # при code != 0 строку печатает `main`: одна на вызов

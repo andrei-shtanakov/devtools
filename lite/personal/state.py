@@ -80,17 +80,13 @@ class PersonalRun:
 
 
 def _ws_id(subject: str, today: date) -> str:
-    """ws-id из subject + случайный 4-hex суффикс; для не-ASCII темы
-    (кириллица) — `personal-<дата>-<hex>`.
+    """ws-id из subject + случайный 4-hex суффикс; кириллица темы —
+    транслитерацией (`spec_loop.slug_from_subject`, devtools#815).
 
     Суффикс у всех: перезапуск той же темы в тот же день (после
     `dfl abandon`) не попадёт в старый бандл — иначе `flow._node` пропустил
     бы авторинг, найдя прежний `20-design.md`."""
-    try:
-        base = spec_loop.ws_id_for(subject, today)
-    except spec_loop.SpecLoopError:
-        base = f"personal-{today:%Y%m%d}"
-    return f"{base}-{secrets.token_hex(2)}"
+    return f"{spec_loop.ws_id_for(subject, today)}-{secrets.token_hex(2)}"
 
 
 def new_personal_run(

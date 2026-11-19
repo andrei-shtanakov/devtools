@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import os
 import re
 import shlex
@@ -183,19 +184,40 @@ def _real_ops() -> RealOps:
 
 
 def slug_from_subject(subject: str) -> str:
-    """ASCII-слаг subject'а для ws-id; пустой результат — fail-closed.
+    """ASCII-слаг subject'а для ws-id.
 
-    Не-ASCII символы (кириллица) не транслитерируются — исчезают; если
-    после фильтра не осталось ничего, оператор обязан задать `--ws-id`
-    явно (валидатор id всё равно пускает только [A-Za-z0-9._-]).
+    Латиница и цифры — как есть, прочее — дефис. Тема без латиницы и цифр
+    (devtools#815: «Утилита заметок») — транслитерация кириллицы; не помогла
+    и она (другая письменность) — `s-<sha256[:8]>` темы. Транслитерация
+    только на этом запасном пути: слаг темы, у которой ASCII-часть есть,
+    не меняется — по нему ищутся ветки уже идущих прогонов.
     """
-    slug = re.sub(r"[^a-z0-9]+", "-", subject.lower()).strip("-")
-    slug = slug[:_SLUG_MAX].rstrip("-")
-    if not slug:
-        raise SpecLoopError(
-            f"из subject {subject!r} не выводится ASCII-слаг — задайте --ws-id явно"
-        )
-    return slug
+    slug = _ascii_slug(subject) or _ascii_slug(subject.lower().translate(_TRANSLIT))
+    if slug:
+        return slug
+    return "s-" + hashlib.sha256(subject.encode("utf-8")).hexdigest()[:8]
+
+
+def _ascii_slug(text: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug[:_SLUG_MAX].rstrip("-")
+
+
+_TRANSLIT = str.maketrans(
+    {
+        **dict(zip("абвгдезийклмнопрстуфхцы", "abvgdezijklmnoprstufhcy", strict=True)),
+        "ё": "e",
+        "ж": "zh",
+        "ч": "ch",
+        "ш": "sh",
+        "щ": "shch",
+        "ъ": "",
+        "ь": "",
+        "э": "e",
+        "ю": "yu",
+        "я": "ya",
+    }
+)
 
 
 def ws_id_for(subject: str, today: date) -> str:

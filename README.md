@@ -442,7 +442,9 @@ edge-check и ждущий круг сохраняются. Ручная пра�
 Интервью enterprise без терминала (#766): `dfl run` ставит вопрос в
 `dfl pending` по одному — `interview-question` (вопрос discovery),
 `interview-topup` (добор непокрытой темы после неполного конца) и
-`interview-repair` (находки проверки брифа: GC-08, GC-13, GC-05). В
+`interview-repair` (находки проверки брифа: GC-08, GC-13, GC-05) и
+печатает строку «ждёт ответа» с текстом вопроса (терминальной подсказки
+`dfl answer --file` на этом пути нет). В
 `dfl pending --json` поле `data` несёт `prompt` для раскладки ответа, покрытие
 тем (`coverage`) и находки (`findings`). Ответ по существу — раскладкой скила:
 `dfl answer --items f.json --id <id>` (`{"text": …, "items": […]}`, проверяет
