@@ -25,6 +25,7 @@ from lite import dfl, runlog
 from lite import edge_resolve as er
 from lite import failure_log as fl
 from lite import pending as pend
+from lite.interview_state import InterviewStateError
 from lite.output import VERBOSITY_ENV, verbosity
 from tests.conftest import _STRICT_GH_DIRS
 from tests.df_config_fixture import use_test_real_home, write_config
@@ -601,8 +602,30 @@ def test_discovery_answer_invocation(env: Env, monkeypatch) -> None:
     assert seen["argv"][-3:] == ["--question", "q-2", "--supersede"]
 
 
-def test_waiting_run_prints_dfl_answer_hint(env: Env, monkeypatch, capsys) -> None:
+@pytest.mark.parametrize("subject", ["", "  ", "«»"])
+def test_run_empty_subject_refused_before_effects(
+    env: Env, monkeypatch, capsys, subject: str
+) -> None:
+    """Тема без букв и цифр — отказ `dfl` до регистрации цели и шага (#817)."""
+    monkeypatch.setattr(
+        user_targets, "register", lambda cwd: pytest.fail("регистрация до отказа")
+    )
+    assert env.run("run", "--subject", subject) == 2
+    assert "нет ни букв, ни цифр" in capsys.readouterr().err
+    assert env.spec_calls == []
+
+
+def test_waiting_run_unreadable_session_prints_dfl_answer_hint(
+    env: Env, monkeypatch, capsys
+) -> None:
+    """Без терминала сессия не читается (вопрос в `dfl pending` не встал) —
+    запасной путь: текст вопроса и подсказка `dfl answer --file` (#817)."""
     monkeypatch.setattr(dfl, "_discovery_status", lambda s, c: _question_reply())
+
+    def broken(session_id: str) -> object:
+        raise InterviewStateError("discovery show: boom")
+
+    monkeypatch.setattr(dfl, "load_session", broken)
 
     def spec_main(argv: list[str]) -> int:
         _waiting("WS-1-a", "WS-1", "customer")
@@ -942,14 +965,20 @@ def _waiting_after_first_step(monkeypatch, env: Env) -> None:
     monkeypatch.setattr(spec_loop, "main", spec_main)
 
 
-def test_dfl_run_without_tty_keeps_old_hint(env: Env, monkeypatch, capsys) -> None:
+def test_dfl_run_without_tty_announces_pending_question(
+    env: Env, monkeypatch, capsys
+) -> None:
+    """Без терминала разговора нет: вопрос — строкой «ждёт ответа» из
+    `dfl pending`, без терминальной подсказки `--file` (devtools#814)."""
     _tty(monkeypatch, False)
     _waiting_after_first_step(monkeypatch, env)
     monkeypatch.setattr(dfl, "_chat", lambda state: pytest.fail("цикл без tty"))
     monkeypatch.setattr(dfl, "_discovery_status", lambda s, c: _question_reply())
+    monkeypatch.setattr(dfl, "load_session", lambda sid: _session_view())
     assert env.run("run", "--subject", "тема") == 0
     out = capsys.readouterr().out
-    assert "Кто ваш клиент?" in out and "dfl answer --file" in out
+    assert "ждёт ответа: " in out and out.count("Кто ваш клиент?") == 1
+    assert dfl.ANSWER_HINT not in out
     assert len(env.spec_calls) == 1
 
 

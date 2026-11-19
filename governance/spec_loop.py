@@ -188,13 +188,18 @@ def slug_from_subject(subject: str) -> str:
 
     Латиница и цифры — как есть, прочее — дефис. Тема без латиницы и цифр
     (devtools#815: «Утилита заметок») — транслитерация кириллицы; не помогла
-    и она (другая письменность) — `s-<sha256[:8]>` темы. Транслитерация
+    и она (другая письменность) — `s-<sha256[:8]>` темы; тема без единой
+    буквы и цифры (пустая, из знаков) — отказ, как прежде. Транслитерация
     только на этом запасном пути: слаг темы, у которой ASCII-часть есть,
     не меняется — по нему ищутся ветки уже идущих прогонов.
     """
     slug = _ascii_slug(subject) or _ascii_slug(subject.lower().translate(_TRANSLIT))
     if slug:
         return slug
+    if not any(ch.isalnum() for ch in subject):  # пустая или из одних знаков
+        raise SpecLoopError(
+            f"в subject {subject!r} нет ни букв, ни цифр — задайте тему или --ws-id"
+        )
     return "s-" + hashlib.sha256(subject.encode("utf-8")).hexdigest()[:8]
 
 

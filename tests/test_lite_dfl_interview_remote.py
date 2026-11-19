@@ -219,6 +219,36 @@ def test_question_skip_applied_then_step_once(
     assert "Кто ваш клиент?" not in out and dfl.ANSWER_HINT not in out
 
 
+def test_no_question_after_repeat_step_points_to_interview(
+    env: Env,  # noqa: F811
+    fakes: Discovery,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Пропуск применён, повторный шаг оставил прогон ждать, а статус
+    discovery вопроса не дал — не молчание: «ждёт ответа; вопрос: dfl
+    interview» (ревью #817)."""
+    _waiting(RUN, "WS-1", "customer")
+
+    def spec_main(argv: list[str]) -> int:
+        env.spec_calls.append(argv)
+        return 0
+
+    def status(session_id: str, cwd: Path) -> iv.DiscoveryReply:
+        return _question_reply() if not fakes.calls else _status(1)
+
+    monkeypatch.setattr(spec_loop, "main", spec_main)
+    monkeypatch.setattr(dfl, "_discovery_status", status)
+    assert env.run("run") == 0
+    rec = _pending()
+    assert rec is not None
+    assert env.run("reply", "--id", rec["id"], "--text", "пропустить") == 0
+    capsys.readouterr()
+    assert env.run("run") == 0
+    assert fakes.flags == [("q-1", False)]
+    assert f"прогон {RUN} ждёт ответа; вопрос: dfl interview" in capsys.readouterr().out
+
+
 def test_discovery_refusal_is_dfl_error(
     env: Env,  # noqa: F811
     fakes: Discovery,
