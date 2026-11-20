@@ -96,19 +96,21 @@ def test_every_pending_kind_documented() -> None:
 
 
 def test_pending_kinds_derived_from_module() -> None:
-    """Набор видов — ровно нынешние девять, и новый вид попадает в него сам."""
-    assert (
-        pending.INTERVIEW_KINDS
-        | {
-            pending.REVIEW,
-            pending.MANUAL,
-            pending.REMARKS_CONFIRM,
-            pending.EDGE,
-            pending.INTERVIEW_PERSONAL,
-            pending.BRIEF_CONFIRM,
-        }
-        == KINDS
-    )
+    """Нынешние девять видов в наборе, и новый вид попадает в него сам.
+
+    Проверка — вложение, не равенство: новый вид в `lite/pending.py` с
+    описанием в справке не требует правки этого теста.
+    """
+    current = pending.INTERVIEW_KINDS | {
+        pending.REVIEW,
+        pending.MANUAL,
+        pending.REMARKS_CONFIRM,
+        pending.EDGE,
+        pending.INTERVIEW_PERSONAL,
+        pending.BRIEF_CONFIRM,
+    }
+    assert current <= KINDS
+    assert not {pending.PENDING_FILE, pending.REPLIES_FILE} & KINDS
     fake = types.SimpleNamespace(**vars(pending), PLAN_CONFIRM="plan-confirm")
     assert "plan-confirm" in pending_kinds(fake)
 
