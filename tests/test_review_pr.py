@@ -2306,6 +2306,9 @@ def test_dependency_pin_files_are_code(fleet: Fleet, path: str) -> None:
         "sub/CLAUDE.md",
         "AGENTS.md",
         "sub/AGENTS.md",
+        "skills/darkfactory/SKILL.md",
+        "skills/spec-bridge/reference.md",
+        "sub/skills/x/SKILL.md",
     ],
 )
 def test_agent_instruction_files_are_code(fleet: Fleet, path: str) -> None:
@@ -2326,6 +2329,7 @@ def test_agent_instruction_files_are_code(fleet: Fleet, path: str) -> None:
         "docs/agents.md",
         "claude-setup.md",
         "docs/CLAUDE-migration.md",
+        "docs/skills-overview.md",
     ],
 )
 def test_agent_instruction_lookalikes_stay_prose(fleet: Fleet, path: str) -> None:

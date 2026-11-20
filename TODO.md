@@ -2616,6 +2616,21 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       Заявка соседа (devtools#265) остаётся открытой: её DoD включает
       доставку в atp-platform, а это волна ре-вендора по флоту —
       `review-kit-next-wave` на стороне steward, не наш пункт.
+- [ ] Скилы не уходят из-под ревью как проза: `skills/*` и `*/skills/*` в `CODE_OVERRIDE` SSOT области ревью @owner:github:andrei-shtanakov @id:review-scope-code-override-skills @epic:eco.tooling — SSOT: PR #825; кит-копия: ждёт ре-вендора
+      Принято по devtools#824, находка ревью #823. Каталог `skills/` держит
+      инструкции агентов (spec-bridge, darkfactory). `install.sh` ставит
+      darkfactory на машины коллег с `allowed-tools`. **Сделано PR #825:**
+      глобы в SSOT, тесты `test_agent_instruction_files_are_code` (+3 пути)
+      и `docs/skills-overview.md` в базовой половине. Канал `review-pr.sh`
+      покрыт сразу: обвязка отдаёт киту SSOT через `REVIEW_SCOPE_RULES`.
+      **Остаток — тот же класс, что у пункта выше до #283:** кит-копия
+      `scripts/review/prose-paths.env` (пин `scripts/review/PIN`, правка
+      только ре-вендором) не несёт новых глобов. Pre-push и прямой
+      `local.sh` на диапазоне только из скила дают `exit 5` («всё
+      отфильтровано как проза»). Закрывается ре-вендором кита из steward
+      после того, как steward возьмёт SSOT. Просьба — inbox-issue в steward
+      после мержа #825. Из флота top-level `skills/` есть ещё у libretto и
+      prose.
 
 ## Входящие 2026-09-23/24 (inbox, приняты 2026-09-25)
 
