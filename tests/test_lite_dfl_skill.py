@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import types
 from pathlib import Path
 
 from lite import dfl, pending
@@ -17,15 +18,25 @@ SKILL_DIR = Path(__file__).resolve().parents[1] / "skills" / "darkfactory"
 SKILL = SKILL_DIR / "SKILL.md"
 REFERENCE = SKILL_DIR / "reference.md"
 
+#: значение вида ждущего вопроса: kebab-case латиницей
+_KIND_VALUE = re.compile(r"[a-z]+(?:-[a-z]+)*")
+
+
+def pending_kinds(module: object = pending) -> frozenset[str]:
+    """Виды ждущего вопроса — выводятся из модуля, а не перечисляются.
+
+    Вид — модульная строковая константа `UPPER` со значением kebab-case;
+    так новый вид в `lite/pending.py` без строки в справке красит сторож.
+    """
+    return frozenset(
+        value
+        for name, value in vars(module).items()
+        if name.isupper() and isinstance(value, str) and _KIND_VALUE.fullmatch(value)
+    )
+
+
 #: виды ждущего вопроса, на которые скил обязан знать ответ
-KINDS = pending.INTERVIEW_KINDS | {
-    pending.REVIEW,
-    pending.MANUAL,
-    pending.REMARKS_CONFIRM,
-    pending.EDGE,
-    pending.INTERVIEW_PERSONAL,
-    pending.BRIEF_CONFIRM,
-}
+KINDS = pending_kinds()
 #: флаги главного парсера, допустимые в любой команде
 GLOBAL_FLAGS = frozenset({"--cwd", "--help"})
 
@@ -82,6 +93,24 @@ def test_every_pending_kind_documented() -> None:
     text = REFERENCE.read_text(encoding="utf-8")
     missing = sorted(k for k in KINDS if f"`{k}`" not in text)
     assert not missing, f"в reference.md не описаны виды: {missing}"
+
+
+def test_pending_kinds_derived_from_module() -> None:
+    """Набор видов — ровно нынешние девять, и новый вид попадает в него сам."""
+    assert (
+        pending.INTERVIEW_KINDS
+        | {
+            pending.REVIEW,
+            pending.MANUAL,
+            pending.REMARKS_CONFIRM,
+            pending.EDGE,
+            pending.INTERVIEW_PERSONAL,
+            pending.BRIEF_CONFIRM,
+        }
+        == KINDS
+    )
+    fake = types.SimpleNamespace(**vars(pending), PLAN_CONFIRM="plan-confirm")
+    assert "plan-confirm" in pending_kinds(fake)
 
 
 def test_skill_commands_exist() -> None:
