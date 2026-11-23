@@ -24,7 +24,6 @@ import check_discovery_vendor as base  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 COMPONENTS = ROOT / "lite" / "components.toml"
 VENDORED = ROOT / "governance" / "discovery_contract" / "DISCOVERY-BRIEF-CONTRACT.md"
-REPO = "andrei-shtanakov/discovery"
 UPSTREAM_CONTRACT = "src/discovery/contract/DISCOVERY-BRIEF-CONTRACT.md"
 _HEADER = re.compile(r"^# Discovery Brief .*\((v\d+\.\d+)\)", re.MULTILINE)
 
@@ -37,17 +36,33 @@ def contract_version(text: str) -> str | None:
     return found.group(1) if found else None
 
 
+_GITHUB_URL = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+?)(?:\.git)?/?$")
+
+
+def _discovery(path: Path = COMPONENTS) -> dict:
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    return data["repos"]["discovery"]
+
+
 def pinned_sha(path: Path = COMPONENTS) -> str:
     """Discovery commit pinned for the installer."""
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
-    return str(data["repos"]["discovery"]["sha"])
+    return str(_discovery(path)["sha"])
+
+
+def pinned_repo(path: Path = COMPONENTS) -> str:
+    """`owner/name` of the pinned discovery, from its `url` (one source)."""
+    url = str(_discovery(path)["url"])
+    found = _GITHUB_URL.fullmatch(url)
+    if found is None:
+        raise ValueError(f"discovery url is not a GitHub repo: {url!r}")
+    return found.group(1)
 
 
 def github_fetch(commit: str, rel: str) -> bytes | None:
     """Blob `rel` of upstream discovery at `commit` (base fetcher, other repo)."""
     saved = base.CONTENTS_API
     base.CONTENTS_API = (
-        f"https://api.github.com/repos/{REPO}/contents/{{rel}}?ref={{commit}}"
+        f"https://api.github.com/repos/{pinned_repo()}/contents/{{rel}}?ref={{commit}}"
     )
     try:
         return base.github_fetch(commit, rel)
@@ -77,7 +92,7 @@ def main() -> int:
     """CLI: `check_discovery_pin.py`."""
     try:
         verdict = verify()
-    except (OSError, KeyError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, KeyError, ValueError) as exc:
         verdict = base.Verdict("unknown", f"could not read the pin: {exc}")
     print(f"discovery-pin: {verdict.status} — {verdict.detail}")
     return {"ok": 0, "failed": 1, "unknown": 3}[verdict.status]
