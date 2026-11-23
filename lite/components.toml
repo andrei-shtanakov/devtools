@@ -1,8 +1,12 @@
 schema = "darkfactory-components/v1"
 
+# Пин discovery обязан нести ту же версию контракта брифа, что вендорена в
+# governance/discovery_contract/ (иначе discovery говорит «готово», а гейт
+# devtools рубит бриф при публикации, devtools#830). Сверяет
+# tools/check_discovery_pin.py в PR-гейте discovery-contract.
 [repos.discovery]
 url = "https://github.com/andrei-shtanakov/discovery.git"
-sha = "91543b1bc8f976d6938a82b0db4764be1ecfa613"
+sha = "a8550b50c04ba79e2f4ac6d9d15f123cc414cd9a"
 
 [repos.spec-runner]
 url = "https://github.com/andrei-shtanakov/spec-runner.git"
