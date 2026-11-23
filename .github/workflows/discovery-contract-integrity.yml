@@ -28,6 +28,9 @@ jobs:
       - run: uv run --frozen tools/check_discovery_approval_vendor.py provenance
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: uv run --frozen tools/check_discovery_pin.py
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   drift:
     if: github.event_name != 'pull_request'

@@ -2617,6 +2617,7 @@ spec-runner#334/#335/#336/#337; соседям — dispatcher#251 (lint-хук).
       доставку в atp-platform, а это волна ре-вендора по флоту —
       `review-kit-next-wave` на стороне steward, не наш пункт.
 - [ ] Скилы не уходят из-под ревью как проза: `skills/*` и `*/skills/*` в `CODE_OVERRIDE` SSOT области ревью @owner:github:andrei-shtanakov @id:review-scope-code-override-skills @epic:eco.tooling — SSOT: PR #825; кит-копия: ждёт ре-вендора
+- [ ] Фикстуры `discovery show` сняты с прежнего пина `91543b1`: снять реальный вывод на текущем пине discovery (`a8550b5`, контракт v1.3), прежнюю переименовать в `old_pin_91543b1.json`, поправить атрибуцию в `tests/test_lite_interview_state.py` @owner:github:andrei-shtanakov @id:discovery-show-fixture-repin @epic:eco.dark-factory — minor ревью PR #831; совместимость `_parse` с `a8550b5` проверена вручную 23.11
       Принято по devtools#824, находка ревью #823. Каталог `skills/` держит
       инструкции агентов (spec-bridge, darkfactory). `install.sh` ставит
       darkfactory на машины коллег с `allowed-tools`. **Сделано PR #825:**

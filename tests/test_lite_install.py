@@ -7,7 +7,6 @@ import os
 import re
 import stat
 import subprocess
-import tomllib
 from pathlib import Path
 
 import pytest
@@ -101,47 +100,6 @@ def test_components_file_pins_full_shas() -> None:
     assert all(re.fullmatch(r"[0-9a-f]{40}", c.sha) for c in comps.values())
     assert comps["spec-runner"].tool is True
     assert comps["discovery"].tool is False
-
-
-_CONTRACT_HEADER = re.compile(r"^# Discovery Brief .*\((v\d+\.\d+)\)", re.MULTILINE)
-_VENDORED = ROOT / "governance" / "discovery_contract" / "DISCOVERY-BRIEF-CONTRACT.md"
-_DISCOVERY_CONTRACT = "src/discovery/contract/DISCOVERY-BRIEF-CONTRACT.md"
-
-
-def _contract_version(text: str) -> str:
-    found = _CONTRACT_HEADER.search(text)
-    assert found, "в контракте нет заголовка с версией"
-    return found.group(1)
-
-
-def _discovery_entry() -> dict:
-    data = tomllib.loads((ROOT / "lite" / "components.toml").read_text("utf-8"))
-    return data["repos"]["discovery"]
-
-
-def test_discovery_pin_declares_vendored_contract() -> None:
-    """devtools#830: пин discovery объявляет ту же версию контракта брифа,
-    что вендорена в гейт devtools (`governance/discovery_contract/`)."""
-    vendored = _contract_version(_VENDORED.read_text(encoding="utf-8"))
-    assert _discovery_entry()["contract"] == vendored
-
-
-def test_discovery_pin_carries_vendored_contract() -> None:
-    """devtools#830: на закреплённом коммите discovery контракт брифа той же
-    версии, что гейт devtools. Иначе discovery называет бриф готовым, а гейт
-    рубит его при публикации. Нужен соседний checkout `../discovery`."""
-    repo = ROOT.parent / "discovery"
-    sha = _discovery_entry()["sha"]
-    shown = subprocess.run(
-        ["git", "-C", str(repo), "show", f"{sha}:{_DISCOVERY_CONTRACT}"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if shown.returncode != 0:
-        pytest.skip(f"нет checkout ../discovery с коммитом {sha[:12]}")
-    vendored = _contract_version(_VENDORED.read_text(encoding="utf-8"))
-    assert _contract_version(shown.stdout) == vendored
 
 
 def test_components_cover_workspace_dirs() -> None:
