@@ -1555,6 +1555,11 @@ def test_author_dsl_decomposition_explains_verifies_field() -> None:
     assert "(2) FATAL orphan invariant" in verifies_tail[:2200]
     assert "matches NO checked_by target" in verifies_tail[:2400]
     assert "or remove it from verifies" in verifies_tail[:2700]
+    # devtools#838: вводная считает три инварианта, (3) — про сценарии
+    # самой verify-DT, и verify-DT не остаётся без сценариев.
+    assert "Two verifies-content" not in dsl
+    assert "Three invariants, ALL fatal" in dsl
+    assert "keeps at least one scenario" in dsl
 
 
 def test_author_dsl_covers_acceptance() -> None:

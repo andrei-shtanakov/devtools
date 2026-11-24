@@ -2056,3 +2056,19 @@ def test_non_runner_target_finding_in_english() -> None:
     )
     findings = graph_findings(beh, _RUN_B_DT, lang="en")
     assert any("is not a pytest test file" in f for f in findings)
+
+
+@pytest.mark.parametrize("lang", ["ru", "en"])
+def test_unwritten_own_target_advice_is_feasible(lang: str) -> None:
+    """devtools#838: совет не ведёт в другую фатальную находку — verify-DT
+    без сценариев невалидна, а личный путь запрещает поле verifies. Совет —
+    сделать DT implement-задачей или перенести сценарий, пустую убрать."""
+    from governance.decomposition_guard import graph_findings
+
+    findings = graph_findings(
+        _RUN_B_BEH, _RUN_B_DT, lang=lang, file_exists=lambda _p: False
+    )
+    [finding] = [f for f in findings if "DT-02" in f]
+    assert "verifies" not in finding
+    assert "type: implement" in finding
+    assert ("уберите DT-02" if lang == "ru" else "remove DT-02") in finding

@@ -37,13 +37,15 @@ _FINDINGS_EN: dict[str, str] = {
     (
         "{dt_id}: type: verify владеет тест-файлом {path} (checked_by "
         "{beh}), но в репо его ещё нет — verify-first прогоняет готовые "
-        "тесты и файлов не пишет. Отдайте {beh} задаче type: implement "
-        "(она напишет тест), а файл перечислите в verifies {dt_id}"
+        "тесты и файлов не пишет. Тест пишет задача type: implement: "
+        "сделайте {dt_id} задачей type: implement или перенесите {beh} в "
+        "scenarios implement-задачи; не останется сценариев — уберите {dt_id}"
     ): (
         "{dt_id}: type: verify owns the test file {path} (checked_by of "
         "{beh}), but the repo does not have it yet — verify-first runs "
-        "existing tests and writes no files. Give {beh} to a type: implement "
-        "task (it will write the test) and list the file in verifies of {dt_id}"
+        "existing tests and writes no files. A type: implement task writes the "
+        "test: make {dt_id} a type: implement task or move {beh} into the "
+        "scenarios of an implement task; no scenarios left — remove {dt_id}"
     ),
     (
         "{beh}: checked_by-цель {path} (kind: {kind}) — не тест-файл "
@@ -1417,8 +1419,9 @@ def _unwritten_own_target_findings(
                     lang,
                     "{dt_id}: type: verify владеет тест-файлом {path} (checked_by "
                     "{beh}), но в репо его ещё нет — verify-first прогоняет готовые "
-                    "тесты и файлов не пишет. Отдайте {beh} задаче type: implement "
-                    "(она напишет тест), а файл перечислите в verifies {dt_id}",
+                    "тесты и файлов не пишет. Тест пишет задача type: implement: "
+                    "сделайте {dt_id} задачей type: implement или перенесите {beh} в "
+                    "scenarios implement-задачи; не останется сценариев — уберите {dt_id}",
                     dt_id=t.dt_id,
                     path=target,
                     beh=beh,
