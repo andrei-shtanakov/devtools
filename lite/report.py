@@ -28,6 +28,7 @@ from lite.failure_log import load as load_record
 from lite.install import InstallError, load_components
 from lite.output import refusal
 from lite.runlog import EXIT_PREFIX, PASSTHROUGH_LEVEL, read_log
+from lite.term_input import read_line
 
 BODY_LIMIT = 65_536
 LOG_TAIL_LINES = 200
@@ -330,7 +331,10 @@ def _config_line() -> str:
 # --- отправка ---------------------------------------------------------------
 
 Gh = Callable[[list[str], Path | None, str | None], subprocess.CompletedProcess]
+#: «да». Русская раскладка (`н` на клавише `y`) сюда НЕ входит: «н» читается и
+#: как «нет», а ответ решает публичную отправку — неоднозначное = отказ
 YES = ("y", "yes", "да", "д")
+BROKEN_INPUT_STOP = "ввод не читается — отчёт не отправлен"
 PUBLIC_WARNING = (
     "отчёт уйдёт ПУБЛИЧНО; в хвосте — строки dfl и раннера, они могут называть "
     "файлы и PR целевого репо и пересказывать ошибки git/gh; скрыты только "
@@ -380,7 +384,7 @@ def run_report(
     print_only: bool,
     with_log: bool = False,
     gh: Gh = real_gh,
-    ask: Callable[[str], str] = input,
+    ask: Callable[[str], str | None] | None = None,
     is_tty: Callable[[], bool] = sys.stdin.isatty,
 ) -> int:
     """`dfl report`: показать отчёт; после «y» в терминале — issue или комментарий.
@@ -389,10 +393,15 @@ def run_report(
 
     Отказ (нет терминала, ошибка `gh`) — блок `refusal` в stderr, код 2."""
     try:
-        return _report(cwd, print_only, with_log, gh, ask, is_tty)
+        return _report(cwd, print_only, with_log, gh, ask or _terminal_ask, is_tty)
     except ReportError as exc:
         print(refusal("dfl report", str(exc)), file=sys.stderr)
         return 2
+
+
+def _terminal_ask(question: str) -> str | None:
+    """Ответ из терминала; битый ввод — повтор, не трассировка (devtools#834)."""
+    return read_line(question, stop_message=BROKEN_INPUT_STOP)
 
 
 def _report(
@@ -400,7 +409,7 @@ def _report(
     print_only: bool,
     with_log: bool,
     gh: Gh,
-    ask: Callable[[str], str],
+    ask: Callable[[str], str | None],
     is_tty: Callable[[], bool],
 ) -> int:
     rec = load_record(cwd)
@@ -431,9 +440,9 @@ def _report(
     try:
         answer = ask(question)
     except (EOFError, KeyboardInterrupt):
-        answer = ""
+        answer = None
         print()
-    if answer.strip().lower() not in YES:
+    if answer is None or answer.strip().lower() not in YES:
         print("не отправлено")
         return 0
     if duplicate:

@@ -580,6 +580,31 @@ def test_non_tty_stdin_names_login_flag(monkeypatch: pytest.MonkeyPatch) -> None
         install._resolve_login(install._parse([]), _no_login)
 
 
+def test_broken_login_input_asks_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """devtools#834: битый ввод логина — повтор, не трассировка."""
+    seq = iter([UnicodeDecodeError("utf-8", b"\xd0", 0, 1, "invalid"), "someone"])
+
+    def fake_input(prompt: str) -> str:
+        item = next(seq)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    assert install._resolve_login(install._parse([]), _no_login) == "someone"
+
+
+def test_unreadable_login_input_names_login_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(prompt: str) -> str:
+        raise UnicodeDecodeError("utf-8", b"\xd0", 0, 1, "invalid")
+
+    monkeypatch.setattr("builtins.input", broken)
+    with pytest.raises(install.InstallError, match="--login"):
+        install._resolve_login(install._parse([]), _no_login)
+
+
 def test_failed_fetch_shows_git_stderr_and_next_step(
     remote: Remote, root: Path
 ) -> None:

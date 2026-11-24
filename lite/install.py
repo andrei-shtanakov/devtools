@@ -23,6 +23,7 @@ from pathlib import Path
 from governance import df_config
 from governance import run_state as rs
 from lite.pipeline import chain_open
+from lite.term_input import read_line
 
 HERE = Path(__file__).resolve().parent
 COMPONENTS = HERE / "components.toml"
@@ -271,12 +272,13 @@ def _resolve_login(args: argparse.Namespace, run: Runner) -> str:
             "--yes: логин GitHub не узнать (gh не вошёл) — укажите --login <логин>"
         )
     prompt = f"Логин GitHub [{hint}]: " if hint else "Логин GitHub: "
-    try:
-        login = input(prompt).strip() or hint
-    except EOFError as exc:
+    line = read_line(prompt, stop_message="логин GitHub не прочитан")
+    if line is None:
         raise InstallError(
-            "логин GitHub не спросить: ввод не из терминала — укажите --login <логин>"
-        ) from exc
+            "логин GitHub не спросить: ввод не из терминала или не читается — "
+            "укажите --login <логин>"
+        )
+    login = line.strip() or hint
     if not login:
         raise InstallError("не указан логин GitHub (--login)")
     return login

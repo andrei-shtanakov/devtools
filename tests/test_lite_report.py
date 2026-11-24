@@ -10,6 +10,7 @@ import pytest
 from governance import df_config
 from governance import run_state as rs
 from lite import report as rp
+from lite import term_input as ti
 from lite.failure_log import FailureRecord
 
 
@@ -360,6 +361,50 @@ def test_report_ctrl_d_is_decline(failed: Path, capsys) -> None:
     assert code == 0
     assert gh.verbs() == ["issue list"]
     assert "не отправлено" in capsys.readouterr().out
+
+
+def _inputs(monkeypatch, *items: object) -> None:
+    it = iter(items)
+
+    def fake_input(prompt: str) -> str:
+        item = next(it)
+        if isinstance(item, Exception):
+            raise item
+        return str(item)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+
+def test_report_broken_answer_asks_again_then_sends(
+    failed: Path, monkeypatch, capsys
+) -> None:
+    """devtools#834: стёртая полбуквы перед `y` — повтор вопроса, не трассировка."""
+    bad = UnicodeDecodeError("utf-8", b"\xd0y", 0, 1, "invalid continuation byte")
+    _inputs(monkeypatch, bad, "y")
+    gh = FakeGh()
+    code = rp.run_report(failed, print_only=False, gh=gh, is_tty=lambda: True)
+    assert code == 0
+    assert "issue create" in gh.verbs()
+    assert ti.BROKEN_INPUT in capsys.readouterr().out
+
+
+def test_report_unreadable_answer_is_decline(failed: Path, monkeypatch, capsys) -> None:
+    bad = UnicodeDecodeError("utf-8", b"\xd0", 0, 1, "invalid")
+    _inputs(monkeypatch, *[bad] * ti.MAX_BROKEN_READS)
+    gh = FakeGh()
+    code = rp.run_report(failed, print_only=False, gh=gh, is_tty=lambda: True)
+    assert code == 0
+    assert gh.verbs() == ["issue list"]
+    out = capsys.readouterr().out
+    assert rp.BROKEN_INPUT_STOP in out and "не отправлено" in out
+
+
+@pytest.mark.parametrize("answer", ["н", "нет", "", "?"])
+def test_report_only_unambiguous_yes_sends(failed: Path, answer: str) -> None:
+    """«н» (клавиша `y` в русской раскладке) читается и как «нет» — не отправка."""
+    gh = FakeGh()
+    assert _report(failed, gh, answer=answer) == 0
+    assert gh.verbs() == ["issue list"]
 
 
 def test_versions_survive_broken_components(monkeypatch) -> None:
