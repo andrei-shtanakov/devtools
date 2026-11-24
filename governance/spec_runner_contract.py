@@ -32,12 +32,17 @@ class SelectorPolicy:
     name: str
     supports_file_targets: bool
     node_id_hint: str
+    #: расширения файлов, которые адаптер собирает как тесты (devtools#833:
+    #: `.md`-цель с исполняемым kind pytest не соберёт — exit 4)
+    test_suffixes: tuple[str, ...]
 
 
 SELECTOR_POLICIES = {
-    "pytest": SelectorPolicy("pytest", True, "path::test"),
-    "exunit": SelectorPolicy("exunit", False, "path:line"),
+    "pytest": SelectorPolicy("pytest", True, "path::test", (".py",)),
+    "exunit": SelectorPolicy("exunit", False, "path:line", (".exs",)),
 }
+#: адаптер без явной декларации — единственный, кого spec-runner выводит сам
+INFERRED_POLICY = SELECTOR_POLICIES["pytest"]
 
 
 def is_file_target_form(raw: str) -> bool:

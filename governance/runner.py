@@ -4225,6 +4225,7 @@ def _step_gate(state: RunState, ops: Ops) -> bool:
                 beh_text,
                 decomp_text,
                 selector_policy=selector_policy,
+                file_exists=decomposition_guard.files_under(state.target_dir),
             )
         graph = [f"error GC-DT-GRAPH: {finding}" for finding in graph_findings]
         if graph:

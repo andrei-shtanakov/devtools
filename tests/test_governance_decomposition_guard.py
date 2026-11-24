@@ -1034,17 +1034,22 @@ def test_manual_only_verify_group_is_underivable() -> None:
 
 
 def test_file_target_obeys_resolved_adapter_capability() -> None:
-    """Bare files pass for pytest and fail early, by name, for ExUnit."""
+    """Bare files pass for pytest and fail early, by name, for ExUnit.
+
+    Each adapter gets its own test files (devtools#833: a target must be a
+    file the runner collects — `.py` for pytest, `.exs` for ExUnit)."""
 
     from governance.decomposition_guard import graph_findings
     from governance.spec_runner_contract import SELECTOR_POLICIES
 
-    beh = (
-        "#### BEH-01: Реализация\n**checked_by** `kind: integration` "
-        "`target: tests/test_a.py::test_one`\n\n"
-        "#### BEH-02: Проверка\n**checked_by** `kind: integration` "
-        "`target: test/check_test.exs`\n"
-    )
+    def beh(impl: str, check: str) -> str:
+        return (
+            "#### BEH-01: Реализация\n**checked_by** `kind: integration` "
+            f"`target: {impl}`\n\n"
+            "#### BEH-02: Проверка\n**checked_by** `kind: integration` "
+            f"`target: {check}`\n"
+        )
+
     dt = (
         "#### DT-01: A · type: implement · owner: dev\n"
         "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: solo\n\n"
@@ -1053,14 +1058,22 @@ def test_file_target_obeys_resolved_adapter_capability() -> None:
         "delivered_by: [DT-01]\nparallel_group: solo\n"
     )
 
-    assert graph_findings(beh, dt, selector_policy=SELECTOR_POLICIES["pytest"]) == []
-    findings = graph_findings(beh, dt, selector_policy=SELECTOR_POLICIES["exunit"])
+    pytest_beh = beh("tests/test_a.py::test_one", "tests/test_check.py")
+    assert (
+        graph_findings(pytest_beh, dt, selector_policy=SELECTOR_POLICIES["pytest"])
+        == []
+    )
+
+    exunit_beh = beh("test/a_test.exs:3", "test/check_test.exs")
+    findings = graph_findings(
+        exunit_beh, dt, selector_policy=SELECTOR_POLICIES["exunit"]
+    )
     assert any(
         "DT-02" in finding and "exunit" in finding and "path:line" in finding
         for finding in findings
     )
 
-    selected = beh.replace("test/check_test.exs`", "test/check_test.exs:12`")
+    selected = exunit_beh.replace("test/check_test.exs`", "test/check_test.exs:12`")
     assert (
         graph_findings(selected, dt, selector_policy=SELECTOR_POLICIES["exunit"]) == []
     )
@@ -1921,3 +1934,125 @@ def test_sources_pointing_at_a_twice_defined_item_is_ambiguous() -> None:
     assert len(errors) == 1, errors
     assert "CON-01" in errors[0], errors
     assert "неоднозначн" in errors[0], errors
+
+
+# --- devtools#833: verify-DT и ненаписанный собственный тест-файл ------------
+
+_RUN_B_BEH = (
+    "#### BEH-01: Ответ expired\n**checked_by** `kind: e2e` "
+    "`target: tests/e2e/test_expired.py::test_groups`\n\n"
+    "#### BEH-02: Полнота группы на 200 записях\n**checked_by** `kind: e2e` "
+    "`target: tests/e2e/test_expired_completeness.py::test_all_overdue_records_are_listed`\n"
+)
+_RUN_B_DT = (
+    "#### DT-01: Ответ expired · type: implement · owner: dev\n"
+    "scenarios: [BEH-01]\ndepends_on: []\nparallel_group: solo\n\n"
+    "#### DT-02: Полнота · type: verify · owner: qa\n"
+    "scenarios: [BEH-02]\ndepends_on: [DT-01]\n"
+    "delivered_by: [DT-01]\nparallel_group: solo\n"
+)
+
+
+def test_verify_dt_owning_unwritten_test_file_is_fatal() -> None:
+    """Форма прогона B (TASK-005): verify-DT владеет тест-файлом, которого в
+    репо нет, — verify-first упал бы exit 4 трижды. Находка называет DT,
+    файл, сценарий и выход: отдать сценарий implement-задаче."""
+    from governance.decomposition_guard import graph_findings
+
+    findings = graph_findings(_RUN_B_BEH, _RUN_B_DT, file_exists=lambda _p: False)
+    [finding] = [f for f in findings if "DT-02" in f]
+    assert "tests/e2e/test_expired_completeness.py" in finding
+    assert "BEH-02" in finding and "type: implement" in finding
+
+
+def test_verify_dt_owning_existing_test_file_passes() -> None:
+    """Brownfield: собственный тест-файл verify-DT уже лежит в репо — законно."""
+    from governance.decomposition_guard import graph_findings
+
+    assert graph_findings(_RUN_B_BEH, _RUN_B_DT, file_exists=lambda _p: True) == []
+
+
+def test_unwritten_rule_off_without_file_exists() -> None:
+    """Без `file_exists` (вызов без целевого репо) правило не применяется."""
+    from governance.decomposition_guard import graph_findings
+
+    assert graph_findings(_RUN_B_BEH, _RUN_B_DT) == []
+
+
+def test_implement_dt_owning_unwritten_file_is_not_a_finding() -> None:
+    """implement-задача сама пишет свой тест (RED) — отсутствие файла норма."""
+    from governance.decomposition_guard import graph_findings
+
+    assert (
+        graph_findings(_RUN_B_BEH, _RUN_B_DT, file_exists=lambda p: "completeness" in p)
+        == []
+    )
+
+
+def test_manual_own_target_of_verify_dt_is_not_checked_for_existence() -> None:
+    """kind: manual — документ человека, не селектор; его наличие не нужно."""
+    from governance.decomposition_guard import graph_findings
+
+    beh = _RUN_B_BEH + (
+        "\n#### BEH-03: Приёмка на примерах\n**checked_by** `kind: manual` "
+        "`target: docs/acceptance.md`\n"
+    )
+    dt = _RUN_B_DT.replace("scenarios: [BEH-02]", "scenarios: [BEH-02, BEH-03]")
+    assert graph_findings(beh, dt, file_exists=lambda p: "completeness" in p) == []
+
+
+def test_files_under_checks_regular_files(tmp_path) -> None:
+    from governance.decomposition_guard import files_under
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_a.py").write_text("", encoding="utf-8")
+    exists = files_under(tmp_path)
+    assert exists("tests/test_a.py")
+    assert not exists("tests/test_b.py")
+    assert not exists("tests")
+
+
+# --- devtools#833: исполняемая цель — тест-файл раннера ----------------------
+
+
+def test_md_target_with_executable_kind_is_fatal_under_inferred_pytest() -> None:
+    """Форма прогона B (TASK-012/013): `kind: atp` на `.md` — pytest его не
+    соберёт. Без декларации раннера политика — pytest (его выводит сам
+    spec-runner)."""
+    from governance.decomposition_guard import graph_findings
+
+    beh = _RUN_B_BEH.replace(
+        "tests/e2e/test_expired_completeness.py::test_all_overdue_records_are_listed",
+        "tests/atp/test_response_time.md::ATP-NFR-03-1000-records-under-2s",
+    ).replace("`kind: e2e` `target: tests/atp", "`kind: atp` `target: tests/atp")
+    findings = graph_findings(beh, _RUN_B_DT)
+    [finding] = [f for f in findings if "BEH-02" in f]
+    assert "tests/atp/test_response_time.md" in finding
+    assert "pytest" in finding and ".py" in finding and "kind: manual" in finding
+
+
+def test_md_target_with_manual_kind_passes() -> None:
+    from governance.decomposition_guard import graph_findings
+
+    beh = (
+        "#### BEH-01: Реализация\n**checked_by** `kind: e2e` "
+        "`target: tests/test_a.py::test_one`\n\n"
+        "#### BEH-02: Документ\n**checked_by** `kind: manual` "
+        "`target: docs/check.md`\n"
+    )
+    dt = (
+        "#### DT-01: A · type: implement · owner: dev\n"
+        "scenarios: [BEH-01, BEH-02]\ndepends_on: []\nparallel_group: solo\n"
+    )
+    assert graph_findings(beh, dt) == []
+
+
+def test_non_runner_target_finding_in_english() -> None:
+    from governance.decomposition_guard import graph_findings
+
+    beh = _RUN_B_BEH.replace(
+        "tests/e2e/test_expired_completeness.py::test_all_overdue_records_are_listed",
+        "tests/atp/check.md",
+    )
+    findings = graph_findings(beh, _RUN_B_DT, lang="en")
+    assert any("is not a pytest test file" in f for f in findings)

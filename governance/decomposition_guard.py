@@ -6,15 +6,17 @@ git/ФС/steward; переиспользуются S4-гейтом (runner) и �
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 from typing import NamedTuple
 
 import yaml
 
 from governance.frontmatter import split_frontmatter
 from governance.spec_runner_contract import (
+    INFERRED_POLICY,
     SelectorPolicy,
     is_file_target_form,
 )
@@ -32,6 +34,26 @@ _VERIFY_GROUP_UNDERIVABLE_MARKER_EN = "the observation group cannot be derived"
 #: #769): русский шаблон → английский. `lang="ru"` (умолчание, enterprise)
 #: — русский шаблон как есть.
 _FINDINGS_EN: dict[str, str] = {
+    (
+        "{dt_id}: type: verify владеет тест-файлом {path} (checked_by "
+        "{beh}), но в репо его ещё нет — verify-first прогоняет готовые "
+        "тесты и файлов не пишет. Отдайте {beh} задаче type: implement "
+        "(она напишет тест), а файл перечислите в verifies {dt_id}"
+    ): (
+        "{dt_id}: type: verify owns the test file {path} (checked_by of "
+        "{beh}), but the repo does not have it yet — verify-first runs "
+        "existing tests and writes no files. Give {beh} to a type: implement "
+        "task (it will write the test) and list the file in verifies of {dt_id}"
+    ),
+    (
+        "{beh}: checked_by-цель {path} (kind: {kind}) — не тест-файл "
+        "{runner} ({suffixes}): spec-runner её не соберёт. Укажите тест-файл "
+        "раннера или kind: manual для документа"
+    ): (
+        "{beh}: checked_by target {path} (kind: {kind}) is not a {runner} "
+        "test file ({suffixes}): spec-runner will not collect it. Name a "
+        "runner test file, or kind: manual for a document"
+    ),
     "{dt_id}: negative_control объявлен {keys} раза (ожидается ровно один)": (
         "{dt_id}: negative_control is declared {keys} times (exactly one expected)"
     ),
@@ -938,8 +960,14 @@ def graph_findings(
     *,
     selector_policy: SelectorPolicy | None = None,
     lang: str = "ru",
+    file_exists: Callable[[str], bool] | None = None,
 ) -> list[str]:
     """Инварианты графа DT (§3 спеки) + findings формы парсера.
+
+    `file_exists` — есть ли путь (от корня целевого репо) на диске; задан —
+    включает правило «verify-DT не владеет ненаписанным тест-файлом»
+    (devtools#833). Исполняемые checked_by-цели сверяются с тест-файлами
+    раннера всегда (`selector_policy`, без декларации — pytest).
 
     `lang` — язык находок (личный путь `dfl` — язык прогона, #769; находки
     `selector_policy` — только enterprise, всегда русские).
@@ -1310,6 +1338,92 @@ def graph_findings(
                     )
                 )
     findings.extend(_orphan_verifies_findings(tasks, bindings, lang))
+    findings.extend(
+        _non_runner_target_findings(records, selector_policy or INFERRED_POLICY, lang)
+    )
+    if file_exists is not None:
+        findings.extend(
+            _unwritten_own_target_findings(tasks, records, file_exists, lang)
+        )
+    return findings
+
+
+_LINE_SUFFIX = re.compile(r":\d+$")
+
+
+def files_under(root: str | Path) -> Callable[[str], bool]:
+    """`file_exists` для `graph_findings`: путь от корня целевого репо —
+    обычный файл на диске (рабочее дерево на момент гейта)."""
+    base = Path(root)
+    return lambda rel: (base / rel).is_file()
+
+
+def _non_runner_target_findings(
+    records: dict[str, tuple[str | None, str | None, str | None]],
+    policy: SelectorPolicy,
+    lang: str,
+) -> list[str]:
+    """Исполняемая checked_by-цель — тест-файл раннера (devtools#833).
+
+    Не-manual цель уходит раннеру селектором (verify-first — в Verifies,
+    TDD — в RED); `.md`-документ pytest не соберёт (exit 4 =
+    INFRASTRUCTURE, три попытки впустую). Документ — `kind: manual`."""
+    findings: list[str] = []
+    for beh, (target, kind, _declared) in sorted(records.items()):
+        if target is None or kind == "manual":
+            continue
+        # `path:line` (ExUnit) — файл без номера строки
+        if not _LINE_SUFFIX.sub("", target).endswith(policy.test_suffixes):
+            findings.append(
+                _finding(
+                    lang,
+                    "{beh}: checked_by-цель {path} (kind: {kind}) — не тест-файл "
+                    "{runner} ({suffixes}): spec-runner её не соберёт. Укажите "
+                    "тест-файл раннера или kind: manual для документа",
+                    beh=beh,
+                    path=target,
+                    kind=kind,
+                    runner=policy.name,
+                    suffixes=", ".join(policy.test_suffixes),
+                )
+            )
+    return findings
+
+
+def _unwritten_own_target_findings(
+    tasks: list[DtTask],
+    records: dict[str, tuple[str | None, str | None, str | None]],
+    file_exists: Callable[[str], bool],
+    lang: str,
+) -> list[str]:
+    """verify-DT не владеет ещё не написанным тест-файлом (devtools#833).
+
+    verify-DT владеет checked_by-целями своих сценариев, и рендер ставит их
+    в `**Verifies:**` первыми. spec-runner в verify_first ПЕРВЫМ действием
+    прогоняет группу: файла нет — pytest exit 4, отказ INSTRUMENT, до
+    написания теста дело не доходит (живой прогон B, 8 из 16 задач). Тест
+    пишет задача type: implement (RED); verify наблюдает готовое. Файл, уже
+    лежащий в репо (brownfield), — законная цель."""
+    findings: list[str] = []
+    for t in tasks:
+        if t.type != "verify":
+            continue
+        for beh in t.scenarios:
+            target, kind, _declared = records.get(beh, (None, None, None))
+            if target is None or kind == "manual" or file_exists(target):
+                continue
+            findings.append(
+                _finding(
+                    lang,
+                    "{dt_id}: type: verify владеет тест-файлом {path} (checked_by "
+                    "{beh}), но в репо его ещё нет — verify-first прогоняет готовые "
+                    "тесты и файлов не пишет. Отдайте {beh} задаче type: implement "
+                    "(она напишет тест), а файл перечислите в verifies {dt_id}",
+                    dt_id=t.dt_id,
+                    path=target,
+                    beh=beh,
+                )
+            )
     return findings
 
 

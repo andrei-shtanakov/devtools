@@ -25,6 +25,7 @@ from governance import df_config, run_progress, run_resume
 from governance import manual_checks as mc
 from governance.author_launch import AuthorCall, config_mode, launch_author
 from governance.auto_tasks import RUN_BRANCH_PREFIX, TUI_HINT, notice
+from governance.decomposition_guard import files_under
 from governance.edge_check import override
 from governance.edge_check.check import run_check
 from governance.facts import Outcome as FactOutcome
@@ -312,7 +313,12 @@ def _decomposition_ready(ctx: _Ctx) -> bool:
     path = ctx.bundle / FILENAMES[kind]
     for round_no in range(1, MAX_ROUNDS + 2):
         text = path.read_text(encoding="utf-8")
-        problems = decomposition_problems(text, brief, lang=ctx.run.language)
+        problems = decomposition_problems(
+            text,
+            brief,
+            lang=ctx.run.language,
+            file_exists=files_under(ctx.run.target_dir),
+        )
         if not problems:
             return True
         if round_no > MAX_ROUNDS:
