@@ -125,12 +125,19 @@ def _cited(checks: str) -> set[str]:
     return {ref for m in _CRITERIA.finditer(checks) for ref in _REF.findall(m[1])}
 
 
-def decomposition_problems(text: str, brief: Brief, *, lang: str = "ru") -> list[str]:
+def decomposition_problems(
+    text: str,
+    brief: Brief,
+    *,
+    lang: str = "ru",
+    file_exists: Callable[[str], bool] | None = None,
+) -> list[str]:
     """Нарушения графа DT/BEH и критерии брифа, не покрытые ни одним BEH.
 
-    `lang` — язык собственных текстов (уходят автору в промпт правки)."""
+    `lang` — язык собственных текстов (уходят автору в промпт правки);
+    `file_exists` — проверка путей целевого репо (`graph_findings`)."""
     checks, whole = split_decomposition(text)
-    problems = list(graph_findings(checks, whole, lang=lang))
+    problems = list(graph_findings(checks, whole, lang=lang, file_exists=file_exists))
     cited = _cited(checks)
     for fn in brief.functions:
         for k in range(1, len(fn.criteria) + 1):

@@ -99,6 +99,24 @@ def test_decomposition_valid_sample() -> None:
     assert check.decomposition_problems(text, _brief(1, 1)) == []
 
 
+def test_decomposition_problems_pass_file_exists_to_guard(monkeypatch) -> None:
+    """devtools#833: личный путь сверяет собственные тест-файлы verify-DT с
+    целевым репо — `file_exists` доходит до гарда (находка уходит автору)."""
+    text = (FIXTURES / "30-decomposition.md").read_text(encoding="utf-8")
+    got: dict[str, object] = {}
+
+    def fake(checks: str, whole: str, **kwargs: object) -> list[str]:
+        got.update(kwargs)
+        return []
+
+    def exists(_path: str) -> bool:
+        return True
+
+    monkeypatch.setattr(check, "graph_findings", fake)
+    assert check.decomposition_problems(text, _brief(1, 1), file_exists=exists) == []
+    assert got["file_exists"] is exists
+
+
 def test_orphan_verifies_is_decomposition_problem() -> None:
     """#767: файл в `verifies`, который не создаёт ни одна задача, — ошибка
     графа и на личном пути (раздел «## Проверки» в роли текста поведения)."""
