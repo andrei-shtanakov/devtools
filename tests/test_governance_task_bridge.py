@@ -2768,6 +2768,94 @@ def test_verify_dt_excludes_manual_checked_by_targets_from_declared_group() -> N
     assert "docs/manual.md (kind: manual)" in text
 
 
+_RUN_C_MANUAL_BEH = (
+    "#### BEH-01: Автотест\n`traces: [FR-01]`\n"
+    "**checked_by** `kind: pytest` `target: tests/test_cli.py::test_check`\n\n"
+    "#### BEH-29: Приёмка пользователем\n`traces: [NFR-10]`\n"
+    "**checked_by** `kind: manual` `target: docs/acceptance/manual-acceptance.md`\n\n"
+    "#### BEH-30: Читаемость вывода\n`traces: [NFR-12]`\n"
+    "**checked_by** `kind: manual` "
+    "`target: docs/acceptance/manual-output-readability.md`\n"
+)
+
+
+def _render_run_c(scenarios_line: str, lang: str = "ru") -> str:
+    dt = (
+        "#### DT-12: Чеклисты · type: implement · owner: dev\n"
+        f"scenarios: [{scenarios_line}]\ndepends_on: []\n"
+        "parallel_group: solo\n"
+    )
+    dt_tasks, findings = decomposition_guard.parse_dt_tasks(dt)
+    assert findings == []
+    return task_bridge.render_tasks_dt(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="b/30-decomposition.md",
+        scenarios=task_bridge.parse_behaviour(_RUN_C_MANUAL_BEH),
+        dt_tasks=dt_tasks,
+        generated_at="2026-11-26T12:00:00",
+        anchor_blob="ab" * 20,
+        lang=lang,
+    )
+
+
+def _check_items(text: str) -> list[str]:
+    return [
+        line
+        for line in text.splitlines()
+        if line.startswith(("- [ ] проверка группы", "- [ ] ручная проверка"))
+        or line.startswith(("- [ ] group check", "- [ ] manual check"))
+    ]
+
+
+def test_manual_only_dt_does_not_require_green_documents() -> None:
+    """devtools#840, прогон C TASK-012: у DT только manual-сценарии. Пункт
+    «…(kind: manual) зелёные» агент закрыть не может — зеленеет ручная
+    проверка подписью человека. Пункт требует написать документ, а
+    прохождение отдаёт ручным проверкам конца прогона."""
+    [item] = _check_items(_render_run_c("BEH-29, BEH-30"))
+    assert "зелён" not in item
+    assert "docs/acceptance/manual-acceptance.md (kind: manual)" in item
+    assert "docs/acceptance/manual-output-readability.md (kind: manual)" in item
+    assert "BEH-29, BEH-30" in item
+    assert "человек" in item
+
+
+def test_mixed_group_keeps_executable_green_and_manual_written() -> None:
+    """Смешанная группа: исполняемая цель — «зелёные», manual — отдельно."""
+    items = _check_items(_render_run_c("BEH-01, BEH-29"))
+    assert len(items) == 2
+    assert items[0] == (
+        "- [ ] проверка группы: tests/test_cli.py::test_check (kind: pytest) "
+        "зелёные на BEH-01"
+    )
+    assert "docs/acceptance/manual-acceptance.md (kind: manual)" in items[1]
+    assert "зелён" not in items[1] and "BEH-01" not in items[1]
+
+
+def test_manual_only_dt_in_english() -> None:
+    [item] = _check_items(_render_run_c("BEH-29, BEH-30", lang="en"))
+    assert item.startswith("- [ ] manual check: ")
+    assert "green" not in item and "a human" in item
+
+
+def test_legacy_render_manual_group_does_not_require_green() -> None:
+    """Легаси-рендер (без декомпозиции) — тот же класс, тот же пункт."""
+    text = task_bridge.render_tasks(
+        ws_id="WS-x-1",
+        subject="s",
+        bundle_path="b/15-behaviour-spec.md",
+        scenarios=task_bridge.parse_behaviour(
+            "#### BEH-04: Документация\n`traces: [FR-04]`\n"
+            "**checked_by** `kind: manual` `target: docs/usage.md`\n"
+        ),
+        generated_at="2026-11-26T12:00:00",
+        design_blob="ab" * 20,
+    )
+    [item] = _check_items(text)
+    assert "docs/usage.md (kind: manual)" in item and "зелён" not in item
+
+
 def test_verify_dt_without_checked_by_targets_refuses() -> None:
     """Minor ревью PR #152: verify-DT, чьи сценарии не дают ни одной
     checked_by-цели, — отказ (нечего прогонять), не молчаливый Mode без

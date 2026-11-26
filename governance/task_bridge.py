@@ -273,6 +273,42 @@ def _merge_featureless_by_target_file(
     return merged
 
 
+def _check_items(group: list[Scenario], texts: dict[str, str]) -> list[str]:
+    """Пункты условия готовности группы (devtools#840).
+
+    Исполняемые checked_by-цели — «зелёные на …»: их прогоняет раннер.
+    Цели `kind: manual` — отдельным пунктом «документ написан»: ручная
+    проверка зеленеет только подписью человека в ручных проверках конца
+    прогона (devtools#771), и агент задачу с «manual … зелёные» закрыть не
+    может (прогон C, TASK-012 → TASK_BLOCKED). Пары target+kind, не голые
+    targets (приёмка PR #100, major): исполнитель обязан знать вид проверки.
+    """
+    parts: dict[bool, tuple[list[str], list[str]]] = {
+        False: ([], []),
+        True: ([], []),
+    }
+    for g in group:
+        if not g.checked_target:
+            continue
+        bindings, behs = parts[g.checked_kind == "manual"]
+        pair = f"{g.checked_target} (kind: {g.checked_kind})"
+        if pair not in bindings:
+            bindings.append(pair)
+        if g.beh_id not in behs:
+            behs.append(g.beh_id)
+    items = [
+        texts[key].format(bindings=", ".join(bindings), behs=", ".join(behs))
+        for key, (bindings, behs) in (
+            ("check_bound", parts[False]),
+            ("check_manual", parts[True]),
+        )
+        if bindings
+    ]
+    return items or [
+        texts["check_unbound"].format(behs=", ".join(g.beh_id for g in group))
+    ]
+
+
 #: Человеческие строки `render_tasks_dt` по языку (devtools#769): шаблон
 #: выбирается ДО `.format()`, артефакт рендерится сразу на нужном языке.
 #: Машинная грамматика (`### TASK-NNN:`, `P2 | TODO   Est:`, `Source:`,
@@ -292,6 +328,11 @@ _TEXTS: dict[str, dict[str, str]] = {
         "acceptance_title": "## Критерии приёмки (уровень acceptance)",
         "check_bound": "проверка группы: {bindings} зелёные на {behs}",
         "check_unbound": "проверка группы {behs} определена и зелёная",
+        "check_manual": (
+            "ручная проверка: {bindings} — документ с шагами для {behs} "
+            "написан; проходит и подписывает его человек в ручных проверках "
+            "в конце прогона, в этой задаче — не нужно"
+        ),
         "describe_implement": "Реализовать сценарии {behs} ({dt_id}, группа {group}).",
         "describe_verify": "Проверить сценарии {behs} ({dt_id}, группа {group}).",
         "item_implement": "реализовать",
@@ -320,6 +361,11 @@ _TEXTS: dict[str, dict[str, str]] = {
         "acceptance_title": "## Acceptance criteria (acceptance level)",
         "check_bound": "group check: {bindings} green on {behs}",
         "check_unbound": "group check {behs} defined and green",
+        "check_manual": (
+            "manual check: {bindings} — a document with steps for {behs} "
+            "is written; a human runs and signs it in the manual checks at "
+            "the end of the run, not in this task"
+        ),
         "describe_implement": "Implement scenarios {behs} ({dt_id}, group {group}).",
         "describe_verify": "Verify scenarios {behs} ({dt_id}, group {group}).",
         "item_implement": "implement",
@@ -564,17 +610,7 @@ def render_tasks(
         # Пары target+kind, не голые targets (приёмка PR #100, major):
         # checked_by-биндинг несёт ОБЕ части — исполнитель обязан знать вид
         # проверки (integration/e2e/...), не только файл.
-        bindings: list[str] = []
-        for g in group:
-            if g.checked_target:
-                pair = f"{g.checked_target} (kind: {g.checked_kind})"
-                if pair not in bindings:
-                    bindings.append(pair)
-        check = (
-            f"проверка группы: {', '.join(bindings)} зелёные на {', '.join(beh_ids)}"
-            if bindings
-            else f"проверка группы {', '.join(beh_ids)} определена и зелёная"
-        )
+        checks = _check_items(group, _TEXTS["ru"])
         lines += [
             f"### TASK-{index:03d}: {title}",
             "P2 | TODO   Est: 0.5d",
@@ -590,7 +626,7 @@ def render_tasks(
         lines += ["", "**Checklist:**"]
         lines += [f"- [ ] реализовать {g.beh_id}: {g.title}" for g in group]
         lines += [
-            f"- [ ] {check}",
+            *(f"- [ ] {check}" for check in checks),
             "",
             # Каждая ссылка в СВОИХ скобках (spec/FORMAT.md spec-runner:
             # `[FR-02], [FR-03]`) — парсер task.py требует `]` сразу после
@@ -908,19 +944,7 @@ def render_tasks_dt(
     for t in dt_tasks:
         group = [by_beh[b] for b in t.scenarios if b in by_beh]
         beh_ids = [g.beh_id for g in group]
-        bindings: list[str] = []
-        for g in group:
-            if g.checked_target:
-                pair = f"{g.checked_target} (kind: {g.checked_kind})"
-                if pair not in bindings:
-                    bindings.append(pair)
-        check = (
-            texts["check_bound"].format(
-                bindings=", ".join(bindings), behs=", ".join(beh_ids)
-            )
-            if bindings
-            else texts["check_unbound"].format(behs=", ".join(beh_ids))
-        )
+        checks = _check_items(group, texts)
         idx = number[t.dt_id]
         task_start = len(lines)
         describe = (
@@ -1178,7 +1202,7 @@ def render_tasks_dt(
         for g in group:
             traces += [x for x in g.traces if x not in traces]
         lines += [
-            f"- [ ] {check}",
+            *(f"- [ ] {check}" for check in checks),
             "",
             # Каждая ссылка в СВОИХ скобках (spec/FORMAT.md spec-runner:
             # `[FR-02], [FR-03]`) — парсер task.py требует `]` сразу после
